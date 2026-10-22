@@ -6,15 +6,17 @@ set -Eeuo pipefail
 MODE='--check'
 UPDATE=0
 AUTOKOM_VERBOSE="${AUTOKOM_VERBOSE:-0}"
+AUTOKOM_LIVE="${AUTOKOM_LIVE:-1}"
 for argument in "$@"; do
     case "$argument" in
         --check|--apply) MODE="$argument" ;;
         --update) UPDATE=1 ;;
         --verbose) AUTOKOM_VERBOSE=1 ;;
-        *) printf 'Usage: install.sh [--check|--apply] [--update] [--verbose]\n' >&2; exit 2 ;;
+        --no-live) AUTOKOM_LIVE=0 ;;
+        *) printf 'Usage: install.sh [--check|--apply] [--update] [--verbose] [--no-live]\n' >&2; exit 2 ;;
     esac
 done
-export AUTOKOM_VERBOSE
+export AUTOKOM_VERBOSE AUTOKOM_LIVE
 
 (( EUID == 0 )) || { printf 'AUTOKOM doit être lancé avec sudo.\n' >&2; exit 1; }
 [[ -r /etc/os-release ]] || { printf 'Système non reconnu.\n' >&2; exit 1; }
