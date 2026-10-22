@@ -1,0 +1,89 @@
+---
+- name: Installer outils de diagnostic de securite (APT)
+  ansible.builtin.apt:
+    name:
+      - nikto
+      - nmap
+      - lynis
+    state: present
+    install_recommends: false
+  register: autokom_security_apt
+  ignore_errors: true  # depot universe absent: autres outils restent installables
+
+- name: Signaler un paquet de securite indisponible
+  ansible.builtin.debug:
+    msg: "Certains outils APT (nikto/nmap/lynis) sont indisponibles. Verifier les depots Ubuntu avant reexecution."
+  when: autokom_security_apt is failed
+
+- name: Creer le repertoire des cles APT
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Installer cle publique Trivy (HTTPS)
+  ansible.builtin.get_url:
+    url: https://aquasecurity.github.io/trivy-repo/deb/public.key
+    dest: /etc/apt/keyrings/autokom-trivy.asc
+    owner: root
+    group: root
+    mode: '0644'
+  register: trivy_key
+
+- name: Creer depot officiel Trivy avec signed-by
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/autokom-trivy.list
+    content: "deb [signed-by=/etc/apt/keyrings/autokom-trivy.asc] https://aquasecurity.github.io/trivy-repo/deb generic main\n"
+    owner: root
+    group: root
+    mode: '0644'
+  register: trivy_repo
+
+- name: Installer Trivy
+  ansible.builtin.apt:
+    name: trivy
+    state: present
+    update_cache: true
+  when: not ansible_check_mode
+
+- name: Creer repertoire d'outils Autokom
+  ansible.builtin.file:
+    path: "{{ autokom_tools_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Creer environnement virtuel Semgrep
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -m
+      - venv
+      - "{{ autokom_tools_dir }}/semgrep"
+    creates: "{{ autokom_tools_dir }}/semgrep/bin/python"
+  when: not ansible_check_mode
+
+- name: Installer Semgrep dans son environnement isole
+  ansible.builtin.command:
+    argv:
+      - "{{ autokom_tools_dir }}/semgrep/bin/python"
+      - -m
+      - pip
+      - install
+      - --disable-pip-version-check
+      - semgrep
+    creates: "{{ autokom_tools_dir }}/semgrep/bin/semgrep"
+  when: not ansible_check_mode
+
+- name: Verifier si une commande Semgrep existe deja
+  ansible.builtin.stat:
+    path: /usr/local/bin/semgrep
+  register: autokom_semgrep_link
+
+- name: Exposer Semgrep sans ecraser un binaire existant
+  ansible.builtin.file:
+    src: "{{ autokom_tools_dir }}/semgrep/bin/semgrep"
+    dest: /usr/local/bin/semgrep
+    state: link
+  when:
+    - not ansible_check_mode
+    - not autokom_semgrep_link.stat.exists

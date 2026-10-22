@@ -1,0 +1,11 @@
+*.log
+.env
+.env.*
+!.env.example
+__pycache__/
+.ansible/
+.terraform/
+*.tfstate*
+*.pem
+*.key
+secrets/

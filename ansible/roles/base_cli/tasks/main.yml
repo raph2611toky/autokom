@@ -1,0 +1,33 @@
+---
+- name: Installer utilitaires systeme, reseau, proxy et TLS
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+    state: present
+    install_recommends: false
+    name:
+      - ca-certificates
+      - curl
+      - wget
+      - git
+      - gnupg
+      - jq
+      - openssl
+      - dnsutils
+      - iproute2
+      - iputils-ping
+      - net-tools
+      - netcat-openbsd
+      - lsof
+      - unzip
+      - zip
+      - rsync
+      - tar
+      - python3
+      - python3-pip
+      - python3-venv
+      - python3-apt
+      - nginx
+      - certbot
+      - python3-certbot-nginx
+      - shellcheck
