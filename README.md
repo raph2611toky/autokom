@@ -2,6 +2,11 @@
 
 Plateforme DevSecOps autonome, installee de facon reproductible sur serveur Linux.
 
+pour l'installation:
+```bash
+curl -fsSL https://raw.githubusercontent.com/raph2611toky/autokom/main/install.sh | sudo bash -s -- --apply
+```
+
 ## Phase 1 — Foundation
 
 - `scripts/bootstrap/00-preflight.sh` : inspection non destructive
