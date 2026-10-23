@@ -1,60 +1,103 @@
 #!/usr/bin/env python3
-"""Single-key terminal menu. Uses /dev/tty so it works with curl | bash."""
+"""AUTOKOM terminal menus: /dev/tty, not stdin (curl | bash safe).
+
+All input/output uses os.read/os.write on the same unbuffered fd.
+Never open /dev/tty as 'r+' text: switching buffered read/write may seek on a TTY.
+"""
 import os
+import select
 import sys
 import termios
 import tty
 
+TTY = '/dev/tty'
+
+
+def _tty():
+    try:
+        return os.open(TTY, os.O_RDWR | os.O_NOCTTY)
+    except OSError as exc:
+        raise RuntimeError('Terminal interactif inaccessible : utiliser --non-interactive') from exc
+
+
+def _send(fd: int, message: str) -> None:
+    data = message.encode('utf-8')
+    while data:
+        written = os.write(fd, data)
+        if written <= 0:
+            raise RuntimeError('Écriture terminal impossible')
+        data = data[written:]
+
 
 def pick(title: str, choices: list[str], default: int = 1) -> int:
     if not choices or len(choices) > 9:
-        raise ValueError('AUTOKOM supports 1 to 9 choices')
-    if not os.path.exists('/dev/tty'):
-        raise RuntimeError('Interactive terminal unavailable; use explicit --db/--bind options')
-    fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
-    old = termios.tcgetattr(fd)
+        raise ValueError('AUTOKOM : 1 à 9 options prises en charge')
+    if not 1 <= default <= len(choices):
+        raise ValueError('Option par défaut hors limites')
+    fd = _tty()
+    original = termios.tcgetattr(fd)
     choice = default - 1
-    out = lambda value: os.write(fd, value.encode('utf-8'))
     try:
-        out('\033[?25l')
+        _send(fd, '\033[?25l')
         tty.setraw(fd)
-        out(f'\r\n\033[1;36m{title}\033[0m\r\n')
+        _send(fd, f'\r\n\033[1;36m{title}\033[0m\r\n')
         while True:
             for i, option in enumerate(choices):
                 cursor = '\033[1;32m❯\033[0m' if i == choice else ' '
-                out(f'\033[2K\r  {cursor}  {i+1}. {option}\r\n')
-            out('\033[2K\r  \033[2m↑/↓ · Entrée · touche 1–{0} · q pour annuler\033[0m'.format(len(choices)))
-            c = os.read(fd, 1)
-            if c in (b'\r', b'\n'):
-                out('\r\033[2K\033[1;32m  ✓ ' + choices[choice] + '\033[0m\r\n')
+                _send(fd, f'\033[2K\r  {cursor}  {i+1}. {option}\r\n')
+            _send(fd, f'\033[2K\r  \033[2m↑/↓ · Entrée · 1–{len(choices)} · q pour annuler\033[0m')
+            key = os.read(fd, 1)
+            if not key:
+                raise RuntimeError('Terminal fermé')
+            if key in (b'\r', b'\n'):
+                _send(fd, f'\r\033[2K\033[1;32m  ✓ {choices[choice]}\033[0m\r\n')
                 return choice + 1
-            if c == b'\x03' or c.lower() == b'q':
+            if key in (b'\x03', b'q', b'Q'):
                 raise KeyboardInterrupt
-            if c == b'\x1b':
-                seq = os.read(fd, 1) + os.read(fd, 1)
-                if seq == b'[A':
-                    choice = (choice - 1) % len(choices)
-                elif seq == b'[B':
-                    choice = (choice + 1) % len(choices)
-            elif c.decode('ascii', errors='ignore') in '123456789':
-                idx = int(c) - 1
-                if idx < len(choices):
-                    choice = idx
-                    out('\r\033[2K\033[1;32m  ✓ ' + choices[choice] + '\033[0m\r\n')
+            if key == b'\x1b':
+                # Arrow keys ESC [ A/B, avoid blocking forever on isolated ESC.
+                ready, _, _ = select.select([fd], [], [], 0.2)
+                if ready and os.read(fd, 1) == b'[':
+                    ready, _, _ = select.select([fd], [], [], 0.2)
+                    if ready:
+                        arrow = os.read(fd, 1)
+                        if arrow == b'A':
+                            choice = (choice - 1) % len(choices)
+                        elif arrow == b'B':
+                            choice = (choice + 1) % len(choices)
+            elif key in (b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9'):
+                index = int(key) - 1
+                if index < len(choices):
+                    choice = index
+                    _send(fd, f'\r\033[2K\033[1;32m  ✓ {choices[choice]}\033[0m\r\n')
                     return choice + 1
-            out(f'\033[{len(choices)}A')
+            _send(fd, f'\033[{len(choices)}A')
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        out('\033[?25h')
+        termios.tcsetattr(fd, termios.TCSADRAIN, original)
+        try:
+            _send(fd, '\033[?25h')
+        finally:
+            os.close(fd)
+
+
+def ask(prompt: str, default: str = '', max_bytes: int = 4096) -> str:
+    """Read one line via /dev/tty without buffered r+ or seeking."""
+    fd = _tty()
+    try:
+        _send(fd, f'  {prompt}' + (f' [{default}]' if default else '') + ': ')
+        buffer = bytearray()
+        while True:
+            chunk = os.read(fd, 1)
+            if not chunk:
+                raise RuntimeError('Terminal fermé pendant la saisie')
+            if chunk in (b'\n', b'\r'):
+                break
+            buffer.extend(chunk)
+            if len(buffer) > max_bytes:
+                raise ValueError('Réponse trop longue')
+        return buffer.decode('utf-8').strip() or default
+    finally:
         os.close(fd)
-
-
-def ask(prompt: str, default: str = '') -> str:
-    with open('/dev/tty', 'r+', encoding='utf-8', buffering=1) as terminal:
-        terminal.write(f'  {prompt}' + (f' [{default}]' if default else '') + ': ')
-        terminal.flush()
-        value = terminal.readline().strip()
-        return value or default
 
 
 if __name__ == '__main__':

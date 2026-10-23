@@ -91,7 +91,9 @@ def check_user_input(options):
     if options.db in ('postgresql', 'mysql') and options.bind in ('private', 'all') and not options.allow and options.bind != 'all':
         raise ValueError('Au moins un réseau CIDR autorisé est requis')
     if options.bind == 'all' and not options.unsafe_all:
-        raise ValueError('L’écoute globale nécessite --unsafe-all et une confirmation de sécurité')
+        raise ValueError('L’écoute 0.0.0.0 nécessite --unsafe-all ou confirmation OUVRIR')
+    if any(c in ('0.0.0.0/0', '::/0') for c in options.allow) and not options.allow_public_clients:
+        raise ValueError('Autoriser des clients de partout exige --allow-public-clients et confirmation distincte')
     if options.tls == 'provided' and (not options.cert or not options.key):
         raise ValueError('Certificat et clé privée obligatoires pour --tls provided')
     if options.tls == 'certbot' and options.domain and not options.email:
@@ -109,13 +111,18 @@ def interactive(options):
         option = pick('Base de données', ['PostgreSQL (recommandé)', 'MySQL', 'Oracle Database Free (Docker, serveur puissant)', 'Aucune'])
         options.db = ['postgresql', 'mysql', 'oracle', 'none'][option-1]
     if options.db != 'none' and options.bind is None:
-        selected = pick('Écoute réseau de la base', ['Locale uniquement (recommandé)', 'Réseau privé / IP autorisées', 'Toutes interfaces (risqué)'])
+        selected = pick('Écoute réseau de la base', ['Locale : 127.0.0.1', 'Toutes interfaces + CIDR clients obligatoires', 'Toutes interfaces IPv4 : 0.0.0.0'])
         options.bind = ['local','private','all'][selected-1]
     if options.bind in ('private','all') and options.db != 'none' and not options.allow:
-        options.allow = ask('Réseaux clients autorisés (CIDR séparés par virgules, ex: 10.0.0.0/24)', '0.0.0.0/0' if options.bind == 'all' else '')
+        options.allow = ask('CIDR clients supplémentaires, ex. 172.18.0.0/16 (vide = localhost seulement)', '')
+        if any(c in ('0.0.0.0/0', '::/0') for c in cidrs(options.allow)):
+            options.allow_public_clients = ask('Accès clients universel : saisir ACCES-PUBLIC') == 'ACCES-PUBLIC'
     if options.bind == 'all':
-        confirm = ask('ATTENTION : accès réseau large, saisir OUVRIR pour confirmer')
+        confirm = ask('Écoute IPv4 0.0.0.0 (pas autorisation des clients), saisir OUVRIR')
         options.unsafe_all = confirm == 'OUVRIR'
+    if options.db in ('mysql', 'postgresql') and not options.create_app_db:
+        selected = pick('Créer une base et un utilisateur applicatif AUTOKOM ?', ['Non, conserver les bases existantes', 'Oui, créer autokom_apps / autokom_app'])
+        options.create_app_db = selected == 2
     if options.docker_access is None:
         selected = pick('Autoriser Jenkins à contrôler le démon Docker ?', ['Non (isolation maximale)', 'Oui (jenkins devient root-équivalent)'])
         options.docker_access = (selected == 2)
@@ -169,7 +176,36 @@ def preflight(options):
         if existing.exists() and MANAGED not in existing.resolve().read_text(errors='ignore'):
             say('VirtualHost existant détecté : AUTOKOM le conservera intact.', '!')
     say(f'Jenkins : présent={shutil.which("jenkins") is not None} ; domaine={options.domain or "aucun"}')
-    say(f'Base : {options.db} ; bind={options.bind} ; autorisations={", ".join(options.allow) or "localhost"}')
+    say(f'Base : {options.db} ; bind demandé={mysql_requested_address(options) if options.db == "mysql" else options.bind} ; CIDR supplémentaires={", ".join(options.allow) or "aucun"}')
+    say('Création de base applicative : ' + ('oui' if options.create_app_db else 'non (conserver l’existant)'))
+    if options.db == 'mysql':
+        live = mysql_live_bind() if shutil.which('mysql') else None
+        if live is None:
+            say('MySQL absent ou accès root via socket indisponible : état à confirmer après installation', '!')
+        else:
+            status = 'CONFORME' if mysql_bind_equivalent(live, mysql_requested_address(options)) else 'CHANGEMENT REQUIS'
+            say(f'MySQL existant : @@GLOBAL.bind_address={live} -> {status}', '✓' if status == 'CONFORME' else '!')
+            listeners = mysql_listener_status()
+            say('MySQL listeners : ' + (', '.join(listeners) if listeners else 'aucun port TCP 3306 détecté'), '✓' if listeners else '!')
+            if not listeners:
+                say('MySQL répond au socket local mais ne semble pas écouter en TCP sur 3306', '!')
+            broad = run(['mysql', '--protocol=socket', '-uroot', '-Nse',
+                         "SELECT COUNT(*) FROM mysql.user WHERE Host='%'"], check=False)
+            if broad.returncode == 0 and broad.stdout.strip().isdigit() and int(broad.stdout.strip()) > 0:
+                say(f'MySQL : {broad.stdout.strip()} compte(s) avec Host=% déjà présents (inchangés)', '!')
+            mysqlx = run(['mysql', '--protocol=socket', '-uroot', '-Nse',
+                          "SHOW VARIABLES LIKE 'mysqlx_bind_address'"], check=False)
+            if mysqlx.returncode == 0 and mysqlx.stdout.strip():
+                say('MySQL X Plugin : ' + mysqlx.stdout.strip().replace('\t', '=') + ' (écoute indépendante à contrôler)')
+    if options.db == 'postgresql' and shutil.which('psql'):
+        result = run(['runuser', '-u', 'postgres', '--', 'psql', '-Atqc',
+                      'SHOW listen_addresses'], check=False)
+        if result.returncode == 0:
+            say('PostgreSQL existant : listen_addresses=' + result.stdout.strip())
+    if shutil.which('jenkins'):
+        listeners = run(['ss', '-ltn'], check=False).stdout
+        exposed = any(re.search(r'(?:0\.0\.0\.0|\*|\[::\]):8080\s', x) for x in listeners.splitlines())
+        say(f'Jenkins existant : port 8080 {"sur toutes interfaces" if exposed else "à vérifier / local"}', '!' if exposed else '✓')
     if options.bind != 'local':
         say('Les Security Groups AWS/GCP et les pare-feu doivent aussi limiter les clients ; ne sont pas modifiés automatiquement.', '!')
 
@@ -209,96 +245,228 @@ def write_secret(name):
 
 
 def postgres_config(options):
+    """Existing cluster: detect actual listener and avoid unnecessary restart."""
     base = Path('/etc/postgresql')
-    versions = sorted([d for d in base.glob('*/main') if d.is_dir()], key=lambda p: [int(z) for z in p.parent.name.split('.')], reverse=True)
-    if not versions:
-        fail('PostgreSQL installé, mais aucun cluster main détecté')
-    cfg = versions[0]
+    clusters = sorted((d for d in base.glob('*/main') if d.is_dir()),
+                      key=lambda d: tuple(int(n) for n in d.parent.name.split('.')), reverse=True)
+    if not clusters:
+        fail('Aucun cluster PostgreSQL main détecté : ne rien modifier')
+    cfg = clusters[0]
+    version = cfg.parent.name
     main_conf = cfg / 'postgresql.conf'
     hba = cfg / 'pg_hba.conf'
-    listen = '127.0.0.1' if options.bind == 'local' else '0.0.0.0'
-    # Preserve other settings, override only the selected parameter.
-    current = main_conf.read_text()
-    changed = re.sub(r'^[ \t]*#?[ \t]*listen_addresses[ \t]*=.*$', f"listen_addresses = '{listen}'  {MANAGED}", current, flags=re.M)
-    if changed == current and 'listen_addresses' not in current:
-        changed += f"\nlisten_addresses = '{listen}'  {MANAGED}\n"
-    if changed != current:
-        backup(main_conf)
-        atomic_write(main_conf, changed)
+    if not main_conf.is_file() or not hba.is_file():
+        fail('Configuration PostgreSQL incomplète ; opération annulée')
+
+    # Refuse collisions before changing configuration.
+    role_exists = run(['runuser', '-u', 'postgres', '--', 'psql', '-Atqc',
+                       "SELECT 1 FROM pg_roles WHERE rolname='autokom_app'"]).stdout.strip()
+    if options.create_app_db and role_exists and not (SECRETS / 'postgresql-autokom-app.password').is_file():
+        fail('autokom_app existe sans secret géré : compte et configuration préservés')
+
+    requested = '127.0.0.1' if options.bind == 'local' else '0.0.0.0'
+    observed = run(['runuser', '-u', 'postgres', '--', 'psql', '-Atqc',
+                    'SHOW listen_addresses']).stdout.strip()
+    accepted = (observed == requested or (requested == '127.0.0.1' and observed in ('localhost', '127.0.0.1,::1')))
+    if accepted:
+        say(f'PostgreSQL déjà conforme : listen_addresses={observed}, aucun redémarrage', '✓')
+    else:
+        say(f'PostgreSQL : écoute actuelle={observed} ; demandée={requested}', '!')
+        require_restart_approval(f'postgresql@{version}-main', options)
+        content = main_conf.read_text()
+        # Avoid overriding a possibly complex configuration with multiple active assignments.
+        replacements = list(re.finditer(r'^[ \t]*listen_addresses[ \t]*=', content, flags=re.M))
+        if len(replacements) > 1:
+            fail('PostgreSQL : plusieurs listen_addresses actifs, intervention manuelle nécessaire')
+        pattern = r'^[ \t]*#?[ \t]*listen_addresses[ \t]*=.*$'
+        update = f"listen_addresses = '{requested}'  {MANAGED}"
+        found = list(re.finditer(pattern, content, flags=re.M))
+        if found:
+            # Replace the final active line or final commented line, preserving unrelated settings.
+            selected = next((m for m in reversed(found) if not m.group().lstrip().startswith('#')), found[-1])
+            new_conf = content[:selected.start()] + update + content[selected.end():]
+        else:
+            new_conf = content.rstrip() + '\n' + update + '\n'
+        previous = content
+        if new_conf != previous:
+            backup(main_conf)
+            atomic_write(main_conf, new_conf)
+        try:
+            run(['pg_ctlcluster', version, 'main', 'restart'])
+            actual = run(['runuser', '-u', 'postgres', '--', 'psql', '-Atqc',
+                          'SHOW listen_addresses']).stdout.strip()
+            if actual != requested and not (requested == '127.0.0.1' and actual in ('localhost', '127.0.0.1,::1')):
+                fail(f'PostgreSQL : écoute après redémarrage incorrecte ({actual})')
+        except Exception:
+            atomic_write(main_conf, previous)
+            run(['pg_ctlcluster', version, 'main', 'restart'], check=False)
+            raise
+        say(f'PostgreSQL : listen_addresses={requested}, rechargement contrôlé', '✓')
+
+    if not options.create_app_db:
+        say('PostgreSQL : bases et utilisateurs existants conservés', '✓')
+        return
+
     start = '# BEGIN AUTOKOM ACCESS'
     end = '# END AUTOKOM ACCESS'
-    networks = ['127.0.0.1/32', '::1/128']
-    networks.extend(options.allow)
-    lines = [start, '# Only AUTOKOM-managed application account; no global trust']
-    lines.extend(f'host autokom_apps autokom_app {net} scram-sha-256' for net in sorted(set(networks)))
-    lines.extend(['host all autokom_app 0.0.0.0/0 reject', 'host all autokom_app ::/0 reject', end])
-    hba_text = hba.read_text()
-    hba_text = re.sub(re.escape(start) + r'.*?' + re.escape(end) + r'\n?', '', hba_text, flags=re.S)
-    hba_next = '\n'.join(lines) + '\n' + hba_text
-    if hba_next != hba.read_text():
+    networks = sorted(set(['127.0.0.1/32', '::1/128'] + options.allow))
+    lines = [start, '# Autokom app only; autres rôles inchangés']
+    lines.extend(f'host autokom_apps autokom_app {net} scram-sha-256' for net in networks)
+    lines.extend(['host all autokom_app 0.0.0.0/0 reject',
+                  'host all autokom_app ::/0 reject', end])
+    existing_hba = hba.read_text()
+    remaining = re.sub(re.escape(start) + r'.*?' + re.escape(end) + r'\n?', '',
+                       existing_hba, flags=re.S)
+    desired_hba = '\n'.join(lines) + '\n' + remaining
+    if desired_hba != existing_hba:
         backup(hba)
-        atomic_write(hba, hba_next)
-    # Create account via local peer authentication; avoid passwords in argv or logs.
-    role_exists = run(['runuser', '-u', 'postgres', '--', 'psql', '-Atqc', "SELECT 1 FROM pg_roles WHERE rolname='autokom_app'" ]).stdout.strip()
-    if role_exists and not (SECRETS / 'postgresql-autokom-app.password').exists():
-        fail('Compte autokom_app existant mais secret non géré : ne pas écraser le compte')
+        atomic_write(hba, desired_hba)
+        run(['pg_ctlcluster', version, 'main', 'reload'])
+
     if not role_exists:
         password = write_secret('postgresql-autokom-app.password')
-        run(['runuser','-u','postgres','--','psql','-v','ON_ERROR_STOP=1'], input_text=f"CREATE ROLE autokom_app LOGIN PASSWORD '{password}';\n")
-    db_exists = run(['runuser', '-u', 'postgres', '--', 'psql', '-Atqc', "SELECT 1 FROM pg_database WHERE datname='autokom_apps'" ]).stdout.strip()
-    if not db_exists:
+        # Password generated server-side; never echoed or logged.
+        run(['runuser', '-u', 'postgres', '--', 'psql', '-v', 'ON_ERROR_STOP=1'],
+            input_text=f"CREATE ROLE autokom_app LOGIN PASSWORD '{password}';\n")
+    exists = run(['runuser', '-u', 'postgres', '--', 'psql', '-Atqc',
+                  "SELECT 1 FROM pg_database WHERE datname='autokom_apps'"]).stdout.strip()
+    if not exists:
         run(['runuser', '-u', 'postgres', '--', 'createdb', '-O', 'autokom_app', 'autokom_apps'])
-    run(['runuser','-u','postgres','--','psql','-Atqc', 'SELECT pg_reload_conf()'])
-    # listen_addresses requires restart, only on change.
-    if listen not in run(['runuser','-u','postgres','--','psql','-Atqc','SHOW listen_addresses']).stdout.strip():
-        run(['systemctl', 'restart', 'postgresql'])
-    say('PostgreSQL : compte applicatif, base et accès clients configurés', '✓')
-    say('Secret : /etc/autokom/secrets/postgresql-autokom-app.password (root uniquement)')
+    say(f'PostgreSQL : cluster {version}/main, rôle et accès applicatifs vérifiés', '✓')
+
+def mysql_requested_address(options):
+    return '127.0.0.1' if options.bind == 'local' else '0.0.0.0'
 
 
-def mysql_config(options):
-    conf = Path('/etc/mysql/mysql.conf.d/90-autokom.cnf')
-    listen = '127.0.0.1' if options.bind == 'local' else '0.0.0.0'
-    # UNIX socket auth for root is expected on Ubuntu packages; don't erase user root password.
-    if run(['mysql','--protocol=socket','-uroot','-Nse','SELECT 1'], check=False).returncode:
-        fail('MySQL root socket authentication unavailable : fournir les identifiants administrateur manuellement')
-    if conf.exists():
-        backup(conf)
-    changed = atomic_write(conf, f'{MANAGED}\n[mysqld]\nbind-address = {listen}\n', 0o644)
-    if changed:
-        run(['systemctl', 'restart', 'mysql'])
-    existing = run(['mysql', '--protocol=socket', '-uroot', '-Nse', "SELECT COUNT(*) FROM mysql.user WHERE user='autokom_app'"]).stdout.strip()
-    if int(existing or '0') > 0 and not (SECRETS / 'mysql-autokom-app.password').exists():
-        fail('Un utilisateur autokom_app existe mais son secret AUTOKOM est absent : opération refusée')
-    password = write_secret('mysql-autokom-app.password')
-    hosts = ['localhost']
+def mysql_bind_equivalent(observed, requested):
+    """Exact effective bind: * is broader than 0.0.0.0 (also IPv6)."""
+    observed = observed.strip().strip('\"')
+    return observed == requested
+
+
+def mysql_live_bind():
+    result = run(['mysql', '--protocol=socket', '-uroot', '-Nse',
+                  'SELECT @@GLOBAL.bind_address'], check=False)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def mysql_listener_status():
+    """Inspect actual 3306 TCP listeners, independent of MySQL option files."""
+    output = run(['ss', '-ltn'], check=False).stdout
+    return [line.split()[3] for line in output.splitlines()
+            if re.search(r':3306\s', line) and len(line.split()) >= 4]
+
+
+def mysql_hosts_for_options(options):
+    """Listen address never grants clients. Hosts are an independent allowlist."""
+    hosts = {'localhost'}
     for subnet in options.allow:
         net = ipaddress.ip_network(subnet, strict=False)
         if net.version == 4:
             if net.prefixlen == 0:
-                hosts.append('%')
+                hosts.add('%')
+            elif net.prefixlen == 32:
+                hosts.add(str(net.network_address))
             else:
-                hosts.append(f'{net.network_address}/{net.netmask}' if net.prefixlen != 32 else str(net.network_address))
+                hosts.add(f'{net.network_address}/{net.netmask}')
         elif net.prefixlen == 128:
-            hosts.append(str(net.network_address))
+            hosts.add(str(net.network_address))
         else:
-            fail('MySQL : CIDR IPv6 étendu non supporté pour les comptes clients dans ce module')
-    if options.bind == 'all' and not options.allow:
-        hosts.append('%')
-    stmts = ['CREATE DATABASE IF NOT EXISTS `autokom_apps` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;']
-    for host in sorted(set(hosts)):
-        # host never contains apostrophes: validated by ipaddress or literal localhost.
-        stmts += [f"CREATE USER IF NOT EXISTS 'autokom_app'@'{host}' IDENTIFIED BY '{password}';",
-                  f"GRANT ALL PRIVILEGES ON `autokom_apps`.* TO 'autokom_app'@'{host}';"]
-    run(['mysql','--protocol=socket','-uroot'], input_text='\n'.join(stmts) + '\n')
-    say('MySQL : base, compte applicatif et restrictions client configurés', '✓')
-    say('Secret : /etc/autokom/secrets/mysql-autokom-app.password (root uniquement)')
+            raise ValueError('MySQL : plage IPv6 > /128 non prise en charge pour les comptes')
+    return sorted(hosts)
 
+
+def require_restart_approval(service, options):
+    """Existing production services need explicit acknowledgement of interruption."""
+    if run(['systemctl', 'is-active', '--quiet', service], check=False).returncode != 0:
+        return
+    if options.confirm_restart:
+        return
+    if options.non_interactive:
+        fail(f'{service} nécessite un redémarrage : utiliser --confirm-restart après maintenance planifiée')
+    if ask(f'{service} ACTIF : interruption possible, saisir REDEMARRER pour confirmer') != 'REDEMARRER':
+        fail(f'Redémarrage {service} refusé ; aucune configuration appliquée')
+
+def mysql_config(options):
+    """Preserve running MySQL when effective listener already meets the request."""
+    if run(['mysql', '--protocol=socket', '-uroot', '-Nse', 'SELECT 1'], check=False).returncode:
+        fail('MySQL root via socket indisponible : accès administrateur à configurer sans modifier le service')
+
+    # Check for conflicting AUTOKOM credentials BEFORE any service modifications.
+    existing = run(['mysql', '--protocol=socket', '-uroot', '-Nse',
+                    "SELECT COUNT(*) FROM mysql.user WHERE user='autokom_app'"]).stdout.strip()
+    if options.create_app_db and int(existing or '0') > 0 and not (SECRETS / 'mysql-autokom-app.password').exists():
+        fail('Compte autokom_app existant sans secret AUTOKOM : configuration préservée')
+
+    requested = mysql_requested_address(options)
+    observed = mysql_live_bind()
+    if observed is None:
+        fail('Impossible de lire @@GLOBAL.bind_address : configuration préservée')
+    if mysql_bind_equivalent(observed, requested):
+        say(f'MySQL déjà conforme : bind effectif={observed} ; pas de redémarrage', '✓')
+    else:
+        say(f'MySQL : bind actuel={observed}, demandé={requested}', '!')
+        require_restart_approval('mysql', options)
+        # A name ordered AFTER mysqld.cnf (90-autokom.cnf can be overridden by mysqld.cnf).
+        conf = Path('/etc/mysql/mysql.conf.d/zz-autokom.cnf')
+        desired = f'{MANAGED}\n[mysqld]\nbind-address = {requested}\n'
+        if conf.exists() and MANAGED not in conf.read_text(errors='replace'):
+            fail(f'Configuration existante non AUTOKOM : {conf}')
+        previous = conf.read_text() if conf.exists() else None
+        if conf.exists():
+            backup(conf)
+        changed = atomic_write(conf, desired)
+        try:
+            if changed:
+                run(['mysqld', '--validate-config', '--user=mysql'])
+                run(['systemctl', 'restart', 'mysql'])
+            if run(['systemctl', 'is-active', '--quiet', 'mysql'], check=False).returncode:
+                fail('MySQL ne redémarre pas : tentative de restauration')
+            effective = mysql_live_bind()
+            if effective is None or not mysql_bind_equivalent(effective, requested):
+                fail(f'MySQL n’écoute pas selon la configuration demandée (effectif={effective})')
+        except Exception:
+            if previous is None:
+                conf.unlink(missing_ok=True)
+            else:
+                atomic_write(conf, previous)
+            run(['systemctl', 'restart', 'mysql'], check=False)
+            raise
+        say(f'MySQL : bind configuré et vérifié ({effective})', '✓')
+
+    listeners = mysql_listener_status()
+    if not listeners:
+        fail('MySQL : bind configuré mais aucun listener TCP 3306 détecté')
+    if requested == '0.0.0.0' and not any(x.startswith(('0.0.0.0:', '*:')) for x in listeners):
+        fail(f'MySQL : listener TCP non conforme pour 0.0.0.0 : {listeners}')
+
+    if not options.create_app_db:
+        say('MySQL : bases et comptes SQL existants conservés', '✓')
+        return
+
+    # Accounts use explicit CIDRs; binding to 0.0.0.0 never implies account@'%'.
+    password = write_secret('mysql-autokom-app.password')
+    hosts = mysql_hosts_for_options(options)
+    stmts = ['CREATE DATABASE IF NOT EXISTS `autokom_apps` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;']
+    for host in hosts:
+        stmts.extend([
+            f"CREATE USER IF NOT EXISTS 'autokom_app'@'{host}' IDENTIFIED BY '{password}';",
+            f"GRANT ALL PRIVILEGES ON `autokom_apps`.* TO 'autokom_app'@'{host}';"
+        ])
+    run(['mysql', '--protocol=socket', '-uroot'], input_text='\n'.join(stmts) + '\n')
+    say(f'MySQL : utilisateur autokom_app, hôtes autorisés = {", ".join(hosts)}', '✓')
+    say('Secret : /etc/autokom/secrets/mysql-autokom-app.password (root uniquement)')
+    if options.bind != 'local':
+        say('Écoute 0.0.0.0 active : les Security Groups / pare-feu restent à restreindre.', '!')
 
 def oracle_config(options):
     name = 'autokom-oracle'
     if run(['docker','container','inspect',name], check=False).returncode == 0:
-        say('Oracle Free : conteneur déjà présent, aucune recréation', '✓')
+        state = run(['docker', 'inspect', '-f', '{{.State.Running}}', name], check=False).stdout.strip()
+        bindings = run(['docker', 'port', name, '1521/tcp'], check=False).stdout.strip()
+        if state != 'true' or '127.0.0.1:1521' not in bindings:
+            fail(f'Oracle existant non conforme (running={state}, ports={bindings}) : aucune recréation automatique')
+        say('Oracle Free existant : running et port localhost:1521 conformes', '✓')
         return
     # Images Oracle may require acceptance of use terms; deliberately no unreviewed licensing bypass.
     say('Oracle Free utilise l’image officielle et les conditions d’utilisation Oracle.', '!')
@@ -318,13 +486,26 @@ def oracle_config(options):
 
 
 def configure_jenkins_url(options):
-    """Set canonical URL only if empty/default, never replace an existing custom URL."""
+    """Set location for new/uninitialized Jenkins; preserve custom existing settings."""
     if not options.domain:
         return
     destination = Path('/var/lib/jenkins/init.groovy.d/90-autokom-location.groovy')
     url = ('https://' if options.tls != 'none' else 'http://') + options.domain + '/'
-    # The domain is validated before interpolation into Groovy source.
-    groovy = f'''// {MANAGED}
+    xml = Path('/var/lib/jenkins/jenkins.model.JenkinsLocationConfiguration.xml')
+    if xml.is_file():
+        import xml.etree.ElementTree as ET
+        try:
+            root = ET.fromstring(xml.read_text())
+            current = root.findtext('jenkinsUrl') or ''
+        except ET.ParseError:
+            fail('Configuration URL Jenkins illisible : préservation sans modification')
+        if current.rstrip('/') == url.rstrip('/'):
+            say(f'Jenkins : URL publique déjà conforme ({url})', '✓')
+            return
+        if current and current not in ('http://localhost:8080/', 'http://127.0.0.1:8080/'):
+            say(f'Jenkins : URL existante {current} != demandée {url}, préservée (à vérifier)', '!')
+            return
+    groovy = f"""// {MANAGED}
 import jenkins.model.JenkinsLocationConfiguration
 
 def location = JenkinsLocationConfiguration.get()
@@ -334,44 +515,68 @@ if (current == null || current.trim() == '' ||
     location.setUrl('{url}')
     location.save()
 }}
-'''
-    if destination.exists() and MANAGED not in destination.read_text(errors='ignore'):
-        fail('Emplacement script Jenkins déjà géré par un tiers : opération refusée')
+"""
+    if destination.exists() and MANAGED not in destination.read_text(errors='replace'):
+        fail('Script init Jenkins existant non AUTOKOM : opération refusée')
     changed = atomic_write(destination, groovy, 0o644)
     if changed:
         run(['chown', 'jenkins:jenkins', str(destination)])
         os.environ['AUTOKOM_JENKINS_URL_CHANGED'] = '1'
-        say('URL canonique Jenkins préparée pour le prochain redémarrage', '✓')
+        say('Jenkins : URL initiale préparée pour le prochain redémarrage', '✓')
 
-
-def configure_jenkins_listen():
+def configure_jenkins_listen(options):
     path = Path('/etc/systemd/system/jenkins.service.d/20-autokom-loopback.conf')
-    content = '[Service]\nEnvironment="JENKINS_LISTEN_ADDRESS=127.0.0.1"\n'
-    if path.exists() and MANAGED not in path.read_text():
-        fail(f'Override Jenkins non AUTOKOM existant : {path}')
-    content = MANAGED + '\n' + content
-    changed = atomic_write(path, content)
-    restart_needed = changed or os.environ.get('AUTOKOM_JENKINS_URL_CHANGED') == '1'
-    if changed:
-        run(['systemctl','daemon-reload'])
-    pid = run(['systemctl','show','-p','MainPID','--value','jenkins']).stdout.strip()
-    if pid.isdigit() and int(pid) > 0:
+    content = MANAGED + '\n[Service]\nEnvironment="JENKINS_LISTEN_ADDRESS=127.0.0.1"\n'
+    if path.exists() and MANAGED not in path.read_text(errors='replace'):
+        fail(f'Override Jenkins d’un tiers : {path}')
+    listen = run(['ss', '-ltn'], check=False).stdout
+    any_port = any(re.search(r':8080\s', line) for line in listen.splitlines())
+    exposed = any(re.search(r'(?:0\.0\.0\.0|\*|\[::\]):8080\s', line) for line in listen.splitlines())
+    on_local = any_port and not exposed and any(re.search(r'(?:127\.0\.0\.1|\[::1\]):8080\s', line) for line in listen.splitlines())
+
+    # Only add the override if the runtime does not already listen on loopback.
+    needs_override = not on_local
+    previous = path.read_text() if path.exists() else None
+    config_changed = needs_override and (previous != content)
+    restart_needed = config_changed or (os.environ.get('AUTOKOM_JENKINS_URL_CHANGED') == '1')
+    pid = run(['systemctl', 'show', '-p', 'MainPID', '--value', 'jenkins'], check=False).stdout.strip()
+    if pid.isdigit() and int(pid) > 0 and options.docker_access:
         try:
             docker_gid = grp.getgrnam('docker').gr_gid
-            group_line = next(x for x in Path(f'/proc/{pid}/status').read_text().splitlines() if x.startswith('Groups:'))
-            if docker_gid not in [int(x) for x in group_line.split()[1:]] and os.environ.get('AUTOKOM_JENKINS_DOCKER') == '1':
+            group_line = next(line for line in Path(f'/proc/{pid}/status').read_text().splitlines() if line.startswith('Groups:'))
+            if docker_gid not in [int(n) for n in group_line.split()[1:]]:
                 restart_needed = True
-        except (KeyError, FileNotFoundError, StopIteration):
-            pass
-    if restart_needed:
-        run(['systemctl','restart','jenkins'])
-    if run(['systemctl','is-active','--quiet','jenkins'], check=False).returncode:
-        fail('Jenkins ne démarre pas, vérifier journalctl -u jenkins')
-    listeners = run(['ss','-ltn']).stdout
-    if any(re.search(r'(?:0\.0\.0\.0|\*|\[::\]):8080\s', line) for line in listeners.splitlines()):
-        fail('Jenkins écoute encore sur une interface publique: vérifier systemctl cat jenkins et le port 8080')
-    say('Jenkins : écoute limitée à 127.0.0.1:8080', '✓')
+        except (KeyError, OSError, StopIteration):
+            restart_needed = True
 
+    if restart_needed:
+        require_restart_approval('jenkins', options)
+        if config_changed:
+            atomic_write(path, content)
+            run(['systemctl', 'daemon-reload'])
+        try:
+            run(['systemctl', 'restart', 'jenkins'])
+            if run(['systemctl', 'is-active', '--quiet', 'jenkins'], check=False).returncode:
+                fail('Jenkins ne démarre pas après reconfiguration')
+        except Exception:
+            if config_changed:
+                if previous is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    atomic_write(path, previous)
+                run(['systemctl', 'daemon-reload'], check=False)
+                run(['systemctl', 'restart', 'jenkins'], check=False)
+            raise
+    else:
+        say('Jenkins : écoute locale déjà conforme ; aucun redémarrage', '✓')
+
+    listeners = run(['ss', '-ltn'], check=False).stdout
+    exposed_after = any(re.search(r'(?:0\.0\.0\.0|\*|\[::\]):8080\s', line) for line in listeners.splitlines())
+    if exposed_after:
+        fail('Jenkins écoute toujours sur une interface publique : vérifier les overrides systemd')
+    if run(['systemctl', 'is-active', '--quiet', 'jenkins'], check=False).returncode:
+        fail('Jenkins inactif : vérifier journalctl -u jenkins')
+    say('Jenkins : service actif, port 8080 non exposé publiquement', '✓')
 
 def configure_proxy(options):
     if not options.domain:
@@ -383,7 +588,9 @@ def configure_proxy(options):
     if available.exists() or enabled.exists():
         existing_path = enabled.resolve() if enabled.exists() else available
         if MANAGED not in existing_path.read_text(errors='ignore'):
-            say(f'Domaine {domain} déjà configuré hors AUTOKOM ; configuration conservée.', '!')
+            if run(['nginx', '-t'], check=False).returncode:
+                fail('Configuration Nginx existante invalide : opération annulée')
+            say(f'Domaine {domain} existe déjà (Nginx OK) : configuration préservée ; vérifier proxy/TLS manuellement.', '!')
             return
         if run(['nginx', '-t'], check=False).returncode == 0:
             say(f'Domaine {domain} déjà géré par AUTOKOM ; configuration conservée.', '✓')
@@ -481,6 +688,12 @@ def main():
     parser.add_argument('--bind', choices=('local','private','all'))
     parser.add_argument('--allow', default='', help='IPv4/IPv6 CIDR clients, separated by comma')
     parser.add_argument('--unsafe-all', action='store_true')
+    parser.add_argument('--allow-public-clients', action='store_true')
+    parser.add_argument('--create-app-db', action='store_true', help='Créer explicitement autokom_apps et son compte dédié')
+    parser.add_argument('--confirm-restart', action='store_true', help='Autoriser les redémarrages de services actifs en cas de changement')
+    parser.add_argument('--allow-public-clients', action='store_true')
+    parser.add_argument('--create-app-db', action='store_true', help='Créer explicitement autokom_apps et son compte dédié')
+    parser.add_argument('--confirm-restart', action='store_true', help='Autoriser les redémarrages de services actifs en cas de changement')
     parser.add_argument('--docker-access', choices=('yes','no'))
     parser.add_argument('--domain', default=None)
     parser.add_argument('--tls', choices=('certbot','provided','none'))
@@ -505,8 +718,15 @@ def main():
         say('Simulation terminée. Aucune configuration Jenkins ou DB modifiée.', '✓')
         return
     os.environ['AUTOKOM_JENKINS_DOCKER'] = '1' if args.docker_access else '0'
+    # Existing Jenkins may need an interruption to harden its listener.
+    # Ask before writing the Groovy URL initializer.
+    if run(['systemctl', 'is-active', '--quiet', 'jenkins'], check=False).returncode == 0:
+        listen = run(['ss', '-ltn'], check=False).stdout
+        if any(re.search(r'(?:0\.0\.0\.0|\*|\[::\]):8080\s', line) for line in listen.splitlines()):
+            require_restart_approval('jenkins', args)
+            args.confirm_restart = True
     configure_jenkins_url(args)
-    configure_jenkins_listen()
+    configure_jenkins_listen(args)
     if args.db == 'postgresql':
         postgres_config(args)
     elif args.db == 'mysql':

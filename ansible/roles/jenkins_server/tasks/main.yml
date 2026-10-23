@@ -36,6 +36,56 @@
     update_cache: true
   when: "'jenkins' not in ansible_facts.packages"
 
+# Secure newly installed Jenkins before package installation.
+# Existing Jenkins hosts are handled by services.py with restart confirmation.
+- name: Create Jenkins systemd override folder (new installations only)
+  ansible.builtin.file:
+    path: /etc/systemd/system/jenkins.service.d
+    state: directory
+    mode: '0755'
+  when:
+    - "'jenkins' not in ansible_facts.packages"
+    - not ansible_check_mode
+
+- name: Inspect existing Jenkins override before initial installation
+  ansible.builtin.stat:
+    path: /etc/systemd/system/jenkins.service.d/20-autokom-loopback.conf
+  register: autokom_jenkins_existing_override
+  when:
+    - "'jenkins' not in ansible_facts.packages"
+    - not ansible_check_mode
+
+- name: Refuse replacing an unexpected Jenkins override
+  ansible.builtin.assert:
+    that:
+      - not autokom_jenkins_existing_override.stat.exists | default(false)
+    fail_msg: "Override Jenkins already exists: inspect /etc/systemd/system/jenkins.service.d/20-autokom-loopback.conf"
+  when:
+    - "'jenkins' not in ansible_facts.packages"
+    - not ansible_check_mode
+
+- name: Bind new Jenkins installation to loopback before package setup
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/jenkins.service.d/20-autokom-loopback.conf
+    content: |
+      # Managed by AUTOKOM: phase-2
+      [Service]
+      Environment="JENKINS_LISTEN_ADDRESS=127.0.0.1"
+    owner: root
+    group: root
+    mode: '0644'
+    force: false
+  when:
+    - "'jenkins' not in ansible_facts.packages"
+    - not ansible_check_mode
+
+- name: Reload systemd for new Jenkins override
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when:
+    - "'jenkins' not in ansible_facts.packages"
+    - not ansible_check_mode
+
 - name: Install Jenkins LTS
   ansible.builtin.apt:
     name: jenkins
