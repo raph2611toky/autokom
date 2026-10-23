@@ -1,0 +1,27 @@
+---
+- name: Install PostgreSQL packages
+  ansible.builtin.apt:
+    name:
+      - postgresql
+      - postgresql-client
+    state: present
+    update_cache: true
+  when: autokom_db_engine == 'postgresql'
+
+- name: Install MySQL packages
+  ansible.builtin.apt:
+    name:
+      - mysql-server
+      - mysql-client
+    state: present
+    update_cache: true
+  when: autokom_db_engine == 'mysql'
+
+- name: Check that selected database service starts
+  ansible.builtin.systemd_service:
+    name: "{{ 'postgresql' if autokom_db_engine == 'postgresql' else 'mysql' }}"
+    enabled: true
+    state: started
+  when:
+    - autokom_db_engine in ['postgresql', 'mysql']
+    - not ansible_check_mode

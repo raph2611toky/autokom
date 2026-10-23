@@ -5,15 +5,17 @@ set -Eeuo pipefail
 
 MODE='--check'
 UPDATE=0
+SERVICES=0
 AUTOKOM_VERBOSE="${AUTOKOM_VERBOSE:-0}"
 AUTOKOM_LIVE="${AUTOKOM_LIVE:-1}"
 for argument in "$@"; do
     case "$argument" in
         --check|--apply) MODE="$argument" ;;
         --update) UPDATE=1 ;;
+        --services) SERVICES=1 ;;
         --verbose) AUTOKOM_VERBOSE=1 ;;
         --no-live) AUTOKOM_LIVE=0 ;;
-        *) printf 'Usage: install.sh [--check|--apply] [--update] [--verbose] [--no-live]\n' >&2; exit 2 ;;
+        *) printf 'Usage: install.sh [--check|--apply] [--services] [--update] [--verbose] [--no-live]\n' >&2; exit 2 ;;
     esac
 done
 export AUTOKOM_VERBOSE AUTOKOM_LIVE
@@ -110,5 +112,10 @@ if [[ "$MODE" == '--apply' ]]; then
     ak_ok 'Exécution du playbook terminée (voir vérification ci-dessus)'
 else
     ak_info 'Simulation terminée : les paquets prévus ne sont pas encore installés.'
+fi
+if (( SERVICES )); then
+    [[ -f "$PROJECT_DIR/scripts/install/05-services.sh" ]] || { ak_err 'Module Jenkins/DB absent'; exit 1; }
+    ak_section '05 / 05  Jenkins et bases de données'
+    bash "$PROJECT_DIR/scripts/install/05-services.sh" "$MODE"
 fi
 ak_finish

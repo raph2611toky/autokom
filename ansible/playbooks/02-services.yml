@@ -1,0 +1,15 @@
+---
+- name: AUTOKOM | Jenkins and database packages
+  hosts: local
+  connection: local
+  become: true
+  gather_facts: true
+  pre_tasks:
+    - name: Validate operating system
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - autokom_db_engine in ['postgresql', 'mysql', 'oracle', 'none']
+  roles:
+    - role: jenkins_server
+    - role: database_server

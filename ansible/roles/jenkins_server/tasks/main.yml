@@ -1,0 +1,75 @@
+---
+- name: Read installed packages
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Install Jenkins Java prerequisites
+  ansible.builtin.apt:
+    name:
+      - fontconfig
+      - openjdk-21-jre
+      - ca-certificates
+      - curl
+    state: present
+    update_cache: true
+  when: "'jenkins' not in ansible_facts.packages"
+
+- name: Ensure Jenkins repository key directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+  when: "'jenkins' not in ansible_facts.packages"
+
+- name: Download official Jenkins LTS signing key
+  ansible.builtin.get_url:
+    url: https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key
+    dest: /etc/apt/keyrings/jenkins-keyring.asc
+    mode: '0644'
+  when: "'jenkins' not in ansible_facts.packages"
+
+- name: Configure Jenkins LTS repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/"
+    filename: autokom-jenkins
+    state: present
+    update_cache: true
+  when: "'jenkins' not in ansible_facts.packages"
+
+- name: Install Jenkins LTS
+  ansible.builtin.apt:
+    name: jenkins
+    state: present
+  when:
+    - "'jenkins' not in ansible_facts.packages"
+    - not ansible_check_mode
+
+- name: Preview Jenkins package installation
+  ansible.builtin.debug:
+    msg: "Jenkins LTS would be installed after the repository is added."
+  when:
+    - "'jenkins' not in ansible_facts.packages"
+    - ansible_check_mode
+
+- name: Ensure Jenkins is enabled and active
+  ansible.builtin.systemd_service:
+    name: jenkins
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+- name: Check Docker runtime when Docker access requested
+  ansible.builtin.command: docker info
+  changed_when: false
+  when:
+    - autokom_jenkins_docker | bool
+    - not ansible_check_mode
+
+- name: Add Jenkins account to Docker group - grants root-equivalent access
+  ansible.builtin.user:
+    name: jenkins
+    groups: docker
+    append: true
+  when:
+    - autokom_jenkins_docker | bool
+    - not ansible_check_mode
