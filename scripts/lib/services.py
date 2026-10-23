@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from menu import pick, ask
+from nginx_discovery import inventory as nginx_inventory, jenkins_domains, domain_plan
 from firewall import secure_firewall, ufw_active, docker_bridges
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -80,68 +81,123 @@ def valid_domain(domain):
 
 
 def cidrs(value):
-    if not value.strip():
+    """Accept comma, semicolon or whitespace; never hyphen/underscore as separator."""
+    if not value or not value.strip():
         return []
-    items = [p.strip() for p in value.split(',') if p.strip()]
-    return [str(ipaddress.ip_network(p, strict=False)) for p in items]
+    result = []
+    for token in re.split(r'[,;\s]+', value.strip()):
+        if not token:
+            continue
+        try:
+            network = ipaddress.ip_network(token, strict=False)
+        except ValueError as exc:
+            raise ValueError(
+                f'CIDR invalide : {token!r}. Séparer les réseaux par virgule, point-virgule ou espace. '
+                'Exemple : 172.18.0.0/16, 172.19.0.0/16'
+            ) from exc
+        if network.prefixlen == 0:
+            raise ValueError('Réseaux universels 0.0.0.0/0 et ::/0 interdits pour un compte applicatif')
+        item = str(network)
+        if item not in result:
+            result.append(item)
+    return result
 
 
 def check_user_input(options):
     options.domain = valid_domain(options.domain) if options.domain else ''
     options.allow = cidrs(options.allow) if isinstance(options.allow, str) else options.allow
-    if options.db in ('postgresql', 'mysql') and options.bind in ('private', 'all') and not options.allow and options.bind != 'all':
-        raise ValueError('Au moins un réseau CIDR autorisé est requis')
-    if options.bind == 'all' and not options.unsafe_all:
-        raise ValueError('L’écoute 0.0.0.0 nécessite --unsafe-all ou confirmation OUVRIR')
-    if any(c in ('0.0.0.0/0', '::/0') for c in options.allow):
-        raise ValueError('Clients universels interdits (0.0.0.0/0, ::/0). Utiliser les réseaux Docker privés.')
-    if options.tls == 'provided' and (not options.cert or not options.key):
-        raise ValueError('Certificat et clé privée obligatoires pour --tls provided')
-    if options.tls == 'certbot' and options.domain and not options.email:
-        raise ValueError('Adresse email requise pour Certbot')
-    if options.db == 'mysql' and any(ipaddress.ip_network(c).version == 6 and ipaddress.ip_network(c).prefixlen != 128 for c in options.allow):
-        raise ValueError('MySQL : les réseaux IPv6 CIDR non unitaires ne sont pas pris en charge')
+    # Backward compatibility with the old confusing CLI option --bind private.
+    if options.bind == 'private':
+        options.bind = 'all'
     if options.db == 'oracle' and options.bind != 'local':
-        raise ValueError('Oracle Free : ce module limite actuellement l’écoute à localhost')
+        raise ValueError('Oracle Free : le module conserve uniquement une écoute locale')
+    if options.db == 'mysql' and any(ipaddress.ip_network(c).version == 6 and
+                                     ipaddress.ip_network(c).prefixlen != 128 for c in options.allow):
+        raise ValueError('MySQL : sous-réseaux IPv6 non unitaires non pris en charge')
+    if options.tls == 'existing' and options.domain and domain_plan(options.domain, nginx_inventory()) != 'existing':
+        raise ValueError('--tls existing exige un domaine Nginx et un certificat valides')
+    if options.tls == 'provided' and (not options.cert or not options.key):
+        raise ValueError('Certificat ET clé privée requis pour --tls provided')
+    if options.tls == 'certbot' and options.domain and not options.email:
+        raise ValueError('E-mail Let’s Encrypt requis seulement pour un nouveau domaine')
+    # 0.0.0.0 is an address to LISTEN on, NOT a client authorization.
+    # Actual exposure is checked and denied by secure_firewall() before apply.
     return options
 
 
 def interactive(options):
     say('Installation interactive — ↑/↓, Entrée ou chiffre 1–9')
     if options.db is None:
-        option = pick('Base de données', ['PostgreSQL (recommandé)', 'MySQL', 'Oracle Database Free (Docker, serveur puissant)', 'Aucune'])
-        options.db = ['postgresql', 'mysql', 'oracle', 'none'][option-1]
+        idx = pick('Base de données',
+                   ['PostgreSQL', 'MySQL', 'Oracle Database Free (Docker)', 'Aucune'],
+                   hint='Les bases existantes seront détectées et conservées.')
+        options.db = ('postgresql','mysql','oracle','none')[idx - 1]
     if options.db != 'none' and options.bind is None:
-        selected = pick('Écoute réseau de la base', ['Locale : 127.0.0.1', 'Toutes interfaces + CIDR clients obligatoires', 'Toutes interfaces IPv4 : 0.0.0.0'])
-        options.bind = ['local','private','all'][selected-1]
-    if options.bind in ('private','all') and options.db != 'none' and not options.allow:
-        options.allow = ask('CIDR clients supplémentaires, ex. 172.18.0.0/16 (vide = localhost seulement)', '')
-        if any(c in ('0.0.0.0/0', '::/0') for c in cidrs(options.allow)):
-            raise ValueError('Accès clients universel refusé par la politique AUTOKOM')
-    if options.bind == 'all':
-        confirm = ask('Écoute 0.0.0.0 avec pare-feu WAN, saisir BIND-PRIVE')
-        options.unsafe_all = confirm == 'BIND-PRIVE'
-    if options.db in ('mysql', 'postgresql') and not options.create_app_db:
-        selected = pick('Créer une base et un utilisateur applicatif AUTOKOM ?', ['Non, conserver les bases existantes', 'Oui, créer autokom_apps / autokom_app'])
-        options.create_app_db = selected == 2
+        choices = ['Locale uniquement : 127.0.0.1',
+                   'Interfaces IPv4 : 0.0.0.0 (ports WAN bloqués)']
+        idx = pick('Adresse d’écoute de la base', choices,
+                   default=1, hint='0.0.0.0 = écoute, pas accès libre. Pare-feu obligatoire.')
+        options.bind = ('local','all')[idx - 1]
+    if options.db in ('mysql','postgresql') and not options.create_app_db:
+        idx = pick('Créer une base AUTOKOM et son utilisateur ?',
+                   ['Non : conserver les comptes et bases existants',
+                    'Oui : créer autokom_apps et autokom_app'],
+                   hint='Non n’altère aucune permission SQL existante.')
+        options.create_app_db = idx == 2
+    if options.create_app_db and options.bind == 'all' and not options.allow:
+        options.allow = ask('Réseaux clients SQL autorisés (CIDR)', '',
+                            hint='Séparer par virgule, ; ou espace. Ex : 172.18.0.0/16, 172.19.0.0/16. Vide = compte localhost seul.')
+        # Validate early, avoiding an error after the Jenkins questions.
+        cidrs(options.allow)
     if options.docker_access is None:
-        selected = pick('Autoriser Jenkins à contrôler le démon Docker ?', ['Non (isolation maximale)', 'Oui (jenkins devient root-équivalent)'])
-        options.docker_access = (selected == 2)
+        idx = pick('Jenkins : accès au démon Docker',
+                   ['Non : isolation maximale', 'Oui : groupe docker (root-équivalent)'],
+                   hint='Le groupe docker donne des privilèges administrateur au service Jenkins.')
+        options.docker_access = idx == 2
         if options.docker_access:
-            options.docker_access = ask('Saisir DOCKER-ROOT pour confirmer') == 'DOCKER-ROOT'
+            options.docker_access = ask('Pour confirmer saisir DOCKER-ROOT',
+                                        hint='Accès sensible au socket Docker du serveur') == 'DOCKER-ROOT'
     if options.domain is None:
-        domain_choice = pick('Reverse proxy Jenkins', ['Configurer un domaine', 'Sans domaine (accès localhost/tunnel SSH)'])
-        options.domain = ask('Domaine Jenkins, ex: jenkins.example.com') if domain_choice == 1 else ''
-    if options.domain and options.tls is None:
-        selected = pick('HTTPS Jenkins', ['Certbot / Let’s Encrypt', 'Certificat existant', 'HTTP uniquement (non recommandé)'])
-        options.tls = ['certbot','provided','none'][selected-1]
+        sites = nginx_inventory()
+        found = jenkins_domains(sites)
+        if found:
+            # Offer to reuse an actual Jenkins proxy instead of recreating it.
+            found = found[:7]
+            choices = [f'Réutiliser {name} (Nginx + TLS valides)' for name in found]
+            choices += ['Définir un nouveau domaine', 'Sans domaine (tunnel SSH)']
+            idx = pick('Jenkins — domaine HTTPS', choices, default=1,
+                       hint='Détection Nginx active + certificat, sans réécriture.')
+            if idx <= len(found):
+                options.domain = found[idx - 1]
+                options.tls = 'existing'
+            elif idx == len(found) + 1:
+                options.domain = ask('Nouveau domaine Jenkins',
+                                     hint='Enregistrement DNS A vers le serveur requis pour Certbot')
+            else:
+                options.domain = ''
+        else:
+            idx = pick('Jenkins — reverse proxy',
+                       ['Configurer un domaine', 'Sans domaine (tunnel SSH)'],
+                       hint='Si le domaine existe déjà, AUTOKOM refuse de l’écraser.')
+            options.domain = ask('Domaine Jenkins',
+                                 hint='Exemple : jenkins.example.com') if idx == 1 else ''
+    if options.domain:
+        current = domain_plan(valid_domain(options.domain), nginx_inventory())
+        if current == 'existing':
+            options.tls = 'existing'
+            say(f'{options.domain} : Nginx et TLS existants validés ; Certbot ignoré', '✓')
+        elif options.tls is None:
+            idx = pick('HTTPS du nouveau domaine',
+                       ['Certbot / Let’s Encrypt', 'Certificat déjà disponible', 'HTTP uniquement'],
+                       hint='Certbot uniquement si aucun certificat valide n’est installé.')
+            options.tls = ('certbot','provided','none')[idx - 1]
     if options.domain and options.tls == 'certbot' and not options.email:
-        options.email = ask('E-mail Let’s Encrypt')
+        options.email = ask('Adresse e-mail pour Let’s Encrypt',
+                            hint='Requise pour un nouveau certificat ACME')
     if options.domain and options.tls == 'provided':
-        options.cert = ask('Chemin certificat fullchain.pem')
-        options.key = ask('Chemin clé privée .pem')
+        options.cert = ask('Chemin du certificat fullchain.pem')
+        options.key = ask('Chemin de la clé privée .pem')
     return options
-
 
 def effective_option_defaults(options):
     options.bind = options.bind or 'local'
@@ -173,11 +229,22 @@ def preflight(options):
             if not Path(p).is_file():
                 fail(f'Fichier TLS introuvable : {p}')
     if options.domain:
-        existing = Path(f'/etc/nginx/sites-enabled/{options.domain}.conf')
-        if existing.exists() and MANAGED not in existing.resolve().read_text(errors='ignore'):
-            say('VirtualHost existant détecté : AUTOKOM le conservera intact.', '!')
+        sites = nginx_inventory()
+        state = domain_plan(options.domain, sites)
+        if state == 'existing':
+            options.tls = 'existing'
+            say(f'Jenkins HTTPS {options.domain} déjà opérationnel (Nginx + certificat) : aucune régénération.', '✓')
+        else:
+            # Never overwrite an inactive vhost file of the same name.
+            for folder in ('/etc/nginx/sites-available', '/etc/nginx/sites-enabled'):
+                if (Path(folder) / f'{options.domain}.conf').exists():
+                    fail('Domaine trouvé dans les fichiers Nginx mais absent de la configuration active : vérifier manuellement')
     say(f'Jenkins : présent={shutil.which("jenkins") is not None} ; domaine={options.domain or "aucun"}')
-    say(f'Base : {options.db} ; bind demandé={mysql_requested_address(options) if options.db == "mysql" else options.bind} ; CIDR supplémentaires={", ".join(options.allow) or "aucun"}')
+    say(f'Base : {options.db} ; bind demandé={mysql_requested_address(options) if options.db == "mysql" else options.bind}')
+    if options.create_app_db:
+        say('Réseaux autorisés pour le NOUVEAU compte AUTOKOM : ' + (', '.join(options.allow) or 'localhost uniquement'))
+    elif options.allow:
+        say('CIDR fournis mais aucun nouveau compte SQL créé : comptes existants non modifiés', '!')
     say('Création de base applicative : ' + ('oui' if options.create_app_db else 'non (conserver l’existant)'))
     if options.db == 'mysql':
         live = mysql_live_bind() if shutil.which('mysql') else None
@@ -581,21 +648,17 @@ def configure_jenkins_listen(options):
 
 def configure_proxy(options):
     if not options.domain:
-        say('Aucun domaine : Jenkins accessible via tunnel SSH localhost', '›')
+        say('Jenkins sans domaine : accès localhost / tunnel SSH', '›')
         return
     domain = options.domain
+    state = domain_plan(domain, nginx_inventory())
+    if state == 'existing':
+        say(f'{domain} : Nginx + HTTPS valides, proxy réutilisé ; aucun Certbot ni reload', '✓')
+        return
     available = Path('/etc/nginx/sites-available') / f'{domain}.conf'
     enabled = Path('/etc/nginx/sites-enabled') / f'{domain}.conf'
-    if available.exists() or enabled.exists():
-        existing_path = enabled.resolve() if enabled.exists() else available
-        if MANAGED not in existing_path.read_text(errors='ignore'):
-            if run(['nginx', '-t'], check=False).returncode:
-                fail('Configuration Nginx existante invalide : opération annulée')
-            say(f'Domaine {domain} existe déjà (Nginx OK) : configuration préservée ; vérifier proxy/TLS manuellement.', '!')
-            return
-        if run(['nginx', '-t'], check=False).returncode == 0:
-            say(f'Domaine {domain} déjà géré par AUTOKOM ; configuration conservée.', '✓')
-            return
+    if available.exists() or enabled.exists() or enabled.is_symlink():
+        fail(f'Fichier Nginx déjà présent pour {domain} : modification refusée')
     if options.tls == 'certbot':
         try:
             ips = {x[4][0] for x in socket.getaddrinfo(domain, 80, family=socket.AF_INET)}
@@ -687,13 +750,13 @@ def main():
     group.add_argument('--apply', action='store_const', const='apply', dest='mode')
     parser.add_argument('--db', choices=('postgresql','mysql','oracle','none'))
     parser.add_argument('--bind', choices=('local','private','all'))
-    parser.add_argument('--allow', default='', help='IPv4/IPv6 CIDR clients, separated by comma')
-    parser.add_argument('--unsafe-all', action='store_true')
+    parser.add_argument('--allow', default='', help='Réseaux SQL pour les NOUVEAUX comptes; séparateurs virgule, point-virgule, espace')
+    parser.add_argument('--unsafe-all', action='store_true', help='Obsolète : la sécurité est maintenant assurée par UFW / règles WAN')
     parser.add_argument('--create-app-db', action='store_true', help='Créer explicitement autokom_apps et son compte dédié')
     parser.add_argument('--confirm-restart', action='store_true', help='Autoriser les redémarrages de services actifs en cas de changement')
     parser.add_argument('--docker-access', choices=('yes','no'))
     parser.add_argument('--domain', default=None)
-    parser.add_argument('--tls', choices=('certbot','provided','none'))
+    parser.add_argument('--tls', choices=('certbot','provided','none','existing'))
     parser.add_argument('--cert')
     parser.add_argument('--key')
     parser.add_argument('--email')
@@ -710,6 +773,10 @@ def main():
         args = interactive(args)
     elif args.db is None or args.docker_access is None or args.domain is None:
         parser.error('--non-interactive exige --db, --docker-access, --domain (chaîne vide autorisée)')
+    if args.domain:
+        # Noninteractive callers should also reuse valid Nginx+TLS without ACME options.
+        if domain_plan(valid_domain(args.domain), nginx_inventory()) == 'existing':
+            args.tls = 'existing'
     args = effective_option_defaults(args)
     if args.mode == 'apply' and not ufw_active() and args.enable_ufw and not args.non_interactive and not args.confirm_firewall:
         args.confirm_firewall = (ask('Activation UFW sur SSH : saisir ACTIVER-PAREFEU') == 'ACTIVER-PAREFEU')

@@ -41,10 +41,8 @@ class CoreValidationTests(unittest.TestCase):
 
     def test_default_safety(self):
         self.assertEqual(services.check_user_input(self.options()).bind, 'local')
-        with self.assertRaises(ValueError):
-            services.check_user_input(self.options(bind='all'))
-        with self.assertRaises(ValueError):
-            services.check_user_input(self.options(bind='private'))
+        self.assertEqual(services.check_user_input(self.options(bind='all')).bind, 'all')
+        self.assertEqual(services.check_user_input(self.options(bind='private')).bind, 'all')
         with self.assertRaises(ValueError):
             services.check_user_input(self.options(db='oracle',bind='all',unsafe_all=True))
 
