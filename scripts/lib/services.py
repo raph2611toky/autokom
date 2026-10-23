@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from menu import pick, ask
+from firewall import secure_firewall, ufw_active, docker_bridges
 
 ROOT = Path(__file__).resolve().parents[2]
 MANAGED = '# Managed by AUTOKOM: phase-2'
@@ -92,8 +93,8 @@ def check_user_input(options):
         raise ValueError('Au moins un réseau CIDR autorisé est requis')
     if options.bind == 'all' and not options.unsafe_all:
         raise ValueError('L’écoute 0.0.0.0 nécessite --unsafe-all ou confirmation OUVRIR')
-    if any(c in ('0.0.0.0/0', '::/0') for c in options.allow) and not options.allow_public_clients:
-        raise ValueError('Autoriser des clients de partout exige --allow-public-clients et confirmation distincte')
+    if any(c in ('0.0.0.0/0', '::/0') for c in options.allow):
+        raise ValueError('Clients universels interdits (0.0.0.0/0, ::/0). Utiliser les réseaux Docker privés.')
     if options.tls == 'provided' and (not options.cert or not options.key):
         raise ValueError('Certificat et clé privée obligatoires pour --tls provided')
     if options.tls == 'certbot' and options.domain and not options.email:
@@ -116,10 +117,10 @@ def interactive(options):
     if options.bind in ('private','all') and options.db != 'none' and not options.allow:
         options.allow = ask('CIDR clients supplémentaires, ex. 172.18.0.0/16 (vide = localhost seulement)', '')
         if any(c in ('0.0.0.0/0', '::/0') for c in cidrs(options.allow)):
-            options.allow_public_clients = ask('Accès clients universel : saisir ACCES-PUBLIC') == 'ACCES-PUBLIC'
+            raise ValueError('Accès clients universel refusé par la politique AUTOKOM')
     if options.bind == 'all':
-        confirm = ask('Écoute IPv4 0.0.0.0 (pas autorisation des clients), saisir OUVRIR')
-        options.unsafe_all = confirm == 'OUVRIR'
+        confirm = ask('Écoute 0.0.0.0 avec pare-feu WAN, saisir BIND-PRIVE')
+        options.unsafe_all = confirm == 'BIND-PRIVE'
     if options.db in ('mysql', 'postgresql') and not options.create_app_db:
         selected = pick('Créer une base et un utilisateur applicatif AUTOKOM ?', ['Non, conserver les bases existantes', 'Oui, créer autokom_apps / autokom_app'])
         options.create_app_db = selected == 2
@@ -688,10 +689,6 @@ def main():
     parser.add_argument('--bind', choices=('local','private','all'))
     parser.add_argument('--allow', default='', help='IPv4/IPv6 CIDR clients, separated by comma')
     parser.add_argument('--unsafe-all', action='store_true')
-    parser.add_argument('--allow-public-clients', action='store_true')
-    parser.add_argument('--create-app-db', action='store_true', help='Créer explicitement autokom_apps et son compte dédié')
-    parser.add_argument('--confirm-restart', action='store_true', help='Autoriser les redémarrages de services actifs en cas de changement')
-    parser.add_argument('--allow-public-clients', action='store_true')
     parser.add_argument('--create-app-db', action='store_true', help='Créer explicitement autokom_apps et son compte dédié')
     parser.add_argument('--confirm-restart', action='store_true', help='Autoriser les redémarrages de services actifs en cas de changement')
     parser.add_argument('--docker-access', choices=('yes','no'))
@@ -701,6 +698,10 @@ def main():
     parser.add_argument('--key')
     parser.add_argument('--email')
     parser.add_argument('--non-interactive', action='store_true')
+    parser.add_argument('--enable-ufw', action='store_true', help='Autoriser explicitement activation UFW avec garde SSH')
+    parser.add_argument('--ssh-cidr', default='', help='Adresse ou CIDR de gestion SSH exigé pour activation UFW')
+    parser.add_argument('--ssh-port', type=int, default=22, help='Port SSH à préserver, défaut 22')
+    parser.add_argument('--confirm-firewall', action='store_true', help='Confirmer activation initiale du pare-feu')
     args = parser.parse_args()
     args.docker_access = {'yes': True, 'no': False}.get(args.docker_access)
     if os.geteuid() != 0:
@@ -710,9 +711,18 @@ def main():
     elif args.db is None or args.docker_access is None or args.domain is None:
         parser.error('--non-interactive exige --db, --docker-access, --domain (chaîne vide autorisée)')
     args = effective_option_defaults(args)
+    if args.mode == 'apply' and not ufw_active() and args.enable_ufw and not args.non_interactive and not args.confirm_firewall:
+        args.confirm_firewall = (ask('Activation UFW sur SSH : saisir ACTIVER-PAREFEU') == 'ACTIVER-PAREFEU')
     print('\n  \033[1;36mAUTOKOM · Jenkins & Databases\033[0m')
     say('Mode : ' + ('Simulation' if args.mode == 'check' else 'Installation'))
     preflight(args)
+    # Guard BEFORE package/systemd changes; check mode is read-only.
+    secure_firewall(
+        args.db, apply=(args.mode == 'apply'), activate=args.enable_ufw,
+        ssh_cidr=args.ssh_cidr, ssh_port=args.ssh_port,
+        confirmation=args.confirm_firewall,
+        say=lambda message: say(message, '›'),
+    )
     ansible_install(args)
     if args.mode == 'check':
         say('Simulation terminée. Aucune configuration Jenkins ou DB modifiée.', '✓')
