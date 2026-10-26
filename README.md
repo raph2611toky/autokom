@@ -1,22 +1,26 @@
-# AUTOKOM
+# AUTOKOM — Phase 3 · paramètres dynamiques v2
 
-Plateforme DevSecOps autonome, installee de facon reproductible sur serveur Linux.
+Correctif incrémental à appliquer **sur un dépôt AUTOKOM contenant déjà la Phase 3 Observabilité**.
 
-pour l'installation:
+Fichiers nouveaux ou modifiés :
+
+- `scripts/lib/observability.py` — refactor des ports, URLs et paramètres reliés.
+- `scripts/lib/observability_config.py` — lecture/validation de la configuration unique.
+- `config/observability/defaults.ini` — valeurs par défaut, sans secret.
+- `tests/test_observability.py` — compatibilité des tests existants.
+- `tests/test_observability_config.py` — tests de régression des paramètres dynamiques.
+- `docs/OBSERVABILITY-CONFIG.md` — utilisation et migration.
+
+**Sécurité :** aucun changement réseau avant `--apply` ; hôtes internes validés `127.0.0.1` uniquement ; refus des conflits de ports, chemins non sûrs et déplacements implicites de TSDB. Les identifiants restent interactifs.
+
+Exemples :
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/raph2611toky/autokom/main/install.sh | sudo bash -s -- --apply
+python3 scripts/lib/observability.py --show-config
+python3 scripts/lib/observability.py --show-config \
+   --set prometheus.port=9091 --set grafana.port=3001
+
+sudo bash scripts/install/08-observability.sh --check --interactive
 ```
 
-## Phase 1 — Foundation
-
-- `scripts/bootstrap/00-preflight.sh` : inspection non destructive
-- `scripts/bootstrap/01-install-ansible.sh` : bootstrap APT / Ansible
-- `scripts/install/02-install-foundation.sh` : lance Ansible (check ou apply)
-- `ansible/roles/base_cli` : commandes systeme/reseau, Nginx, Certbot
-- `ansible/roles/security_cli` : Nikto, Nmap, Lynis, Trivy, Semgrep
-- `scripts/security/03-nginx-catchall.sh` : securite vhost par defaut, opt-in
-- `scripts/verify/04-check-foundation.sh` : diagnostics sans scans actifs
-
-Voir `docs/FOUNDATION.md` avant toute installation.
-
-Les scripts `scripts/legacy` sont conserves comme references : ne pas les executer sans revue.
+Voir `docs/OBSERVABILITY-CONFIG.md` pour les priorités, la persistance et les avertissements production.
