@@ -64,11 +64,38 @@ class JenkinsOnboardingTests(unittest.TestCase):
             with m.authorization_context(args,'https://jenkins.ik0m.tech/',apply=False) as result:
                 self.assertEqual(result, '')
             ask.assert_not_called()
-    def test_quick_mode_only_one_menu(self):
-        args=m.parse(['--apply','--interactive'])
+    def test_interactive_optional_plugin_select_yes(self):
+        args=m.parse(['--check','--interactive'])
+        with mock.patch.object(m, 'pick', side_effect=[1,2]) as pick:
+            m.interactive_configure(args)
+        self.assertEqual(pick.call_count,2)
+        self.assertTrue(args.multibranch_scan)
+        self.assertIn('multibranch-scan-webhook-trigger',m.plugin_ids(args.profile,args.multibranch_scan))
+
+    def test_interactive_optional_plugin_select_no(self):
+        args=m.parse(['--check','--interactive'])
+        with mock.patch.object(m, 'pick', side_effect=[1,1]):
+            m.interactive_configure(args)
+        self.assertFalse(args.multibranch_scan)
+        self.assertNotIn('multibranch-scan-webhook-trigger',m.plugin_ids(args.profile,args.multibranch_scan))
+
+    def test_explicit_flag_skips_extra_menu(self):
+        args=m.parse(['--check','--interactive','--multibranch-scan'])
         with mock.patch.object(m,'pick',return_value=1) as pick:
             m.interactive_configure(args)
+        self.assertTrue(args.multibranch_scan)
         self.assertEqual(pick.call_count,1)
+
+    def test_optional_manifest_and_no_duplicate_plugins(self):
+        plugins=m.plugin_ids('devsecops',True)
+        self.assertEqual(plugins.count('multibranch-scan-webhook-trigger'),1)
+        self.assertNotIn('multibranch-scan-webhook-trigger',m.plugin_ids('devsecops'))
+
+    def test_quick_mode_only_one_menu(self):
+        args=m.parse(['--apply','--interactive'])
+        with mock.patch.object(m,'pick',side_effect=[1,1]) as pick:
+            m.interactive_configure(args)
+        self.assertEqual(pick.call_count,2)
         self.assertEqual(args.profile,'devsecops')
         self.assertTrue(args.harden)
         self.assertTrue(args.confirm_restart)

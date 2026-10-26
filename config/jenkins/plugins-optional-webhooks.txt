@@ -1,0 +1,4 @@
+# Optional webhook scan trigger, NEVER installed automatically.
+# Security advisory SECURITY-2875 / CVE-2023-46656 : unresolved token comparison warning.
+# Explicit CLI option --multibranch-scan or interactive opt-in required.
+multibranch-scan-webhook-trigger

@@ -232,7 +232,15 @@ def plugin_ids(profile, include_multibranch_scan=False):
                     raise ValueError(f'Nom de plugin invalide: {plugin}')
                 plugins.append(plugin)
     if include_multibranch_scan:
-        plugins.append('multibranch-scan-webhook-trigger')
+        # Separate opt-in manifest: this plugin currently has an unresolved
+        # Jenkins security warning, so do not put it in the default profile.
+        for line in (PROFILES / 'plugins-optional-webhooks.txt').read_text(encoding='utf-8').splitlines():
+            plugin = line.split('#', 1)[0].strip()
+            if plugin:
+                if not re.fullmatch(r'[a-z0-9][a-z0-9-]*(?::[\w.\-]+)?', plugin):
+                    raise ValueError(f'Nom de plugin invalide: {plugin}')
+                if plugin not in plugins:
+                    plugins.append(plugin)
     return plugins
 
 
@@ -371,7 +379,8 @@ def configure(args):
     output('›', f'Jenkins détecté : {len(present)} plugins sur disque')
     output('✓', f'Profil {args.profile} : {len(plugins) - len(missing)} plugins déjà présents, {len(missing)} à installer')
     if args.multibranch_scan:
-        output('⚠', 'Multibranch Scan Webhook Trigger comporte un avertissement de sécurité; option explicite uniquement')
+        output('⚠', 'Multibranch Scan Webhook Trigger : SECURITY-2875 (comparaison de token non constante).')
+        output('›', 'L’endpoint de webhook doit rester filtré/protégé ; ne pas mettre le token dans les journaux ou URLs publiques.')
     changes = bool(missing or args.admin_user or args.harden)
     if apply and not args.confirm_restart and changes:
         raise RuntimeError('Option --confirm-restart requise AVANT toute modification')
@@ -450,8 +459,28 @@ def parse(argv=None):
     p.add_argument('--disable-inbound-agents', action='store_true', help='Désactiver le port TCP des agents explicitement')
     p.add_argument('--controller-zero', action='store_true', help='Désactiver explicitement les builds sur le contrôleur')
     p.add_argument('--confirm-restart', action='store_true', help='Autoriser le safe-restart après les changements')
-    p.add_argument('--multibranch-scan', action='store_true', help='Plugin optionnel avec avertissement de sécurité')
+    p.add_argument('--multibranch-scan', action='store_true', help='Ajouter multibranch-scan-webhook-trigger (SECURITY-2875, choix explicite)')
     return p.parse_args(argv)
+
+
+def choose_optional_multibranch(args):
+    """Offer insecure optional webhook plugin only with explicit consent.
+
+    A caller specifying --multibranch-scan has already opted in.
+    """
+    if args.multibranch_scan:
+        output('⚠', 'Plugin Multibranch Scan Webhook Trigger demandé explicitement (SECURITY-2875).')
+        return args
+    if args.profile == 'minimal':
+        return args
+    option = pick('Jenkins — scan Multibranch par webhook',
+                  ['Non : utiliser GitHub Branch Source (recommandé)',
+                   'Oui : installer Multibranch Scan Webhook Trigger'],
+                  hint='SECURITY-2875 : avertissement non résolu sur les tokens. Activer seulement si nécessaire.')
+    args.multibranch_scan = (option == 2)
+    if args.multibranch_scan:
+        output('⚠', 'Plugin optionnel sélectionné : endpoint webhook à protéger et token fort à utiliser.')
+    return args
 
 
 def interactive_configure(args):
@@ -467,11 +496,12 @@ def interactive_configure(args):
         args.disable_inbound_agents = False
         args.confirm_restart = args.mode == 'apply'  # Consentement donné par la sélection de ce profil.
         output('✓', 'Profil recommandé sélectionné : comptes et agents existants préservés.')
-        return args
+        return choose_optional_multibranch(args)
     i = pick('Jenkins — profil de plugins',
              ['DevSecOps complet', 'Base suggérée AUTOKOM', 'Aucun nouveau plugin'],
              hint='Les plugins déjà installés ne sont ni effacés ni rétrogradés.')
     args.profile = ('devsecops','baseline','minimal')[i-1]
+    choose_optional_multibranch(args)
     # The initial setup wizard creates the FIRST admin. Do not ask for a
     # second administrator on a controller not yet initialized.
     if jenkins_state() != 'wizard':
