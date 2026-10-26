@@ -1,0 +1,7 @@
+# AUTOKOM additions for GitHub triggers, automation, Docker and metrics
+generic-webhook-trigger
+prometheus
+docker-workflow
+job-dsl
+ssh-agent
+warnings-ng

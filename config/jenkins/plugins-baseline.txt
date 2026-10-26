@@ -1,0 +1,17 @@
+# AUTOKOM baseline Jenkins plugins (curated; NOT the changing GUI wizard list)
+workflow-aggregator
+pipeline-stage-view
+pipeline-model-definition
+pipeline-utility-steps
+credentials-binding
+git
+github
+github-branch-source
+cloudbees-folder
+matrix-auth
+configuration-as-code
+antisamy-markup-formatter
+build-timeout
+timestamper
+ws-cleanup
+email-ext
