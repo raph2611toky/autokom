@@ -322,21 +322,67 @@ def brief(cfg):
     return 0
 
 
+def version_label():
+    """Git is the source of truth; do not hardcode a release number."""
+    info = command(['git', '-C', str(ROOT), 'describe', '--tags', '--always', '--dirty'], timeout=3)
+    revision = info.stdout.strip() if info and info.returncode == 0 else ''
+    return f'AUTOKOM · révision {revision}' if revision else 'AUTOKOM · version locale (Git indisponible)'
+
+
+def show_brand():
+    """Use the original AUTOKOM ASCII logo for every top-level CLI invocation.
+
+    Tool-specific large logos remain restricted to their first installation.
+    This uses the existing scripts/autokom-banner.sh verbatim, so the branding
+    stays identical to install.sh. Help and version require no system probe.
+    """
+    script = ROOT / 'scripts/autokom-banner.sh'
+    if script.is_file():
+        try:
+            result = subprocess.run(['bash', str(script)], check=False, timeout=5)
+            if result.returncode == 0:
+                return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    # Broken/missing banner must never make the CLI unavailable.
+    print('\n  ◈ AUTOKOM · Automation by IKOM\n', flush=True)
+
+
+class GitVersionAction(argparse.Action):
+    """Resolve Git revision only when -v/--version is actually requested."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser._print_message(version_label() + '\n', sys.stdout)
+        parser.exit(0)
+
+
 def make_parser():
     p = argparse.ArgumentParser(prog='autokom', description='AUTOKOM — déployer, configurer et vérifier en une commande',
                                 epilog='Exemples : sudo autokom install | autokom status | sudo autokom check')
-    p.add_argument('--version', action='version', version='AUTOKOM CLI 1.0')
+    p.add_argument('-v', '--version', action=GitVersionAction,
+                   help='Afficher la version/révision Git d’AUTOKOM')
     sub = p.add_subparsers(dest='cmd')
-    i = sub.add_parser('install', help='Détecte et traite automatiquement les composants manquants')
+
+    def subcommand(name, **kwargs):
+        parser = sub.add_parser(name, **kwargs)
+        # Works after the subcommand too: autokom install -v, autokom status -h.
+        parser.add_argument('-v', '--version', action=GitVersionAction,
+                            help='Afficher la version/révision Git d’AUTOKOM')
+        return parser
+
+    i = subcommand('install', help='Détecte et traite automatiquement les composants manquants')
     i.add_argument('--check', action='store_true', help='Afficher le plan sans rien modifier')
     i.add_argument('--from', dest='start_at', choices=STAGES, help='Reprendre à partir de cette phase')
     i.add_argument('--only', choices=STAGES, help='Traiter une seule phase (mode expert)')
-    sub.add_parser('status', help='État synthétique des composants')
-    sub.add_parser('check', help='Audit complet (équivalent script verify/stack.py)')
-    sub.add_parser('config', help='Voir les ports, URLs et domaines, sans secrets')
-    c = sub.add_parser('configure', help='Configuration interactive ciblée (expert)')
+    subcommand('status', help='État synthétique des composants')
+    subcommand('check', help='Audit complet (équivalent script verify/stack.py)')
+    subcommand('config', help='Voir les ports, URLs et domaines, sans secrets')
+    c = subcommand('configure', help='Configuration interactive ciblée (expert)')
     c.add_argument('service', choices=('services', 'plugins', 'observability'))
-    sub.add_parser('update', help='Mise à jour Git fast-forward uniquement (explicite)')
+    subcommand('update', help='Mise à jour Git fast-forward uniquement (explicite)')
     return p
 
 
@@ -378,6 +424,7 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    show_brand()
     try:
         raise SystemExit(main())
     except (CLIError, ConfigError, NetworkError, ValueError, OSError) as exc:

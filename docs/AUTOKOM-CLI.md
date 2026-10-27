@@ -59,3 +59,36 @@ Les noms de fichiers canoniques ne sont plus numérotés. Les anciens scripts nu
 - La vérification Grafana sur disque ne remplace pas un test API authentifié. Le module observabilité effectue une vérification API lorsqu'il dispose des identifiants nécessaires.
 - Aucun outil local ne peut prouver seul la fermeture d'un AWS Security Group. Vérifier les ports exposés côté EC2 et les règles de publication Docker.
 - Une cible déjà installée mais modifiée manuellement peut nécessiter `autokom configure <module>` ; l'automatisation ne doit pas détruire les configurations qu'elle ne reconnaît pas.
+
+## Signature AUTOKOM et raccourcis
+
+Toutes les commandes `autokom` (dont `status`, `check`, `config`, `install`,
+`update`, l'aide et la version) commencent par **la bannière officielle
+AUTOKOM** (`scripts/autokom-banner.sh`). Cette bannière appartient au programme
+principal ; les grandes bannières Jenkins, Prometheus, Grafana, Kibana et Wazuh
+restent réservées à leur **première installation effective**.
+
+```bash
+autokom -v                     # révision/tag Git actuelle
+autokom --version
+autokom -h                     # commandes disponibles
+autokom --help
+autokom install -h             # options de l'installation
+autokom status --version      # disponible aussi après sous-commande
+```
+
+La version est calculée avec `git describe --tags --always --dirty` :
+une mise à jour de la branche affiche automatiquement la nouvelle révision,
+sans numéro codé en dur. Sans Git, un message lisible signale que la révision
+est indisponible ; `-h` et `-v` n'essaient jamais de contacter Jenkins ou les
+services de l'infrastructure.
+
+Les **en-têtes compacts** reprennent la palette des services :
+cyan clair pour AUTOKOM/Jenkins, vert clair pour la fondation, jaune chaud
+pour Prometheus et l'observabilité, orange clair pour Grafana, jaune clair
+pour la sécurité. Les couleurs ANSI apparaissent uniquement sur terminal
+TTY compatible ; elles sont supprimées dans les logs, les redirections,
+ou si `NO_COLOR` est défini.
+
+Le correctif est strictement visuel/ergonomique : aucun port, domaine,
+pare-feu, service systemd, plugin ou identifiant n'est modifié.

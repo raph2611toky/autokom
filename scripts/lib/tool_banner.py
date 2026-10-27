@@ -26,19 +26,67 @@ def first_install(mode: str, installed: bool) -> bool:
     return mode == 'apply' and not installed
 
 
-def section(title: str, detail: str = '') -> None:
-    """En-tete compact encadre, utilise pour toutes les phases hors installation initiale."""
+# Compact AUTOKOM frames: service-specific light colors, no ANSI in redirected
+# logs or when NO_COLOR is present. Full service logos remain first-install only.
+_FRAME_COLORS = {
+    'autokom': '38;2;125;211;252',       # bleu ciel clair
+    'foundation': '38;2;134;239;172',    # vert clair
+    'jenkins': '38;2;125;211;252',       # bleu clair
+    'prometheus': '38;2;255;211;120',    # jaune chaud
+    'grafana': '38;2;255;187;120',       # orange clair
+    'observability': '38;2;253;224;71', # jaune clair
+    'security': '38;2;253;224;71',      # jaune clair
+}
+
+
+def _section_tone(title: str) -> str:
+    normalized = title.casefold()
+    for needle, tone in (
+        ('grafana', 'grafana'),
+        ('prometheus', 'prometheus'),
+        ('jenkins', 'jenkins'),
+        ('observab', 'observability'),
+        ('sécurit', 'security'),
+        ('security', 'security'),
+        ('réseau', 'security'),
+        ('fondation', 'foundation'),
+        ('installation', 'foundation'),
+    ):
+        if needle in normalized:
+            return tone
+    return 'autokom'
+
+
+def _color_enabled() -> bool:
+    return (sys.stdout.isatty() and os.environ.get('NO_COLOR') is None
+            and os.environ.get('TERM', '') not in ('', 'dumb'))
+
+
+def section(title: str, detail: str = '', *, tone: str | None = None) -> None:
+    """Compact colored frame for audits/menus; never prints large logos.
+
+    Tones may be explicitly set when a generic title covers a known service.
+    Styling is applied *after* padding to avoid corrupting box widths.
+    """
+    theme = tone or _section_tone(title)
+    color = _FRAME_COLORS.get(theme, _FRAME_COLORS['autokom'])
+    enabled = _color_enabled()
+    fg = f'\033[{color}m' if enabled else ''
+    bold = '\033[1m' if enabled else ''
+    muted = '\033[2m' if enabled else ''
+    reset = '\033[0m' if enabled else ''
     width = min(max(shutil.get_terminal_size((80, 24)).columns - 6, 44), 68)
     inner = width - 2
-    def crop(s):
-        return s[:max(0, inner - 3)]
-    print('\n  ╭' + '─' * inner + '╮')
-    for msg in ('◈ AUTOKOM  /  ' + title.upper(), detail):
-        if not msg:
+    heading = '◈ AUTOKOM  /  ' + title.upper()
+    print('\n  ' + fg + '╭' + '─' * inner + '╮' + reset)
+    for index, message in enumerate((heading, detail)):
+        if not message:
             continue
-        body = crop(msg)
-        print('  │ ' + body + ' ' * (inner - 2 - len(body)) + ' │')
-    print('  ╰' + '─' * inner + '╯', flush=True)
+        body = message[:max(0, inner - 3)]
+        padding = ' ' * max(0, inner - 2 - len(body))
+        style = (bold + fg) if index == 0 else muted
+        print('  ' + fg + '│' + reset + ' ' + style + body + reset + padding + ' ' + fg + '│' + reset)
+    print('  ' + fg + '╰' + '─' * inner + '╯' + reset, flush=True)
 
 
 def render(tool: str, *, initial_install: bool = False, force: bool = False, no_color: bool = False) -> bool:
