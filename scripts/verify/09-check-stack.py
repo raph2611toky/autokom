@@ -16,7 +16,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts/lib'))
 from observability_config import load, ConfigError
-from tool_banner import render as banner
+from tool_banner import section
 
 
 class Report:
@@ -114,8 +114,7 @@ def foundation(r):
 
 
 def jenkins(r, cfg):
-    banner('jenkins')
-    print('\n02 / 03 — Jenkins')
+    section('02 / 03 · Jenkins', 'Santé et réseau — vérification seulement')
     r.add('OK' if unit_active('jenkins') else ('FAIL' if r.strict else 'WARN'),
           'Jenkins systemd','actif' if unit_active('jenkins') else 'inactif')
     check_bind(r,'Jenkins écoute',cfg.jenkins_port)
@@ -137,8 +136,7 @@ def jenkins(r, cfg):
 
 
 def prometheus_grafana(r, cfg):
-    banner('prometheus')
-    print('\n03 / 03 — Prometheus et Grafana')
+    section('03 / 03 · Observabilité', 'Collecte Jenkins → Prometheus → Grafana')
     (r.add('OK','Prometheus service','actif') if unit_active('prometheus') else r.missing('Prometheus service'))
     check_bind(r,'Prometheus écoute',cfg.prometheus_port)
     code, _ = local_http(cfg.prometheus_port,'/-/ready')
@@ -158,7 +156,6 @@ def prometheus_grafana(r, cfg):
             r.add('FAIL','Prometheus API','JSON invalide')
     else:
         r.missing('Prometheus API',f'HTTP {code or "inaccessible"}')
-    banner('grafana')
     (r.add('OK','Grafana service','actif') if unit_active('grafana-server') else r.missing('Grafana service'))
     check_bind(r,'Grafana écoute',cfg.grafana_port)
     code, raw = local_http(cfg.grafana_port,'/api/health')
@@ -197,7 +194,7 @@ def main(argv=None):
     args = p.parse_args(argv)
     cfg = load(custom_path=args.config, changes=args.set)
     r = Report(strict=args.strict)
-    print('\nAUTOKOM · Audit AWS non destructif')
+    section('Audit AWS', 'Lecture seule · aucun service modifié')
     if args.scope in ('all','foundation'): foundation(r)
     if args.scope in ('all','jenkins'): jenkins(r,cfg)
     if args.scope in ('all','observability'): prometheus_grafana(r,cfg)

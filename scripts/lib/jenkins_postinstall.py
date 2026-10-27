@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from menu import pick, ask
-from tool_banner import render as autokom_banner
+from tool_banner import section
 from observability_config import load as load_observability_settings
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -543,8 +543,7 @@ def main():
         raise ValueError('--wizard-timeout doit être positif')
     if args.interactive:
         args = interactive_configure(args)
-    autokom_banner('jenkins')
-    print('\nAUTOKOM · Jenkins First-Run / Post-Install', flush=True)
+    section('Jenkins · Post-configuration', 'Administrateur · Plugins · Sécurité')
     output('›', 'Mode : ' + ('Simulation' if args.mode == 'check' else 'Application'))
     configure(args)
 

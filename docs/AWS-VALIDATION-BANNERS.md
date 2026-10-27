@@ -4,19 +4,17 @@ Ce patch ne change ni les règles UFW, ni les Security Groups AWS, ni les
 fichiers Nginx, ni les rôles Ansible. Les cinq bannières Python sont copiées
 **sans changement** depuis les fichiers fournis.
 
-## Intégration
+## Intégration et politique finale (v2)
 
-- `scripts/lib/services.py` : logo Jenkins avant le menu Jenkins/BDD.
-- `scripts/lib/jenkins_postinstall.py` : logo Jenkins au début du post-install.
-- `scripts/lib/observability.py` : logos Jenkins/Prometheus/Grafana lors du
-  `--check` ou de l'étape correspondante lors du `--apply`.
-- `scripts/verify/09-check-stack.py` : audit en lecture seule avec logos.
-- `scripts/banners/kibana.py` et `wazuh.py` : disponibles pour les futures phases,
-  **sans installation** de ces outils.
+- `scripts/lib/services.py` : **grand logo Jenkins seulement** si le paquet est absent et que l'utilisateur a lancé `--apply`. Pas de grand logo en simulation ou pour un Jenkins existant.
+- `scripts/lib/jenkins_postinstall.py` : **en-tête AUTOKOM compact uniquement**, y compris pour le premier administrateur, les tokens et plugins.
+- `scripts/lib/observability.py` : grands logos Prometheus/Grafana uniquement à leur toute première installation effective. Jenkins n'a pas de grand logo dans la phase 3.
+- `scripts/verify/09-check-stack.py` : **audit sans grand logo** ; en-têtes encadrés et résultats concis.
+- `scripts/banners/kibana.py` et `wazuh.py` : ressources conservées pour les futures phases.
 
-Règles d'affichage : un logo par outil et par processus, seulement sur TTY.
-`AUTOKOM_BANNERS=off` désactive tout ; `NO_COLOR=1` supprime les couleurs.
-Sur terminal étroit, un titre compact remplace le grand dessin.
+`AUTOKOM_BANNERS=off` interdit l'affichage des grands logos ; `NO_COLOR=1` utilise le rendu monochrome. Les grands dessins restent disponibles en aperçu manuel : `python3 scripts/lib/tool_banner.py grafana --preview`.
+
+Voir également `docs/CLI-LIFECYCLE-VALIDATION.md` pour les scénarios, la sécurité et la procédure AWS.
 
 ## Procédure AWS progressive
 

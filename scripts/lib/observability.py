@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from urllib.parse import urlsplit
 from observability_config import Settings, ConfigError, load as load_settings, validate as validate_settings
-from tool_banner import render as autokom_banner
+from tool_banner import render as autokom_banner, first_install, section
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -599,8 +599,9 @@ def configure_nginx(domain, port, kind, args):
 
 
 def ensure_prometheus(args, *, auth_user=None, auth_password=None):
-    autokom_banner('prometheus')
     exists = package_installed('prometheus')
+    if first_install(args.mode, exists):
+        autokom_banner('prometheus', initial_install=True)
     out('›', f'Prometheus : {"déjà installé" if exists else "absent"}')
     if args.mode == 'check':
         out('+', f'Verifier/installer Prometheus avec écoute locale {cfg().prometheus_base}')
@@ -621,7 +622,8 @@ def ensure_prometheus(args, *, auth_user=None, auth_password=None):
     if exists and active('prometheus'):
         override_changed = not PROM_DROPIN.exists() or PROM_DROPIN.read_text() != unit_override_prometheus()
         config_text = PROM_CONFIG.read_text(encoding='utf-8') if PROM_CONFIG.is_file() else ''
-        needs_job = not re.search(r'^\s*-\s*job_name:\s*[\'\"]?jenkins[\'\"]?\s*$', config_text, flags=re.M)
+        job_pattern = r'^\s*-\s*job_name:\s*[\"\']?' + re.escape(cfg().jenkins_job) + r'[\"\']?\s*$'
+        needs_job = not re.search(job_pattern, config_text, flags=re.M)
         if (override_changed or needs_job) and not yesno('Prometheus existant : confirmer une mise à jour et son redémarrage ?', False, noninteractive=args.non_interactive):
             raise SetupError('Prometheus existant conservé : modification non autorisée')
     # Prestage drop-in BEFORE apt starts the service, to prevent 0.0.0.0 bind.
@@ -691,7 +693,7 @@ def grafana_credentials(is_fresh, args):
         if status != 200:
             raise SetupError('Identifiants Grafana finaux non vérifiés')
         out('✓', f'Administrateur Grafana créé et testé : {username}')
-        return
+        return username, new_password
     # Preserve existing users; offer optional change only with old credentials.
     if not args.non_interactive and yesno('Changer les identifiants de Grafana existant ?', False):
         username = prompt_text('Utilisateur Grafana actuel', default='admin')
@@ -705,17 +707,40 @@ def grafana_credentials(is_fresh, args):
         if code != 200 or grafana_api(username, new, '/api/user')[0] != 200:
             raise SetupError('Échec de vérification du nouveau mot de passe Grafana')
         out('✓', 'Mot de passe Grafana modifié et validé')
+        return username, new
     else:
         out('✓', 'Comptes Grafana existants conservés')
+        return None
+
+
+def verify_grafana_datasource(username: str, password: str, attempts: int = 5):
+    """Confirme par API la datasource reelle (type et URL), sans imprimer de secret."""
+    for attempt in range(attempts):
+        status, raw = grafana_api(username, password,
+                                  '/api/datasources/uid/' + cfg().datasource_uid)
+        if status == 200:
+            try:
+                ds = json.loads(raw)
+            except (ValueError, TypeError) as error:
+                raise SetupError('Grafana API : réponse datasource invalide') from error
+            if (not isinstance(ds, dict) or ds.get('type') != 'prometheus'
+                    or ds.get('url') != cfg().prometheus_base):
+                raise SetupError('Grafana API : type ou URL de la source non conforme')
+            out('✓', f'Grafana API : source Prometheus vérifiée ({cfg().prometheus_base})')
+            return
+        if attempt < attempts - 1:
+            time.sleep(2)
+    raise SetupError('Grafana API : datasource AUTOKOM introuvable après provisionnement')
 
 
 def ensure_grafana(args):
-    autokom_banner('grafana')
     prev = previous_state()
     if (prev.get('grafana_datasource_uid') and
             prev['grafana_datasource_uid'] != cfg().datasource_uid):
         raise SetupError('Changer l’UID d’une source Grafana existante créerait un doublon : migration manuelle requise')
     exists = package_installed('grafana')
+    if first_install(args.mode, exists):
+        autokom_banner('grafana', initial_install=True)
     out('›', f'Grafana OSS : {"déjà installé" if exists else "absent"}')
     if args.mode == 'check':
         out('+', f'Configurer Grafana sur {cfg().grafana_base}, source Prometheus déclarative')
@@ -759,8 +784,12 @@ def ensure_grafana(args):
     else:
         raise SetupError(f'Grafana ne répond pas sur {cfg().grafana_base}')
     assert_private(cfg().grafana_port)
-    grafana_credentials(fresh, args)
-    out('✓', 'Grafana opérationnel, source AUTOKOM Prometheus enregistrée')
+    auth = grafana_credentials(fresh, args)
+    if auth:
+        verify_grafana_datasource(*auth)
+    else:
+        out('!', 'Grafana existant : source présente sur disque ; API non vérifiée sans identifiants')
+    out('✓', 'Grafana opérationnel ; provisionnement de la source Prometheus contrôlé')
 
 
 
@@ -973,7 +1002,7 @@ def ensure_jenkins_exporter(args):
 
 
 def check_only(args):
-    autokom_banner('jenkins')
+    section('Prévisualisation', 'Jenkins → Prometheus → Grafana · aucune modification')
     out('›', 'Simulation en lecture seule : aucune installation, aucun certificat, aucun utilisateur créé')
     if not active('jenkins'):
         out('!', 'Jenkins inactif — il faudra l’activer avant la phase 3')
@@ -981,9 +1010,7 @@ def check_only(args):
         ensure_private_jenkins(args)
         harden_public_jenkins(args)
         ensure_jenkins_exporter(args)
-    autokom_banner('prometheus')
     out('›', f'Prometheus : {"présent" if package_installed("prometheus") else "à installer"}')
-    autokom_banner('grafana')
     out('›', f'Grafana : {"présent" if package_installed("grafana") else "à installer"}')
     for port in (cfg().prometheus_port, cfg().grafana_port):
         li = listener(port)
@@ -1090,7 +1117,7 @@ def main(argv=None):
             fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY); os.close(fd)
         except OSError:
             args.non_interactive = True
-    print('\nAUTOKOM · 06 / 06  Observabilité', flush=True)
+    section('06 / 06 · Observabilité', 'Jenkins → Prometheus → Grafana')
     interactive_options(args)
     SETTINGS = validate_settings(replace(SETTINGS, prometheus_domain=args.prometheus_domain,
                                           grafana_domain=args.grafana_domain, email=args.email))
@@ -1099,7 +1126,6 @@ def main(argv=None):
     if args.mode == 'check':
         check_only(args)
         return 0
-    autokom_banner('jenkins')
     ensure_private_jenkins(args)
     harden_public_jenkins(args)
     auth = ensure_jenkins_exporter(args)
@@ -1120,8 +1146,8 @@ def main(argv=None):
             try:
                 targets = json.loads(payload).get('data', {}).get('activeTargets', [])
                 seen = any(t.get('health') == 'up' and
-                           (t.get('labels', {}).get('job') == 'jenkins' or
-                            t.get('discoveredLabels', {}).get('job') == 'jenkins')
+                           (t.get('labels', {}).get('job') == cfg().jenkins_job or
+                            t.get('discoveredLabels', {}).get('job') == cfg().jenkins_job)
                            for t in targets)
             except (ValueError, TypeError, AttributeError):
                 seen = False

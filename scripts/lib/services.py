@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from menu import pick, ask
 from nginx_discovery import inventory as nginx_inventory, jenkins_domains, domain_plan
 from firewall import secure_firewall, ufw_active, docker_bridges
-from tool_banner import render as autokom_banner
+from tool_banner import render as autokom_banner, first_install, section
 
 ROOT = Path(__file__).resolve().parents[2]
 MANAGED = '# Managed by AUTOKOM: phase-2'
@@ -744,6 +744,19 @@ map $http_upgrade $autokom_jenkins_connection {{
     say(f'Jenkins : reverse proxy {domain} configuré ({options.tls})', '✓')
 
 
+
+def jenkins_package_installed():
+    """Presence du paquet natif, sans changements et sans suppositions sur le port."""
+    try:
+        p = subprocess.run(['dpkg-query', '-W', '-f=${Status}', 'jenkins'],
+                           capture_output=True, text=True, timeout=8, check=False)
+        return ((p.returncode == 0 and p.stdout.strip() == 'install ok installed')
+                or Path('/usr/bin/jenkins').is_file())
+    except (OSError, subprocess.TimeoutExpired):
+        # Ne pas declarer un service absent si l'inventaire est indisponible.
+        raise RuntimeError('Impossible de déterminer si Jenkins est installé : dpkg-query indisponible')
+
+
 def main():
     parser = argparse.ArgumentParser(description='AUTOKOM Jenkins / Database module')
     group = parser.add_mutually_exclusive_group(required=True)
@@ -770,7 +783,7 @@ def main():
     args.docker_access = {'yes': True, 'no': False}.get(args.docker_access)
     if os.geteuid() != 0:
         fail('Exécuter en root/sudo')
-    autokom_banner('jenkins')
+    section('Jenkins & Bases de données', 'Découverte → configuration → validation')
     if not args.non_interactive:
         args = interactive(args)
     elif args.db is None or args.docker_access is None or args.domain is None:
@@ -792,6 +805,8 @@ def main():
         confirmation=args.confirm_firewall,
         say=lambda message: say(message, '›'),
     )
+    if first_install(args.mode, jenkins_package_installed()):
+        autokom_banner('jenkins', initial_install=True)
     ansible_install(args)
     if args.mode == 'check':
         say('Simulation terminée. Aucune configuration Jenkins ou DB modifiée.', '✓')
