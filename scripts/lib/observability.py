@@ -28,6 +28,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from urllib.parse import urlsplit
 from observability_config import Settings, ConfigError, load as load_settings, validate as validate_settings
+from tool_banner import render as autokom_banner
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -598,6 +599,7 @@ def configure_nginx(domain, port, kind, args):
 
 
 def ensure_prometheus(args, *, auth_user=None, auth_password=None):
+    autokom_banner('prometheus')
     exists = package_installed('prometheus')
     out('›', f'Prometheus : {"déjà installé" if exists else "absent"}')
     if args.mode == 'check':
@@ -708,6 +710,7 @@ def grafana_credentials(is_fresh, args):
 
 
 def ensure_grafana(args):
+    autokom_banner('grafana')
     prev = previous_state()
     if (prev.get('grafana_datasource_uid') and
             prev['grafana_datasource_uid'] != cfg().datasource_uid):
@@ -970,6 +973,7 @@ def ensure_jenkins_exporter(args):
 
 
 def check_only(args):
+    autokom_banner('jenkins')
     out('›', 'Simulation en lecture seule : aucune installation, aucun certificat, aucun utilisateur créé')
     if not active('jenkins'):
         out('!', 'Jenkins inactif — il faudra l’activer avant la phase 3')
@@ -977,7 +981,9 @@ def check_only(args):
         ensure_private_jenkins(args)
         harden_public_jenkins(args)
         ensure_jenkins_exporter(args)
+    autokom_banner('prometheus')
     out('›', f'Prometheus : {"présent" if package_installed("prometheus") else "à installer"}')
+    autokom_banner('grafana')
     out('›', f'Grafana : {"présent" if package_installed("grafana") else "à installer"}')
     for port in (cfg().prometheus_port, cfg().grafana_port):
         li = listener(port)
@@ -1093,6 +1099,7 @@ def main(argv=None):
     if args.mode == 'check':
         check_only(args)
         return 0
+    autokom_banner('jenkins')
     ensure_private_jenkins(args)
     harden_public_jenkins(args)
     auth = ensure_jenkins_exporter(args)

@@ -22,10 +22,13 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from menu import pick, ask
+from tool_banner import render as autokom_banner
+from observability_config import load as load_observability_settings
 
 ROOT = Path(__file__).resolve().parents[2]
 JENKINS_HOME = Path('/var/lib/jenkins')
-JENKINS_URL = 'http://127.0.0.1:8080/'
+JENKINS_PORT = load_observability_settings().jenkins_port
+JENKINS_URL = f'http://127.0.0.1:{JENKINS_PORT}/'
 CLI_JAR = Path('/opt/autokom/tools/jenkins-cli.jar')
 SENSITIVE = Path('/etc/autokom/secrets')
 PROFILES = ROOT / 'config/jenkins'
@@ -129,9 +132,9 @@ def first_run_guidance(web_url, *, apply, timeout=900):
     if web_url:
         output('›', 'Premier démarrage Jenkins : ' + web_url)
     else:
-        output('⚠', 'Aucun domaine Jenkins HTTPS validé. Utiliser un tunnel SSH vers 127.0.0.1:8080.')
-        output('›', 'Depuis votre ordinateur : ssh -L 8080:127.0.0.1:8080 utilisateur@serveur')
-        output('›', 'Puis ouvrir http://127.0.0.1:8080/')
+        output('⚠', f'Aucun domaine Jenkins HTTPS validé. Utiliser un tunnel SSH vers 127.0.0.1:{JENKINS_PORT}.')
+        output('›', f'Depuis votre ordinateur : ssh -L {JENKINS_PORT}:127.0.0.1:{JENKINS_PORT} utilisateur@serveur')
+        output('›', f'Puis ouvrir http://127.0.0.1:{JENKINS_PORT}/')
     output('›', '1. Déverrouiller Jenkins avec le mot de passe initial :')
     output('›', '   sudo cat /var/lib/jenkins/secrets/initialAdminPassword')
     output('›', '2. Dans le wizard : « Select plugins to install » → « None » → « Install »')
@@ -540,6 +543,7 @@ def main():
         raise ValueError('--wizard-timeout doit être positif')
     if args.interactive:
         args = interactive_configure(args)
+    autokom_banner('jenkins')
     print('\nAUTOKOM · Jenkins First-Run / Post-Install', flush=True)
     output('›', 'Mode : ' + ('Simulation' if args.mode == 'check' else 'Application'))
     configure(args)

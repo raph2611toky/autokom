@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from menu import pick, ask
 from nginx_discovery import inventory as nginx_inventory, jenkins_domains, domain_plan
 from firewall import secure_firewall, ufw_active, docker_bridges
+from tool_banner import render as autokom_banner
 
 ROOT = Path(__file__).resolve().parents[2]
 MANAGED = '# Managed by AUTOKOM: phase-2'
@@ -769,6 +770,7 @@ def main():
     args.docker_access = {'yes': True, 'no': False}.get(args.docker_access)
     if os.geteuid() != 0:
         fail('Exécuter en root/sudo')
+    autokom_banner('jenkins')
     if not args.non_interactive:
         args = interactive(args)
     elif args.db is None or args.docker_access is None or args.domain is None:
