@@ -62,14 +62,18 @@ Les noms de fichiers canoniques ne sont plus numérotés. Les anciens scripts nu
 
 ## Signature AUTOKOM et raccourcis
 
-Toutes les commandes `autokom` (dont `status`, `check`, `config`, `install`,
-`update`, l'aide et la version) commencent par **la bannière officielle
-AUTOKOM** (`scripts/autokom-banner.sh`). Cette bannière appartient au programme
-principal ; les grandes bannières Jenkins, Prometheus, Grafana, Kibana et Wazuh
-restent réservées à leur **première installation effective**.
+La grande bannière officielle AUTOKOM (`scripts/autokom-banner.sh`) est
+**désactivée par défaut** pour garder une CLI rapide et compacte. Elle s'affiche
+seulement avec `-b` ou `--with-banner`, avant **ou après** la sous-commande.
+Les cadres compacts et leurs couleurs restent visibles sans cette option.
+Les grandes bannières Jenkins, Prometheus, Grafana, Kibana et Wazuh gardent leur
+règle indépendante : **première installation effective uniquement**.
 
 ```bash
-autokom -v                     # révision/tag Git actuelle
+autokom -v                     # version produit et révision Git (sans bannière)
+autokom -b -v                  # même résultat, avec bannière
+autokom --with-banner status  # inventaire, avec bannière
+sudo autokom install -b --check # simulation, avec bannière
 autokom --version
 autokom -h                     # commandes disponibles
 autokom --help
@@ -121,6 +125,6 @@ avec un exemple adapte. Ni aide ni version ne demarrent un scan systeme.
 - `autokom install` affiche un compteur/barre **de phases traitees** (`1/4`,
   `2/4`, etc.), jamais un pourcentage fictif de telechargement ou de duree.
 - Les gros logos Jenkins, Prometheus et Grafana restent reserves a leur
-  premiere installation ; la banniere AUTOKOM reste presente sur ses commandes.
+  premiere installation ; la banniere AUTOKOM est optionnelle via `-b` / `--with-banner`.
 - Les operations de pare-feu, service, base, certificat et Jenkins ne sont pas
   modifiees par ce correctif de presentation.

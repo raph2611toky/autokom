@@ -356,11 +356,10 @@ def version_label():
 
 
 def show_brand():
-    """Use the original AUTOKOM ASCII logo for every top-level CLI invocation.
+    """Render the official AUTOKOM logo only when the user asks for it.
 
-    Tool-specific large logos remain restricted to their first installation.
-    This uses the existing scripts/autokom-banner.sh verbatim, so the branding
-    stays identical to install.sh. Help and version require no system probe.
+    No system service is probed. Tool-specific banners are independently
+    restricted to the first installation of the corresponding service.
     """
     script = ROOT / 'scripts/autokom-banner.sh'
     if script.is_file():
@@ -390,6 +389,8 @@ def make_parser():
                                 epilog='Exemples : sudo autokom install | autokom status | sudo autokom check')
     p.add_argument('-v', '--version', action=GitVersionAction,
                    help='Afficher la version/révision Git d’AUTOKOM')
+    p.add_argument('-b', '--with-banner', action='store_true',
+                   help='Afficher la grande bannière AUTOKOM (masquée par défaut)')
     sub = p.add_subparsers(dest='cmd')
 
     def subcommand(name, **kwargs):
@@ -397,6 +398,10 @@ def make_parser():
         # Works after the subcommand too: autokom install -v, autokom status -h.
         parser.add_argument('-v', '--version', action=GitVersionAction,
                             help='Afficher la version/révision Git d’AUTOKOM')
+        # SUPPRESS avoids overriding a top-level -b with a subparser default.
+        parser.add_argument('-b', '--with-banner', action='store_true',
+                            default=argparse.SUPPRESS,
+                            help='Afficher la grande bannière AUTOKOM')
         return parser
 
     i = subcommand('install', help='Détecte et traite automatiquement les composants manquants',
@@ -417,7 +422,14 @@ def make_parser():
 
 def main(argv=None):
     parser = make_parser()
-    a = parser.parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    # argparse exits while processing -h/--help and -v/--version. Render the
+    # opt-in logo first so argument ordering remains flexible, even with help.
+    # Ignore any token after `--`, which marks the end of CLI options.
+    option_tokens = arguments[:arguments.index('--')] if '--' in arguments else arguments
+    if '-b' in option_tokens or '--with-banner' in option_tokens:
+        show_brand()
+    a = parser.parse_args(arguments)
     if not a.cmd:
         parser.print_help()
         return 0
@@ -453,7 +465,6 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    show_brand()
     try:
         raise SystemExit(main())
     except (CLIError, ConfigError, NetworkError, ValueError, OSError) as exc:
