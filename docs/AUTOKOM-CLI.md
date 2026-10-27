@@ -128,3 +128,22 @@ avec un exemple adapte. Ni aide ni version ne demarrent un scan systeme.
   premiere installation ; la banniere AUTOKOM est optionnelle via `-b` / `--with-banner`.
 - Les operations de pare-feu, service, base, certificat et Jenkins ne sont pas
   modifiees par ce correctif de presentation.
+
+## Loader d'activité et écoute Jenkins (correctif v6)
+
+- Les questions `? ... [o/N]` restent **immobiles** tant qu'une réponse est attendue : aucun spinner ne doit se superposer au texte tapé.
+- **Après** validation, le contrôle de l'écoute privée Jenkins affiche un loader Braille discret pendant `systemctl restart` et la vérification des sockets. La ligne est effacée avant le résultat final. `autokom update` fait de même pendant `git pull` ; les messages Git sont restitués une fois l'opération terminée.
+- Le loader n'apparaît jamais dans les fichiers journaux, les sorties redirigées ou avec `NO_COLOR`. Une tâche terminée s'annonce par `✓` ou `✗` ; aucune progression temporelle fictive.
+- Sur Ubuntu/Jenkins, `ss` peut indiquer `127.0.0.1:8080`, `[::1]:8080` ou `[::ffff:127.0.0.1]:8080` pour une écoute privée. Le dernier format est IPv4-mappé dans IPv6, **pas une exposition publique**. AUTOKOM traite correctement les trois.
+- `0.0.0.0:8080`, `*:8080` et `[::]:8080` restent des écoutes publiques. AUTOKOM exige l'accord avant redémarrage, ne touche pas aux autres overrides systemd et restaure son fichier de configuration si la nouvelle écoute ne devient pas privée. Le message de diagnostic filtre les variables sensibles.
+- Le fichier `/etc/systemd/system/jenkins.service.d/20-autokom-loopback.conf` appartient exclusivement à AUTOKOM. Un autre override pouvant réimposer l'adresse d'écoute doit être inspecté par l'administrateur : ne jamais écraser automatiquement les overrides tiers.
+
+Après `autokom update`, exécuter `sudo autokom install --check` puis `sudo autokom install`. En cas de blocage persistant, vérifier **localement**, avant de partager une sortie expurgée :
+
+```sh
+sudo systemctl cat jenkins
+sudo ss -lntp | grep ':8080'
+sudo journalctl -u jenkins -n 50 --no-pager
+```
+
+**Sécurité :** ne pas copier/coller d'identifiants, secrets d'environnements, tokens, mots de passe ou URL signées contenus dans les overrides ou les journaux. L'accès extérieur doit aussi être refusé sur 8080 dans le Security Group AWS, indépendamment du diagnostic local.

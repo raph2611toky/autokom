@@ -245,10 +245,15 @@ def apply_stage(stage, state, cfg):
                 raise CLIError('Port Jenkins introuvable : revoir observability.ini et systemd')
             if not yesno(f'Jenkins exposé sur TCP/{cfg.jenkins_port}. Restreindre à 127.0.0.1 et redémarrer ?'):
                 raise CLIError('Écoute Jenkins non corrigée : arrêt sécurisé avant observabilité')
+            # The question must remain stable; animation begins only after
+            # the answer, while systemd restarts and we verify the listener.
+            message('  › Redémarrage Jenkins accepté ; vérification de l’écoute privée…')
             try:
-                outcome = enforce(cfg.jenkins_port, approved=True)
+                with Activity('Redémarrage Jenkins · écoute locale', delay=0.2):
+                    outcome = enforce(cfg.jenkins_port, approved=True)
             except NetworkError as exc:
-                raise CLIError(str(exc)) from exc
+                raise CLIError(str(exc) + ' Vérifier : systemctl cat jenkins ; '
+                               'systemctl show jenkins -p Environment ; ss -lntp.') from exc
             message(f'  ✓ Jenkins listener : {outcome}')
     elif stage == 'plugins':
         if not state.jenkins_active:
@@ -442,7 +447,22 @@ def main(argv=None):
         if p is None or p.returncode or p.stdout.strip():
             raise CLIError('Dépôt modifié localement : mise à jour refusée')
         message('  + Mise à jour AUTOKOM explicite...')
-        return subprocess.call(['git', '-C', str(ROOT), 'pull', '--ff-only'])
+        try:
+            # Capture Git output so the temporary spinner does not fight with
+            # progress/status printed by the child process on the same line.
+            with Activity('Téléchargement et vérification Git', delay=0.2):
+                result = subprocess.run(['git', '-C', str(ROOT), 'pull', '--ff-only'],
+                                        capture_output=True, text=True, timeout=180,
+                                        check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CLIError('Mise à jour Git interrompue ou trop longue') from exc
+        if result.stdout:
+            print(result.stdout, end='' if result.stdout.endswith('\n') else '\n')
+        if result.stderr:
+            print(result.stderr, end='' if result.stderr.endswith('\n') else '\n', file=sys.stderr)
+        if result.returncode:
+            raise CLIError(f'git pull a échoué (code {result.returncode})')
+        return 0
     cfg = load_settings()
     if a.cmd == 'config':
         section('Paramètres', 'Aucune donnée sensible')
