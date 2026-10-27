@@ -5,6 +5,8 @@ No change to an existing security realm / authorization strategy. Plugin install
 uses authenticated Jenkins CLI; secrets never appear in command-line arguments.
 """
 import argparse
+import base64
+import json
 from contextlib import contextmanager, ExitStack
 import getpass
 import tempfile
@@ -195,37 +197,93 @@ _ADMIN_CHECK = ('import jenkins.model.Jenkins; '
                 'println("AUTOKOM_ADMIN_AUTHORIZED")')
 
 
-def verify_admin(auth_file, expected_username=None):
-    """Verify real Jenkins identity and Overall/Administer BEFORE modifications.
+def verify_rest_identity(auth_file, expected_username=None):
+    """Classify a CLI failure using Jenkins' authenticated REST whoAmI API.
 
-    The CLI reads a private 0600 auth file. No token goes into process args,
-    stdout, exception text, or the installer logs.
+    Only 127.0.0.1 is contacted, never a proxy or a redirect. Credentials are
+    kept in memory, not placed in subprocess args, logs or exception text.
+    """
+    try:
+        raw = Path(auth_file).read_text(encoding='utf-8').rstrip('\n')
+        username, token = raw.split(':', 1)
+    except (OSError, UnicodeError, ValueError):
+        raise RuntimeError('Fichier temporaire d’authentification Jenkins illisible.') from None
+    if not username or not token:
+        raise AuthenticationRejected('Compte ou token Jenkins manquant.')
+
+    authorization = 'Basic ' + base64.b64encode((username + ':' + token).encode('utf-8')).decode('ascii')
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, request, fp, code, msg, headers, url):
+            return None
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
+    request = urllib.request.Request(
+        JENKINS_URL + 'whoAmI/api/json',
+        headers={'Authorization': authorization, 'Accept': 'application/json',
+                 'User-Agent': 'AUTOKOM-Jenkins/1'},
+    )
+    try:
+        with opener.open(request, timeout=10) as response:
+            if response.status != 200:
+                raise RuntimeError('API Jenkins locale : réponse HTTP inattendue.')
+            payload = json.loads(response.read(32768))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise AuthenticationRejected('Compte ou token refusé par Jenkins (HTTP 401/403).') from None
+        if exc.code in (301, 302, 303, 307, 308):
+            raise RuntimeError('Jenkins redirige l’API locale : vérifier le contexte HTTP et la configuration de sécurité.') from None
+        raise RuntimeError(f'API Jenkins locale indisponible (HTTP {exc.code}).') from None
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+        raise RuntimeError(f'Jenkins inaccessible en local sur 127.0.0.1:{JENKINS_PORT} ; vérifier systemctl et curl.') from None
+    except (json.JSONDecodeError, UnicodeError, ValueError, TypeError):
+        raise RuntimeError('Réponse Jenkins whoAmI invalide : API locale non vérifiable.') from None
+
+    if not isinstance(payload, dict):
+        raise RuntimeError('Réponse Jenkins whoAmI non conforme.')
+    name = str(payload.get('name') or '')
+    if not payload.get('authenticated') or name.casefold() == 'anonymous' or not name:
+        raise AuthenticationRejected('Compte ou token non reconnu par Jenkins.')
+    if expected_username and name.casefold() != expected_username.casefold():
+        raise AuthenticationRejected('Token associé à un autre compte Jenkins.')
+    return name
+
+
+def verify_admin(auth_file, expected_username=None):
+    """Check Jenkins CLI identity and Overall/Administer without false retries.
+
+    If the CLI transport fails, use REST to tell a valid token from bad
+    credentials. Never interpret a valid token + broken CLI as a login failure.
     """
     try:
         identity = cli(auth_file, ['who-am-i'], timeout=45)
-    except RuntimeError as exc:
-        detail = str(exc).casefold()
-        if any(x in detail for x in ('authentication', 'unauthorized', 'forbidden',
-                                      'http 401', 'http 403', 'accessdenied',
-                                      'permission', 'anonymous', 'invalid credential')):
-            raise AuthenticationRejected('Identifiant ou token Jenkins refusé.') from None
-        raise RuntimeError('Impossible de vérifier la connexion Jenkins : vérifier le service et le réseau.') from None
+    except (RuntimeError, subprocess.TimeoutExpired, OSError):
+        # This is deliberately a *separate* transport. An authenticated REST
+        # response proves that the token was valid even if Jenkins CLI failed.
+        verify_rest_identity(auth_file, expected_username)
+        raise RuntimeError(
+            'Token Jenkins accepté par l’API REST, mais le client CLI local échoue. '
+            'Vérifier le transport -http, la version de jenkins-cli.jar et les logs Jenkins.'
+        ) from None
     match = re.search(r'^\s*Authenticated as:\s*(.*?)\s*$', identity, flags=re.I | re.M)
     if not match or not match.group(1) or match.group(1).casefold() == 'anonymous':
-        raise AuthenticationRejected('Identifiant ou token Jenkins non reconnu.')
+        # Jenkins CLI can silently authenticate as anonymous; REST distinguishes
+        # a rejected token from a transport-specific authentication failure.
+        verify_rest_identity(auth_file, expected_username)
+        raise RuntimeError('Token valide par REST, mais Jenkins CLI utilise un compte anonyme.')
     if expected_username is not None and match.group(1).casefold() != expected_username.casefold():
         raise AuthenticationRejected('Le token ne correspond pas au compte indiqué.')
     try:
         result = cli(auth_file, ['groovy', '='], stdin=_ADMIN_CHECK, timeout=45)
-    except RuntimeError as exc:
+    except (RuntimeError, subprocess.TimeoutExpired, OSError) as exc:
         detail = str(exc).casefold()
         if any(x in detail for x in ('permission', 'accessdenied', 'forbidden',
                                       'http 401', 'http 403', 'unauthorized',
                                       'authentication', 'anonymous', 'missing the overall')):
             raise AuthenticationRejected('Ce compte ne possède pas les droits Overall/Administer.') from None
-        raise RuntimeError('Contrôle des droits Jenkins indisponible : vérifier Jenkins CLI et le serveur.') from None
+        raise RuntimeError('Compte reconnu, mais contrôle des droits via Groovy CLI impossible ; vérifier Jenkins CLI et Overall/Administer.') from None
     if 'AUTOKOM_ADMIN_AUTHORIZED' not in result:
-        raise AuthenticationRejected('Droits administrateur Jenkins non confirmés.')
+        raise RuntimeError('Compte reconnu, mais réponse du contrôle administrateur Jenkins inattendue.')
 
 
 def _short_step(title):
@@ -387,7 +445,7 @@ def secure_file(path):
 
 
 def cli(auth_file, subcommand, *, stdin=None, timeout=300, status=""):
-    return command(['java','-jar', str(CLI_JAR),'-s', JENKINS_URL, '-webSocket',
+    return command(['java','-jar', str(CLI_JAR),'-s', JENKINS_URL, '-http',
                     '-auth', f'@{auth_file}', *subcommand], stdin=stdin, timeout=timeout, status=status)
 
 

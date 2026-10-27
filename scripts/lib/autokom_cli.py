@@ -447,21 +447,34 @@ def main(argv=None):
         if p is None or p.returncode or p.stdout.strip():
             raise CLIError('Dépôt modifié localement : mise à jour refusée')
         message('  + Mise à jour AUTOKOM explicite...')
+        before = command(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'])
+        old_head = before.stdout.strip() if before and before.returncode == 0 else ''
         try:
-            # Capture Git output so the temporary spinner does not fight with
-            # progress/status printed by the child process on the same line.
+            # Avoid two simultaneous writers: Git output is printed after the
+            # spinner is removed. The colored diffstat is generated separately.
             with Activity('Téléchargement et vérification Git', delay=0.2):
-                result = subprocess.run(['git', '-C', str(ROOT), 'pull', '--ff-only'],
+                result = subprocess.run(['git', '-C', str(ROOT), 'pull', '--ff-only', '--no-stat'],
                                         capture_output=True, text=True, timeout=180,
                                         check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise CLIError('Mise à jour Git interrompue ou trop longue') from exc
-        if result.stdout:
-            print(result.stdout, end='' if result.stdout.endswith('\n') else '\n')
         if result.stderr:
             print(result.stderr, end='' if result.stderr.endswith('\n') else '\n', file=sys.stderr)
+        if result.stdout:
+            print(result.stdout, end='' if result.stdout.endswith('\n') else '\n')
         if result.returncode:
             raise CLIError(f'git pull a échoué (code {result.returncode})')
+        after = command(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'])
+        new_head = after.stdout.strip() if after and after.returncode == 0 else ''
+        if old_head and new_head and old_head != new_head:
+            use_color = (sys.stdout.isatty() and 'NO_COLOR' not in os.environ
+                         and os.environ.get('TERM', '') not in ('', 'dumb'))
+            # Git's own colored diffstat: green insertions, red deletions.
+            stat = command(['git', '-C', str(ROOT), 'diff',
+                            '--color=always' if use_color else '--color=never',
+                            '--stat', old_head, new_head], timeout=30)
+            if stat and stat.returncode == 0 and stat.stdout:
+                print(stat.stdout, end='' if stat.stdout.endswith('\n') else '\n')
         return 0
     cfg = load_settings()
     if a.cmd == 'config':

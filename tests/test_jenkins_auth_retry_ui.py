@@ -90,7 +90,8 @@ class RetryTests(unittest.TestCase):
             self.assertEqual(cli.call_args_list[0].args[1],['who-am-i'])
 
     def test_anonymous_cli_rejected_before_admin(self):
-        with mock.patch.object(m,'cli',return_value='Authenticated as: anonymous\n') as cli:
+        with mock.patch.object(m,'cli',return_value='Authenticated as: anonymous\n') as cli, \
+             mock.patch.object(m,'verify_rest_identity',side_effect=m.AuthenticationRejected('anonymous')):
             with self.assertRaises(m.AuthenticationRejected):
                 m.verify_admin('/root/token',expected_username='admin')
             cli.assert_called_once()
@@ -102,7 +103,8 @@ class RetryTests(unittest.TestCase):
             cli.assert_called_once()
 
     def test_403_hides_server_error(self):
-        with mock.patch.object(m,'cli',side_effect=RuntimeError('HTTP 403: private-token-canary')):
+        with mock.patch.object(m,'cli',side_effect=RuntimeError('HTTP 403: private-token-canary')), \
+             mock.patch.object(m,'verify_rest_identity',side_effect=m.AuthenticationRejected('refusé')):
             with self.assertRaises(m.AuthenticationRejected) as ctx:
                 m.verify_admin('/root/token','admin')
             self.assertNotIn('private-token-canary',str(ctx.exception))
