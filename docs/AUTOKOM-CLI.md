@@ -92,3 +92,35 @@ ou si `NO_COLOR` est défini.
 
 Le correctif est strictement visuel/ergonomique : aucun port, domaine,
 pare-feu, service systemd, plugin ou identifiant n'est modifié.
+
+## Version produit stable, revision Git dynamique
+
+Le fichier `VERSION` a la racine fixe la **version de produit** (`0.1`). Elle
+reste identique entre deux mises a jour Git tant que le mainteneur ne modifie
+pas le fichier et ne publie pas ce changement. La revision, elle, suit Git.
+
+```text
+AUTOKOM · version 0.1
+AUTOKOM · révision 6b8d6cd
+```
+
+`autokom -v`, `autokom --version` et `<sous-commande> -v/--version`
+montrent les deux lignes. Toutes les sous-commandes possedent `-h`/`--help`,
+avec un exemple adapte. Ni aide ni version ne demarrent un scan systeme.
+
+## Feedback et progression
+
+- `✓` vert clair = controle reussi, `+` bleu clair = action attendue,
+  `!` jaune clair = vigilance, `-` gris = phase ignoree,
+  `✗` rouge = erreur, `›` bleu clair = information.
+- Seul le signe est colorise : les alignements ne bougent pas. Les
+  journaux/redirections, `NO_COLOR` et `TERM=dumb` restent sans ANSI.
+- `autokom status` et les inspections silencieuses de `install` affichent un
+  **loader temporaire**, uniquement en TTY et uniquement lorsque la verification
+  prend assez de temps. Les menus interactifs ne sont pas masques.
+- `autokom install` affiche un compteur/barre **de phases traitees** (`1/4`,
+  `2/4`, etc.), jamais un pourcentage fictif de telechargement ou de duree.
+- Les gros logos Jenkins, Prometheus et Grafana restent reserves a leur
+  premiere installation ; la banniere AUTOKOM reste presente sur ses commandes.
+- Les operations de pare-feu, service, base, certificat et Jenkins ne sont pas
+  modifiees par ce correctif de presentation.

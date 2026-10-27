@@ -149,3 +149,115 @@ def main(argv=None):
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
+# Symboles standard de l'interface. Colorer le glyphe seulement : les tableaux
+# gardent leur alignement, même avec des caractères ANSI présents.
+_MARKER_COLORS = {
+    '✓': '38;2;134;239;172',  # conforme : vert tendre
+    '+': '38;2;125;211;252',  # action : cyan
+    '!': '38;2;253;224;71',   # attention : jaune
+    '-': '38;2;156;163;175',  # ignoré / sans modification : gris
+    '✗': '38;2;248;113;113',  # échec : rouge
+    '›': '38;2;125;211;252',  # information : bleu clair
+    '?': '38;2;253;224;71',   # question : jaune
+}
+
+
+def colored_marker(line: str, *, stream=None) -> str:
+    """Met en couleur UNIQUEMENT le symbole en début de ligne (après espaces).
+
+    Pas de séquences ANSI dans les fichiers/logs, les pipelines, TERM=dumb ou
+    NO_COLOR. Le texte reste inchangé à l'octet près hors terminal couleur.
+    """
+    import re
+    out = stream if stream is not None else sys.stdout
+    match = re.match(r'^(\s*)([✓+!\-✗›?])(?=\s)', line)
+    if not match or not _color_enabled_for(out):
+        return line
+    marker = match.group(2)
+    start, end = match.span(2)
+    return line[:start] + f'\033[{_MARKER_COLORS[marker]}m{marker}\033[0m' + line[end:]
+
+
+def _color_enabled_for(stream) -> bool:
+    return (getattr(stream, 'isatty', lambda: False)()
+            and os.environ.get('NO_COLOR') is None
+            and os.environ.get('TERM', '') not in ('', 'dumb'))
+
+
+def message(line: str, *, stream=None, flush=False) -> None:
+    """Statut public de la CLI : ✓ + ! - ✗ › restent lisibles sans couleur."""
+    out = stream or sys.stdout
+    print(colored_marker(line, stream=out), file=out, flush=flush)
+
+
+def phase_progress(completed: int, total: int, label: str, *, skipped=False,
+                   stream=None) -> None:
+    """Progression des PHASES vérifiées uniquement, pas des téléchargements.
+
+    La barre ne donne jamais un pourcentage d'avancement temporel : c'est un
+    compteur d'étapes terminées. Hors terminal, simple ligne sans barres ANSI.
+    """
+    out = stream or sys.stdout
+    if not (0 <= completed <= total and total > 0):
+        raise ValueError('Progression de phases invalide')
+    prefix = '-' if skipped else '✓'
+    if not getattr(out, 'isatty', lambda: False)():
+        message(f'  {prefix} Étapes {completed}/{total} · {label}', stream=out)
+        return
+    width = min(16, max(6, shutil.get_terminal_size((80, 24)).columns - 65))
+    filled = (width * completed) // total
+    bar = '━' * filled + '─' * (width - filled)
+    message(f'  {prefix} [{bar}] {completed}/{total} · {label}', stream=out)
+
+
+class Activity:
+    """Spinner discret UNIQUEMENT lors d'attentes silencieuses connues.
+
+    Le traitement principal se fait dans le thread appelant. Aucun spinner
+    pour commandes interactives, ni dans les journaux. Une attente courte ne
+    laisse aucune trace. Aucune fausse estimation de durée ou de pourcentage.
+    """
+    def __init__(self, label: str, *, delay=0.35, interval=0.12, stream=None):
+        self.label = label
+        self.delay = delay
+        self.interval = interval
+        self.stream = stream
+        self._stop = None
+        self._thread = None
+        self._visible = False
+
+    def __enter__(self):
+        import threading
+        out = self.stream if self.stream is not None else sys.stdout
+        self.stream = out
+        if not _color_enabled_for(out):
+            return self
+        self._stop = threading.Event()
+
+        def run():
+            if self._stop.wait(self.delay):
+                return
+            frames = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+            tick = 0
+            while not self._stop.is_set():
+                frame = frames[tick % len(frames)]
+                out.write(f'\r  \033[38;2;125;211;252m{frame}\033[0m {self.label}')
+                out.flush()
+                self._visible = True
+                tick += 1
+                self._stop.wait(self.interval)
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._stop is not None:
+            self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.5)
+        if self._visible:
+            self.stream.write('\r\033[2K')
+            self.stream.flush()
+        return False

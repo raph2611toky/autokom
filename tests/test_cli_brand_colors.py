@@ -68,8 +68,8 @@ class FlagsTests(unittest.TestCase):
     def test_git_revision_is_dynamic(self):
         with patch.object(cli, 'command', side_effect=[Mock(returncode=0, stdout='02ad048\n'),
                                                     Mock(returncode=0, stdout='v2.0.0\n')]):
-            self.assertEqual(cli.version_label(), 'AUTOKOM · révision 02ad048')
-            self.assertEqual(cli.version_label(), 'AUTOKOM · révision v2.0.0')
+            self.assertEqual(cli.version_label(), 'AUTOKOM · version 0.1\nAUTOKOM · révision 02ad048')
+            self.assertEqual(cli.version_label(), 'AUTOKOM · version 0.1\nAUTOKOM · révision v2.0.0')
 
     def test_actual_banner_script_used_not_new_logo(self):
         with tempfile.TemporaryDirectory() as tmp:

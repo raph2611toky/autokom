@@ -21,7 +21,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts/lib'))
 from observability_config import load as load_settings, ConfigError
-from tool_banner import section
+from tool_banner import section, message, colored_marker, Activity, phase_progress
 from jenkins_network import bindings, private_listener, enforce, NetworkError
 
 STAGES = ('foundation', 'services', 'plugins', 'observability')
@@ -184,7 +184,7 @@ def selected(args):
 def print_plan(state, plan, stages):
     section('Installation adaptative', '✓ conforme · + action · ! intervention nécessaire')
     if not state.ufw_active:
-        print('  ! Pare-feu UFW inactif / indéterminé : vérifier AWS Security Groups et Docker.')
+        message('  ! Pare-feu UFW inactif / indéterminé : vérifier AWS Security Groups et Docker.')
     for index, stage in enumerate(stages, 1):
         blocked = stage in ('plugins', 'observability') and not state.jenkins_active
         status = ('!  en attente de Jenkins' if blocked else
@@ -194,8 +194,8 @@ def print_plan(state, plan, stages):
             note = ' (écoute Jenkins à restreindre — validation nécessaire)'
         if stage == 'plugins' and plan[stage] and state.jenkins_active:
             note = f' ({len(state.jenkins_plugins_missing)} plugins manquants)'
-        print(f'  {status} · {LABELS[stage]}{note}')
-    print('  › Les bases de données existantes ne sont jamais reconfigurées sans choix explicite.')
+        message(f'  {status} · {LABELS[stage]}{note}')
+    message('  › Les bases de données existantes ne sont jamais reconfigurées sans choix explicite.')
 
 
 def yesno(question):
@@ -249,7 +249,7 @@ def apply_stage(stage, state, cfg):
                 outcome = enforce(cfg.jenkins_port, approved=True)
             except NetworkError as exc:
                 raise CLIError(str(exc)) from exc
-            print(f'  ✓ Jenkins listener : {outcome}')
+            message(f'  ✓ Jenkins listener : {outcome}')
     elif stage == 'plugins':
         if not state.jenkins_active:
             raise CLIError('Configurer Jenkins avant ses plugins')
@@ -259,14 +259,15 @@ def apply_stage(stage, state, cfg):
         old_pid = previous.stdout.strip() if previous and previous.returncode == 0 else ''
         call_module('scripts/install/jenkins.sh', '--apply', '--interactive')
         deadline = time.monotonic() + 120
-        while time.monotonic() < deadline:
-            current = command(['systemctl', 'show', '-p', 'MainPID', '--value', 'jenkins'])
-            new_pid = current.stdout.strip() if current and current.returncode == 0 else ''
-            if (not old_pid or (new_pid and new_pid != old_pid)) and \
-                    works(['systemctl', 'is-active', '--quiet', 'jenkins']) and \
-                    private_listener(bindings(cfg.jenkins_port)):
-                return
-            time.sleep(3)
+        with Activity('Vérification du redémarrage Jenkins'):
+            while time.monotonic() < deadline:
+                current = command(['systemctl', 'show', '-p', 'MainPID', '--value', 'jenkins'])
+                new_pid = current.stdout.strip() if current and current.returncode == 0 else ''
+                if (not old_pid or (new_pid and new_pid != old_pid)) and \
+                        works(['systemctl', 'is-active', '--quiet', 'jenkins']) and \
+                        private_listener(bindings(cfg.jenkins_port)):
+                    return
+                time.sleep(3)
         raise CLIError('safe-restart Jenkins non confirmé (jobs peut-être actifs) : relancer sudo autokom install après le redémarrage.')
     elif stage == 'observability':
         if not state.jenkins_active or not state.jenkins_private:
@@ -276,37 +277,44 @@ def apply_stage(stage, state, cfg):
 
 def perform(args, cfg):
     stages = selected(args)
-    state = snapshot(cfg)
+    with Activity('Analyse de l’infrastructure'):
+        state = snapshot(cfg)
     plan = actions(state)
     print_plan(state, plan, stages)
     if args.check:
-        print('  ✓ Simulation en lecture seule : aucune installation lancée.')
+        message('  ✓ Simulation en lecture seule : aucune installation lancée.')
         return 0
     if os.geteuid() != 0:
         raise CLIError('Utiliser sudo autokom install')
-    for stage in stages:
-        state = snapshot(cfg)
+    for index, stage in enumerate(stages, 1):
+        with Activity(f'Contrôle {LABELS[stage]}'):
+            state = snapshot(cfg)
         should = actions(state)[stage]
         if not should:
-            print(f'  ✓ {LABELS[stage]} : déjà conforme, ignoré')
+            message(f'  - {LABELS[stage]} : déjà conforme, ignoré')
+            phase_progress(index, len(stages), LABELS[stage], skipped=True)
             continue
         apply_stage(stage, state, cfg)
-        # Next stage uses freshly detected state. No cached assumptions.
-        print(f'  ✓ {LABELS[stage]} : module terminé, contrôle de l’état en cours')
-    state = snapshot(cfg)
+        # Avancement par phases TERMINEES (pas un pourcentage temporel).
+        # La conformité réelle de tous les services est revérifiée ensuite.
+        message(f'  ✓ {LABELS[stage]} : module exécuté, vérification finale à venir')
+        phase_progress(index, len(stages), LABELS[stage])
+    with Activity('Contrôle final des services'):
+        state = snapshot(cfg)
     remaining = [LABELS[s] for s in stages if actions(state)[s]]
     if remaining:
-        print('  ! À revoir : ' + ', '.join(remaining))
-        print('  › sudo autokom check affiche les contrôles détaillés.')
+        message('  ! À revoir : ' + ', '.join(remaining))
+        message('  › sudo autokom check affiche les contrôles détaillés.')
         return 1
-    print('  ✓ Toutes les phases sélectionnées sont conformes aux vérifications locales.')
+    message('  ✓ Toutes les phases sélectionnées sont conformes aux vérifications locales.')
     if not state.ufw_active:
-        print('  ! Isolation WAN non prouvée : vérifier UFW + Security Groups AWS.')
+        message('  ! Isolation WAN non prouvée : vérifier UFW + Security Groups AWS.')
     return 0
 
 
 def brief(cfg):
-    s = snapshot(cfg)
+    with Activity('Inventaire des services'):
+        s = snapshot(cfg)
     plan = actions(s)
     section('État des services', 'Inventaire rapide · lecture seule')
     for stage in STAGES:
@@ -314,19 +322,37 @@ def brief(cfg):
             status = '! en attente'
         else:
             status = '+ à traiter' if plan[stage] else '✓ conforme'
-        print(f'  {status:<14} {LABELS[stage]}')
+        message(f'  {status:<14} {LABELS[stage]}')
     if not s.ufw_active:
-        print('  ! UFW inactif / inconnu, vérifier les règles du cloud')
-    print('  › Source Grafana : provisioning vérifié, authentification API non vérifiée ici.')
-    print('  › sudo autokom install  (reprend seulement les écarts)')
+        message('  ! UFW inactif / inconnu, vérifier les règles du cloud')
+    message('  › Source Grafana : provisioning vérifié, authentification API non vérifiée ici.')
+    message('  › sudo autokom install  (reprend seulement les écarts)')
     return 0
 
 
+def release_version():
+    """Version produit stable, editable uniquement dans VERSION a la racine.
+
+    Distincte de la revision Git : un `autokom update` ne change pas
+    automatiquement 0.1, sauf si le mainteneur change VERSION.
+    """
+    try:
+        value = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
+    except (OSError, UnicodeError):
+        return 'indisponible'
+    import re
+    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9.-]+)?', value):
+        return 'invalide (fichier VERSION)'
+    return value
+
+
 def version_label():
-    """Git is the source of truth; do not hardcode a release number."""
+    """Affiche version de produit puis revision Git independante."""
+    version = f'AUTOKOM · version {release_version()}'
     info = command(['git', '-C', str(ROOT), 'describe', '--tags', '--always', '--dirty'], timeout=3)
     revision = info.stdout.strip() if info and info.returncode == 0 else ''
-    return f'AUTOKOM · révision {revision}' if revision else 'AUTOKOM · version locale (Git indisponible)'
+    return version + '\n' + (f'AUTOKOM · révision {revision}' if revision else
+                              'AUTOKOM · révision indisponible (Git absent)')
 
 
 def show_brand():
@@ -373,16 +399,19 @@ def make_parser():
                             help='Afficher la version/révision Git d’AUTOKOM')
         return parser
 
-    i = subcommand('install', help='Détecte et traite automatiquement les composants manquants')
+    i = subcommand('install', help='Détecte et traite automatiquement les composants manquants',
+                   epilog='Exemples : sudo autokom install --check | sudo autokom install --from observability')
     i.add_argument('--check', action='store_true', help='Afficher le plan sans rien modifier')
     i.add_argument('--from', dest='start_at', choices=STAGES, help='Reprendre à partir de cette phase')
     i.add_argument('--only', choices=STAGES, help='Traiter une seule phase (mode expert)')
-    subcommand('status', help='État synthétique des composants')
-    subcommand('check', help='Audit complet (équivalent script verify/stack.py)')
-    subcommand('config', help='Voir les ports, URLs et domaines, sans secrets')
-    c = subcommand('configure', help='Configuration interactive ciblée (expert)')
+    subcommand('status', help='État synthétique des composants', epilog='Exemple : autokom status')
+    subcommand('check', help='Audit complet (équivalent script verify/stack.py)', epilog='Exemple : sudo autokom check')
+    subcommand('config', help='Voir les ports, URLs et domaines, sans secrets', epilog='Exemple : autokom config')
+    c = subcommand('configure', help='Configuration interactive ciblée (expert)',
+                   epilog='Exemple : sudo autokom configure observability')
     c.add_argument('service', choices=('services', 'plugins', 'observability'))
-    subcommand('update', help='Mise à jour Git fast-forward uniquement (explicite)')
+    subcommand('update', help='Mise à jour Git fast-forward uniquement (explicite)',
+               epilog='Exemple : sudo autokom update')
     return p
 
 
@@ -400,7 +429,7 @@ def main(argv=None):
         p = command(['git', '-C', str(ROOT), 'status', '--porcelain'])
         if p is None or p.returncode or p.stdout.strip():
             raise CLIError('Dépôt modifié localement : mise à jour refusée')
-        print('  + Mise à jour AUTOKOM explicite...')
+        message('  + Mise à jour AUTOKOM explicite...')
         return subprocess.call(['git', '-C', str(ROOT), 'pull', '--ff-only'])
     cfg = load_settings()
     if a.cmd == 'config':
@@ -428,8 +457,8 @@ if __name__ == '__main__':
     try:
         raise SystemExit(main())
     except (CLIError, ConfigError, NetworkError, ValueError, OSError) as exc:
-        print(f'  ✗ {exc}', file=sys.stderr)
+        message(f'  ✗ {exc}', stream=sys.stderr)
         raise SystemExit(1)
     except KeyboardInterrupt:
-        print('  ! Opération annulée', file=sys.stderr)
+        message('  ! Opération annulée', stream=sys.stderr)
         raise SystemExit(130)

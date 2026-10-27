@@ -16,7 +16,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts/lib'))
 from observability_config import load, ConfigError
-from tool_banner import section
+from tool_banner import section, colored_marker
 
 
 class Report:
@@ -28,9 +28,9 @@ class Report:
         assert state in ('OK', 'WARN', 'FAIL')
         self.rows.append((state, name, detail))
         symbol = {'OK':'✓', 'WARN':'!', 'FAIL':'✗'}[state]
-        if sys.stdout.isatty() and os.environ.get('NO_COLOR') is None:
-            symbol = f"\033[{ {'OK':32, 'WARN':33, 'FAIL':31}[state] }m{symbol}\033[0m"
-        print(f'  {symbol} {name}' + (f' — {detail}' if detail else ''), flush=True)
+        # Palette commune : le signe seul est colore, pas le texte ni la largeur.
+        line = f'  {symbol} {name}' + (f' — {detail}' if detail else '')
+        print(colored_marker(line), flush=True)
 
     def missing(self, name, detail='absent ou non actif'):
         self.add('FAIL' if self.strict else 'WARN', name, detail)
