@@ -1,3 +1,5 @@
+> **Utilisation actuelle :** `sudo autokom install` (automatique), `autokom status`, `sudo autokom check`. Les commandes internes ci-dessous restent destinées à l’expertise.
+
 # AUTOKOM Phase 2 — Gardes réseau
 
 **Objectif :** permettre `mysqld` sur `0.0.0.0` pour Docker **sans** exposer le port 3306 sur l'interface WAN. Le port 33060 (MySQL X), Jenkins 8080 et les ports de gestion connus sont eux aussi bloqués vers le WAN via UFW.
@@ -16,15 +18,15 @@
 ## Avant tout changement
 
 ```bash
-sudo bash scripts/security/06-audit-network.sh
+sudo bash scripts/security/network-audit.sh
 python3 scripts/lib/services.py --help
-sudo bash scripts/install/05-services.sh --check
+sudo bash scripts/install/services.sh --check
 ```
 
 ## Si UFW est déjà actif
 
 ```bash
-sudo bash scripts/install/05-services.sh --apply
+sudo bash scripts/install/services.sh --apply
 ```
 
 ## Si UFW est inactif et que SSH est accessible depuis une IP fixe
@@ -32,7 +34,7 @@ sudo bash scripts/install/05-services.sh --apply
 **Remplacer `203.0.113.10/32` par le CIDR réel de votre adresse publique d'administration.** Ne jamais copier ce réseau d'exemple dans un serveur réel.
 
 ```bash
-sudo bash scripts/install/05-services.sh --apply \
+sudo bash scripts/install/services.sh --apply \
   --enable-ufw --ssh-cidr VOTRE_IP_PUBLIQUE/32 --ssh-port 22
 ```
 

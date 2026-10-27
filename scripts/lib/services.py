@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """AUTOKOM phase 2: Jenkins and database service orchestration.
-Run from scripts/install/05-services.sh; no third-party Python libraries.
+Run from scripts/install/services.sh; no third-party Python libraries.
 """
 import argparse
 import ipaddress
@@ -281,11 +281,11 @@ def preflight(options):
 
 def ansible_install(options):
     if not shutil.which('ansible-playbook'):
-        fail('Ansible absent : lancer scripts/bootstrap/01-install-ansible.sh')
+        fail('Ansible absent : lancer scripts/bootstrap/ansible.sh')
     extra = {'autokom_db_engine': options.db, 'autokom_jenkins_docker': options.docker_access}
     args = [
         'ansible-playbook', '-i', str(ROOT/'ansible/inventories/local/hosts.ini'),
-        str(ROOT/'ansible/playbooks/02-services.yml'), '-e', json.dumps(extra),
+        str(ROOT/'ansible/playbooks/services.yml'), '-e', json.dumps(extra),
     ]
     if options.mode == 'check':
         args.append('--check')

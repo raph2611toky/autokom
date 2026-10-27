@@ -1,3 +1,5 @@
+> **Utilisation actuelle :** `sudo autokom install` (automatique), `autokom status`, `sudo autokom check`. Les commandes internes ci-dessous restent destinées à l’expertise.
+
 # AUTOKOM — Bannières CLI et validation sur AWS
 
 Ce patch ne change ni les règles UFW, ni les Security Groups AWS, ni les
@@ -9,7 +11,7 @@ fichiers Nginx, ni les rôles Ansible. Les cinq bannières Python sont copiées
 - `scripts/lib/services.py` : **grand logo Jenkins seulement** si le paquet est absent et que l'utilisateur a lancé `--apply`. Pas de grand logo en simulation ou pour un Jenkins existant.
 - `scripts/lib/jenkins_postinstall.py` : **en-tête AUTOKOM compact uniquement**, y compris pour le premier administrateur, les tokens et plugins.
 - `scripts/lib/observability.py` : grands logos Prometheus/Grafana uniquement à leur toute première installation effective. Jenkins n'a pas de grand logo dans la phase 3.
-- `scripts/verify/09-check-stack.py` : **audit sans grand logo** ; en-têtes encadrés et résultats concis.
+- `scripts/verify/stack.py` : **audit sans grand logo** ; en-têtes encadrés et résultats concis.
 - `scripts/banners/kibana.py` et `wazuh.py` : ressources conservées pour les futures phases.
 
 `AUTOKOM_BANNERS=off` interdit l'affichage des grands logos ; `NO_COLOR=1` utilise le rendu monochrome. Les grands dessins restent disponibles en aperçu manuel : `python3 scripts/lib/tool_banner.py grafana --preview`.
@@ -24,10 +26,10 @@ sudo git -C /opt/autokom/source pull --ff-only
 cd /opt/autokom/source
 
 # Contrôle sans modifier les services
-sudo python3 scripts/verify/09-check-stack.py --scope all
-sudo bash scripts/install/05-services.sh --check
-sudo bash scripts/install/07-jenkins-postinstall.sh --check --interactive
-sudo bash scripts/install/08-observability.sh --check --interactive
+sudo python3 scripts/verify/stack.py --scope all
+sudo bash scripts/install/services.sh --check
+sudo bash scripts/install/jenkins.sh --check --interactive
+sudo bash scripts/install/observability.sh --check --interactive
 ```
 
 Ne pas procéder à `--apply` avant de sauvegarder les configurations et données
@@ -39,7 +41,7 @@ Après application **par étape** :
 ```bash
 sudo nginx -t
 sudo systemctl is-active jenkins prometheus grafana-server
-sudo python3 scripts/verify/09-check-stack.py --scope all --strict
+sudo python3 scripts/verify/stack.py --scope all --strict
 ```
 
 Les ports sont lus depuis `/etc/autokom/observability.ini`, sinon les valeurs

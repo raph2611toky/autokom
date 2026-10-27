@@ -1,16 +1,3 @@
 ---
-- name: AUTOKOM | Foundation (non destructive)
-  hosts: local
-  gather_facts: true
-  become: true
-  vars:
-    autokom_tools_dir: /opt/autokom/tools
-  pre_tasks:
-    - name: Verifier Ubuntu
-      ansible.builtin.assert:
-        that:
-          - ansible_facts['distribution'] == 'Ubuntu'
-        fail_msg: "Seul Ubuntu est pris en charge pour cette phase."
-  roles:
-    - role: base_cli
-    - role: security_cli
+# Compatibilité : utiliser foundation.yml
+- import_playbook: foundation.yml

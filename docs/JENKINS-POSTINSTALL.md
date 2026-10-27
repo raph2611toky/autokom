@@ -1,3 +1,5 @@
+> **Utilisation actuelle :** `sudo autokom install` (automatique), `autokom status`, `sudo autokom check`. Les commandes internes ci-dessous restent destinées à l’expertise.
+
 # AUTOKOM — Jenkins First-Run / Post-Install v2C
 
 This module **does not** circumvent the Jenkins official first-run wizard and **never** changes the existing authorization strategy or resets existing users.
@@ -5,8 +7,8 @@ This module **does not** circumvent the Jenkins official first-run wizard and **
 ## Interactive quick-start
 
 ```bash
-sudo bash scripts/install/07-jenkins-postinstall.sh --check --interactive
-sudo bash scripts/install/07-jenkins-postinstall.sh --apply --interactive
+sudo bash scripts/install/jenkins.sh --check --interactive
+sudo bash scripts/install/jenkins.sh --apply --interactive
 ```
 
 The first menu proposes **recommended** (one choice: DevSecOps plugins + non-destructive security settings) or **custom**. For a previously initialized Jenkins, the script skips the first-run wizard. For an uninitialized Jenkins it shows the detected, valid HTTPS Nginx domain and the path to `initialAdminPassword`, then waits until the Jenkins official setup wizard is complete (including first administrator creation and instance URL). To avoid duplicating plugins, choose **Select plugins to install → None → Install** during the wizard; AUTOKOM will install the selected profile afterward.
@@ -16,7 +18,7 @@ When Jenkins is initialized, AUTOKOM prints the documented `/me/security/` URL s
 If no valid HTTPS Nginx Jenkins domain can be discovered:
 
 ```bash
-sudo bash scripts/install/07-jenkins-postinstall.sh --apply --interactive \
+sudo bash scripts/install/jenkins.sh --apply --interactive \
   --public-url https://jenkins.example.org/
 ```
 
@@ -27,7 +29,7 @@ sudo bash scripts/install/07-jenkins-postinstall.sh --apply --interactive \
 For a pre-configured Jenkins, an optional existing root-owned mode-0600 auth file containing `username:API_TOKEN` may be passed explicitly:
 
 ```bash
-sudo bash scripts/install/07-jenkins-postinstall.sh --apply --profile devsecops \
+sudo bash scripts/install/jenkins.sh --apply --profile devsecops \
   --auth-file /etc/autokom/secrets/jenkins-cli-auth --harden --confirm-restart
 ```
 
@@ -47,7 +49,7 @@ Never put token values on the command line or inside Git. The file option is for
 ## Validation
 
 ```bash
-bash -n scripts/install/07-jenkins-postinstall.sh
+bash -n scripts/install/jenkins.sh
 python3 -m py_compile scripts/lib/jenkins_postinstall.py
 python3 tests/test_jenkins_postinstall.py
 python3 tests/test_jenkins_onboarding.py

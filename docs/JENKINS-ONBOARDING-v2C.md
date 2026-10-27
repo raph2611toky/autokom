@@ -1,3 +1,5 @@
+> **Utilisation actuelle :** `sudo autokom install` (automatique), `autokom status`, `sudo autokom check`. Les commandes internes ci-dessous restent destinées à l’expertise.
+
 # Jenkins — Quick onboarding v2C
 
 - Existing Jenkins: display verified URL `https://<domain>/me/security/`, ask Jenkins login and API token with hidden prompt, then install plugin profile.
@@ -13,7 +15,7 @@ Le plugin Jenkins s’appelle exactement **`multibranch-scan-webhook-trigger`** 
 Pour activer explicitement via CLI :
 
 ```bash
-sudo bash scripts/install/07-jenkins-postinstall.sh --check --profile devsecops --multibranch-scan
+sudo bash scripts/install/jenkins.sh --check --profile devsecops --multibranch-scan
 ```
 
 Puis seulement après inspection et sauvegarde Jenkins, `--apply --profile devsecops --multibranch-scan --confirm-restart` avec authentification admin. L’option interactive `--apply --interactive` pose la question et ne nécessite pas `--multibranch-scan`. Aucun token webhook ne doit être exposé dans les URLs de journaux ; préférer l’en-tête HTTP `token` et un secret robuste.

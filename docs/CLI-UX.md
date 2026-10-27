@@ -1,3 +1,5 @@
+> **Utilisation actuelle :** `sudo autokom install` (automatique), `autokom status`, `sudo autokom check`. Les commandes internes ci-dessous restent destinées à l’expertise.
+
 # AUTOKOM CLI output conventions
 
 AUTOKOM uses `scripts/lib/ui.sh` in every Bash module and

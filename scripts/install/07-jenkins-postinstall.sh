@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AUTOKOM Jenkins post-install; all arguments passed through.
+# Ancien chemin compatible. Utiliser scripts/install/jenkins.sh
 set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-exec python3 "$ROOT/scripts/lib/jenkins_postinstall.py" "$@"
+exec bash "$ROOT/scripts/install/jenkins.sh" "$@"

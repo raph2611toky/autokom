@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AUTOKOM · Phase 3 — Observability
+# Ancien chemin compatible. Utiliser scripts/install/observability.sh
 set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-exec python3 "$ROOT/scripts/lib/observability.py" "$@"
+exec bash "$ROOT/scripts/install/observability.sh" "$@"

@@ -1,3 +1,5 @@
+> **Utilisation actuelle :** `sudo autokom install` (automatique), `autokom status`, `sudo autokom check`. Les commandes internes ci-dessous restent destinées à l’expertise.
+
 # AUTOKOM — Phase 2, reprise sur serveur existant
 
 Correctif des interactions TTY, vérification des configurations effectives et conservation des services existants.
@@ -26,7 +28,7 @@ Correctif des interactions TTY, vérification des configurations effectives et c
 
 ```bash
 python3 tests/test_phase2.py
-bash -n scripts/install/05-services.sh
+bash -n scripts/install/services.sh
 python3 -m py_compile scripts/lib/menu.py scripts/lib/services.py
 ```
 
@@ -39,13 +41,13 @@ sudo mysql --protocol=socket -uroot -NBe "SELECT user,host FROM mysql.user WHERE
 sudo systemctl cat jenkins
 sudo ss -lntp '( sport = :8080 )'
 sudo nginx -t
-sudo bash /opt/autokom/source/scripts/install/05-services.sh --check
+sudo bash /opt/autokom/source/scripts/install/services.sh --check
 ```
 
 Appliquer **seulement après simulation et sauvegarde** :
 
 ```bash
-sudo bash /opt/autokom/source/scripts/install/05-services.sh --apply
+sudo bash /opt/autokom/source/scripts/install/services.sh --apply
 ```
 
 Pour exécution non interactive, ajouter `--non-interactive --db mysql --bind all --unsafe-all --allow 172.18.0.0/16 --docker-access no --domain ''` et `--confirm-restart` uniquement pendant une fenêtre de maintenance.

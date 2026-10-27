@@ -94,7 +94,7 @@ class LifeCycleTests(unittest.TestCase):
                  redirect_stdout(io.StringIO()) as out:
                 r = mod.Report()
                 mod.jenkins(r, observability.SETTINGS)
-        self.assertIn('02 / 03', out.getvalue())
+        self.assertIn('JENKINS', out.getvalue())
         self.assertNotIn('█████', out.getvalue())
 
 

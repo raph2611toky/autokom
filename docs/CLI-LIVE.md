@@ -1,3 +1,5 @@
+> **Utilisation actuelle :** `sudo autokom install` (automatique), `autokom status`, `sudo autokom check`. Les commandes internes ci-dessous restent destinées à l’expertise.
+
 # AUTOKOM — Ephemeral task live panel
 
 Every long-running Ansible task produces a disposable three-line **green** area in interactive terminals (UTF-8, ANSI). A 0.3s delay avoids flickering on very quick tasks. The panel is redrawn about every 280ms, then erased before a permanent task result is printed.

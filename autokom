@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# AUTOKOM CLI: un point d'entrée simple, sans dépendance Python externe.
+set -Eeuo pipefail
+SCRIPT="$(readlink -f -- "${BASH_SOURCE[0]}")"
+ROOT="$(cd -- "$(dirname -- "$SCRIPT")" && pwd -P)"
+exec python3 "$ROOT/scripts/lib/autokom_cli.py" "$@"

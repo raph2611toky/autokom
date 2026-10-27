@@ -1,3 +1,5 @@
+> **Utilisation actuelle :** `sudo autokom install` (automatique), `autokom status`, `sudo autokom check`. Les commandes internes ci-dessous restent destinées à l’expertise.
+
 # AUTOKOM — Phase 3 : Jenkins + Prometheus + Grafana
 
 ## Installer
@@ -7,15 +9,15 @@ Module indépendant, sans remplacement du `install.sh` existant.
 ```bash
 # Sur la copie Git du serveur Ubuntu (après avoir poussé les fichiers)
 sudo git -C /opt/autokom/source pull --ff-only
-sudo bash /opt/autokom/source/scripts/install/08-observability.sh --check --interactive
+sudo bash /opt/autokom/source/scripts/install/observability.sh --check --interactive
 # Ensuite, après inspection et sauvegardes :
-sudo bash /opt/autokom/source/scripts/install/08-observability.sh --apply --interactive
+sudo bash /opt/autokom/source/scripts/install/observability.sh --apply --interactive
 ```
 
 Pour désigner les domaines sans les redemander :
 
 ```bash
-sudo bash /opt/autokom/source/scripts/install/08-observability.sh --check \
+sudo bash /opt/autokom/source/scripts/install/observability.sh --check \
   --prometheus-domain metrics.example.com \
   --grafana-domain grafana.example.com
 ```

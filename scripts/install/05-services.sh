@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AUTOKOM Jenkins & databases. Interactive or explicit --non-interactive options.
+# Ancien chemin compatible. Utiliser scripts/install/services.sh
 set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-exec python3 "$ROOT/scripts/lib/services.py" "$@"
+exec bash "$ROOT/scripts/install/services.sh" "$@"

@@ -1,26 +1,56 @@
-# AUTOKOM — Phase 3 · paramètres dynamiques v2
+# AUTOKOM — DevSecOps autonome
 
-Correctif incrémental à appliquer **sur un dépôt AUTOKOM contenant déjà la Phase 3 Observabilité**.
+AUTOKOM déploie puis maintient un environnement DevSecOps sur Ubuntu avec une **commande principale**. Il détecte les composants présents, ne relance pas les opérations conformes et s'arrête lorsqu'une intervention risquée nécessite une confirmation.
 
-Fichiers nouveaux ou modifiés :
+## Démarrage sur AWS
 
-- `scripts/lib/observability.py` — refactor des ports, URLs et paramètres reliés.
-- `scripts/lib/observability_config.py` — lecture/validation de la configuration unique.
-- `config/observability/defaults.ini` — valeurs par défaut, sans secret.
-- `tests/test_observability.py` — compatibilité des tests existants.
-- `tests/test_observability_config.py` — tests de régression des paramètres dynamiques.
-- `docs/OBSERVABILITY-CONFIG.md` — utilisation et migration.
-
-**Sécurité :** aucun changement réseau avant `--apply` ; hôtes internes validés `127.0.0.1` uniquement ; refus des conflits de ports, chemins non sûrs et déplacements implicites de TSDB. Les identifiants restent interactifs.
-
-Exemples :
+Première activation de la commande globale, **sans installation de services** :
 
 ```bash
-python3 scripts/lib/observability.py --show-config
-python3 scripts/lib/observability.py --show-config \
-   --set prometheus.port=9091 --set grafana.port=3001
-
-sudo bash scripts/install/08-observability.sh --check --interactive
+sudo bash /opt/autokom/source/install.sh --link-cli
 ```
 
-Voir `docs/OBSERVABILITY-CONFIG.md` pour les priorités, la persistance et les avertissements production.
+Puis, depuis n'importe quel dossier :
+
+```bash
+autokom status                 # Inventaire compact
+sudo autokom install --check  # Plan sans modification ni question
+sudo autokom install          # Appliquer les actions nécessaires
+sudo autokom check            # Audit complet après installation
+```
+
+Pour une nouvelle machine Ubuntu, le bootstrap public installe le dépôt et le lanceur (commande explicite) :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/raph2611toky/autokom/main/install.sh | sudo bash -s -- --link-cli
+sudo autokom install
+```
+
+## Commandes courtes
+
+| Commande | Effet |
+|---|---|
+| `autokom status` | Résumé rapide, lecture seule |
+| `sudo autokom install --check` | Affiche les étapes à traiter sans changement |
+| `sudo autokom install` | Installation et réparation sélective des composants |
+| `sudo autokom install --from observability` | Reprend à l'observabilité, sous réserve des prérequis |
+| `sudo autokom install --only plugins` | Traite une phase particulière |
+| `sudo autokom check` | Audit local détaillé (ne teste pas les Security Groups AWS) |
+| `autokom config` | Affiche les ports/URLs configurés, sans secret |
+| `sudo autokom configure services` | Reconfiguration experte interactive Jenkins / SQL |
+| `sudo autokom configure plugins` | Reconfiguration des plugins Jenkins |
+| `sudo autokom configure observability` | Reconfiguration Prometheus / Grafana |
+| `sudo autokom update` | Mise à jour Git explicite si le dépôt est propre |
+
+Les scripts spécialisés restent disponibles dans `scripts/install/` et `scripts/verify/` sous des **noms explicites** : `foundation.sh`, `services.sh`, `jenkins.sh`, `observability.sh` et `stack.py`. Les anciens chemins numérotés sont de simples alias temporaires de compatibilité et ne font plus partie du parcours normal.
+
+## Sécurité et périmètre
+
+- Aucun secret dans le dépôt ni dans la configuration dynamique `config/observability/defaults.ini`.
+- Aucune création ou modification silencieuse des bases MySQL/PostgreSQL sur une instance Jenkins existante.
+- Jenkins, Prometheus et Grafana doivent écouter localement ; l'accès par domaine se fait via Nginx/HTTPS.
+- Les modifications nécessitant un redémarrage de Jenkins déjà utilisé demandent une confirmation explicite.
+- L'activation d'UFW et les Security Groups cloud ne sont **pas** modifiés silencieusement. Les règles Docker publiées exigent un audit spécifique.
+- Une vérification via fichier de provisioning Grafana ne prouve pas à elle seule l'authentification et l'accès réel à la source : utiliser aussi l'API Grafana pendant la configuration et la validation fonctionnelle.
+
+Voir [documentation détaillée](docs/AUTOKOM-CLI.md).

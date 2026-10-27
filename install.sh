@@ -6,6 +6,7 @@ set -Eeuo pipefail
 MODE='--check'
 UPDATE=0
 SERVICES=0
+LINK_CLI=0
 AUTOKOM_VERBOSE="${AUTOKOM_VERBOSE:-0}"
 AUTOKOM_LIVE="${AUTOKOM_LIVE:-1}"
 SERVICE_ARGS=()
@@ -16,6 +17,7 @@ while (( $# )); do
         --check|--apply) MODE="$argument" ;;
         --update) UPDATE=1 ;;
         --services) SERVICES=1 ;;
+        --link-cli) LINK_CLI=1 ;;
         --verbose) AUTOKOM_VERBOSE=1 ;;
         --no-live) AUTOKOM_LIVE=0 ;;
         --enable-ufw|--confirm-firewall) SERVICE_ARGS+=("$argument") ;;
@@ -24,7 +26,7 @@ while (( $# )); do
             SERVICE_ARGS+=("$argument" "$1")
             shift
             ;;
-        *) printf 'Usage: install.sh [--check|--apply] [--services] [--update] [--verbose] [--no-live] [--enable-ufw --ssh-cidr IP/32 --confirm-firewall]\n' >&2; exit 2 ;;
+        *) printf 'Usage: install.sh [--check|--apply] [--services] [--update] [--verbose] [--no-live] [--link-cli] [--enable-ufw --ssh-cidr IP/32 --confirm-firewall]\n' >&2; exit 2 ;;
     esac
 done
 export AUTOKOM_VERBOSE AUTOKOM_LIVE
@@ -42,7 +44,7 @@ PROJECT_DIR=''
 # bash -s / curl | bash have no reliable script path.
 if [[ -n "$SRC" && -f "$SRC" ]]; then
     possible="$(cd -- "$(dirname -- "$SRC")" && pwd -P)"
-    if [[ -f "$possible/scripts/lib/ui.sh" && -f "$possible/ansible/playbooks/01-foundation.yml" ]]; then
+    if [[ -f "$possible/scripts/lib/ui.sh" && -f "$possible/ansible/playbooks/foundation.yml" ]]; then
         PROJECT_DIR="$possible"
     fi
 fi
@@ -82,6 +84,11 @@ if (( UPDATE )); then
     git -C "$PROJECT_DIR" pull --ff-only --quiet
 fi
 
+# Explicit one-time registration, with NO playbooks/services triggered.
+if (( LINK_CLI )); then
+    exec bash "$PROJECT_DIR/scripts/bootstrap/link-cli.sh"
+fi
+
 # Load the shared presentation layer only from the verified project tree.
 UI="$PROJECT_DIR/scripts/lib/ui.sh"
 [[ -f "$UI" ]] || { printf '  ✗ Fichier de présentation manquant : %s\n' "$UI" >&2; exit 1; }
@@ -99,32 +106,36 @@ ak_kv 'Version' "$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || e
 ak_kv 'Plateforme' "$PROJECT_DIR"
 
 for file in \
-    scripts/bootstrap/00-preflight.sh \
-    scripts/bootstrap/01-install-ansible.sh \
-    scripts/install/02-install-foundation.sh \
-    scripts/verify/04-check-foundation.sh; do
+    scripts/bootstrap/preflight.sh \
+    scripts/bootstrap/ansible.sh \
+    scripts/install/foundation.sh \
+    scripts/verify/foundation.sh; do
     [[ -f "$PROJECT_DIR/$file" ]] || { ak_err "Module manquant : $file"; exit 1; }
 done
 
 ak_section '01 / 04  Environnement'
-bash "$PROJECT_DIR/scripts/bootstrap/00-preflight.sh"
+bash "$PROJECT_DIR/scripts/bootstrap/preflight.sh"
 
 ak_section '02 / 04  Moteur d’automatisation'
-bash "$PROJECT_DIR/scripts/bootstrap/01-install-ansible.sh"
+bash "$PROJECT_DIR/scripts/bootstrap/ansible.sh"
 
 ak_section '03 / 04  Fondation DevSecOps'
-bash "$PROJECT_DIR/scripts/install/02-install-foundation.sh" "$MODE"
+bash "$PROJECT_DIR/scripts/install/foundation.sh" "$MODE"
 
 ak_section '04 / 04  Résultats'
 if [[ "$MODE" == '--apply' ]]; then
-    bash "$PROJECT_DIR/scripts/verify/04-check-foundation.sh"
+    bash "$PROJECT_DIR/scripts/verify/foundation.sh"
     ak_ok 'Exécution du playbook terminée (voir vérification ci-dessus)'
 else
     ak_info 'Simulation terminée : les paquets prévus ne sont pas encore installés.'
 fi
 if (( SERVICES )); then
-    [[ -f "$PROJECT_DIR/scripts/install/05-services.sh" ]] || { ak_err 'Module Jenkins/DB absent'; exit 1; }
+    [[ -f "$PROJECT_DIR/scripts/install/services.sh" ]] || { ak_err 'Module Jenkins/DB absent'; exit 1; }
     ak_section '05 / 05  Jenkins et bases de données'
-    bash "$PROJECT_DIR/scripts/install/05-services.sh" "$MODE" "${SERVICE_ARGS[@]}"
+    bash "$PROJECT_DIR/scripts/install/services.sh" "$MODE" "${SERVICE_ARGS[@]}"
+fi
+# Register simple CLI only after successful application, not --check.
+if [[ "$MODE" == '--apply' ]]; then
+    bash "$PROJECT_DIR/scripts/bootstrap/link-cli.sh"
 fi
 ak_finish

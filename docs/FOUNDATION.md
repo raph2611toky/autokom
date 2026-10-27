@@ -1,3 +1,5 @@
+> **Utilisation actuelle :** `sudo autokom install` (automatique), `autokom status`, `sudo autokom check`. Les commandes internes ci-dessous restent destinées à l’expertise.
+
 # AUTOKOM — Fondation (Ubuntu 26.04, serveur deja en production)
 
 ## Objectif
@@ -8,14 +10,14 @@ Automatiser l'installation avec Ansible. Le module catch-all Nginx est separe et
 
 ```bash
 cd ~/AUTOKOM
-bash scripts/bootstrap/00-preflight.sh
-sudo bash scripts/bootstrap/01-install-ansible.sh
-sudo bash scripts/install/02-install-foundation.sh --check
-sudo bash scripts/install/02-install-foundation.sh --apply
-sudo bash scripts/security/03-nginx-catchall.sh --check
+bash scripts/bootstrap/preflight.sh
+sudo bash scripts/bootstrap/ansible.sh
+sudo bash scripts/install/foundation.sh --check
+sudo bash scripts/install/foundation.sh --apply
+sudo bash scripts/security/nginx-catchall.sh --check
 # Seulement si aucun catch-all ni default_server ne sont deja presents :
-# sudo bash scripts/security/03-nginx-catchall.sh --apply
-bash scripts/verify/04-check-foundation.sh
+# sudo bash scripts/security/nginx-catchall.sh --apply
+bash scripts/verify/foundation.sh
 ```
 
 ## Sur le serveur observe

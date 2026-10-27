@@ -1,3 +1,5 @@
+> **Utilisation actuelle :** `sudo autokom install` (automatique), `autokom status`, `sudo autokom check`. Les commandes internes ci-dessous restent destinées à l’expertise.
+
 # AUTOKOM — Phase 2: Jenkins and Databases
 
 ## Objective
@@ -7,8 +9,8 @@ One menu: arrow navigation, Enter or direct keys 1–9. Can be launched from a l
 ## Commands
 
 ```bash
-sudo bash scripts/install/05-services.sh --check
-sudo bash scripts/install/05-services.sh --apply
+sudo bash scripts/install/services.sh --check
+sudo bash scripts/install/services.sh --apply
 ```
 
 Optional root installer integration:
@@ -21,7 +23,7 @@ sudo bash install.sh --apply --services
 Non-interactive example:
 
 ```bash
-sudo bash scripts/install/05-services.sh --check \
+sudo bash scripts/install/services.sh --check \
   --non-interactive --db postgresql --bind private --allow 10.0.0.0/24 \
   --docker-access no --domain jenkins.example.com \
   --tls certbot --email admin@example.com

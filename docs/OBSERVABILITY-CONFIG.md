@@ -1,3 +1,5 @@
+> **Utilisation actuelle :** `sudo autokom install` (automatique), `autokom status`, `sudo autokom check`. Les commandes internes ci-dessous restent destinées à l’expertise.
+
 # AUTOKOM — Observabilité configurable (v2)
 
 ## Objectif
@@ -56,15 +58,15 @@ Sur le serveur :
 ```bash
 sudo install -d -m 755 /etc/autokom
 sudoedit /etc/autokom/observability.ini
-sudo bash scripts/install/08-observability.sh --check --interactive
+sudo bash scripts/install/observability.sh --check --interactive
 # Une fois vérifié, seulement si nécessaire :
-sudo bash scripts/install/08-observability.sh --apply --interactive
+sudo bash scripts/install/observability.sh --apply --interactive
 ```
 
 Pour un autre fichier de configuration :
 
 ```bash
-sudo bash scripts/install/08-observability.sh --check --non-interactive \
+sudo bash scripts/install/observability.sh --check --non-interactive \
   --config /etc/autokom/environments/staging.ini
 ```
 
@@ -96,7 +98,7 @@ Lors de la première installation réussie, AUTOKOM stocke sous `/etc/autokom/st
 python3 -m py_compile scripts/lib/observability.py scripts/lib/observability_config.py
 python3 tests/test_observability.py
 python3 tests/test_observability_config.py
-bash -n scripts/install/08-observability.sh
+bash -n scripts/install/observability.sh
 ```
 
 Ces tests sont locaux et simulés ; ils ne remplacent pas un `--check` sur le serveur réel, les contrôles Nginx/Certbot, la vérification Jenkins `/prometheus/`, le statut Prometheus `UP` et la disponibilité Grafana.
