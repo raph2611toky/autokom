@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from menu import pick, ask
-from tool_banner import section
+from tool_banner import section, Activity
 from observability_config import load as load_observability_settings
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,7 +32,8 @@ JENKINS_URL = f'http://127.0.0.1:{JENKINS_PORT}/'
 CLI_JAR = Path('/opt/autokom/tools/jenkins-cli.jar')
 SENSITIVE = Path('/etc/autokom/secrets')
 PROFILES = ROOT / 'config/jenkins'
-ANSI = sys.stdout.isatty() and not os.environ.get('NO_COLOR')
+ANSI = (sys.stdout.isatty() and 'NO_COLOR' not in os.environ
+        and os.environ.get('TERM', '') not in ('', 'dumb'))
 
 
 def output(symbol, message):
@@ -185,26 +186,115 @@ def transient_credentials(username, secret, label='auth'):
     # All ephemeral credentials are removed by TemporaryDirectory, success or failure.
 
 
+class AuthenticationRejected(ValueError):
+    """Bad identity, token or administrator permissions; never includes secrets."""
+
+
+_ADMIN_CHECK = ('import jenkins.model.Jenkins; '
+                'Jenkins.get().checkPermission(Jenkins.ADMINISTER); '
+                'println("AUTOKOM_ADMIN_AUTHORIZED")')
+
+
+def verify_admin(auth_file, expected_username=None):
+    """Verify real Jenkins identity and Overall/Administer BEFORE modifications.
+
+    The CLI reads a private 0600 auth file. No token goes into process args,
+    stdout, exception text, or the installer logs.
+    """
+    try:
+        identity = cli(auth_file, ['who-am-i'], timeout=45)
+    except RuntimeError as exc:
+        detail = str(exc).casefold()
+        if any(x in detail for x in ('authentication', 'unauthorized', 'forbidden',
+                                      'http 401', 'http 403', 'accessdenied',
+                                      'permission', 'anonymous', 'invalid credential')):
+            raise AuthenticationRejected('Identifiant ou token Jenkins refusé.') from None
+        raise RuntimeError('Impossible de vérifier la connexion Jenkins : vérifier le service et le réseau.') from None
+    match = re.search(r'^\s*Authenticated as:\s*(.*?)\s*$', identity, flags=re.I | re.M)
+    if not match or not match.group(1) or match.group(1).casefold() == 'anonymous':
+        raise AuthenticationRejected('Identifiant ou token Jenkins non reconnu.')
+    if expected_username is not None and match.group(1).casefold() != expected_username.casefold():
+        raise AuthenticationRejected('Le token ne correspond pas au compte indiqué.')
+    try:
+        result = cli(auth_file, ['groovy', '='], stdin=_ADMIN_CHECK, timeout=45)
+    except RuntimeError as exc:
+        detail = str(exc).casefold()
+        if any(x in detail for x in ('permission', 'accessdenied', 'forbidden',
+                                      'http 401', 'http 403', 'unauthorized',
+                                      'authentication', 'anonymous', 'missing the overall')):
+            raise AuthenticationRejected('Ce compte ne possède pas les droits Overall/Administer.') from None
+        raise RuntimeError('Contrôle des droits Jenkins indisponible : vérifier Jenkins CLI et le serveur.') from None
+    if 'AUTOKOM_ADMIN_AUTHORIZED' not in result:
+        raise AuthenticationRejected('Droits administrateur Jenkins non confirmés.')
+
+
+def _short_step(title):
+    """Single, consistently styled heading; no extra box and no giant banner."""
+    color = sys.stdout.isatty() and os.environ.get('NO_COLOR') is None and os.environ.get('TERM') not in ('', 'dumb')
+    t = f'  ── {title}'
+    print(('\033[38;2;125;211;252m' + t + '\033[0m') if color else t, flush=True)
+
+
 @contextmanager
 def authorization_context(args, web_url, *, apply):
-    """Acquire auth only after first-run wizard. Reuse --auth-file noninteractively."""
+    """Three secure interactive attempts, with verification before any mutation.
+
+    --auth-file is a noninteractive automation path: validate once, no prompting.
+    Transient token files are deleted after EACH failed attempt and on success.
+    """
     if not apply:
         yield ''
         return
+    if not args.auth_file and not args.interactive:
+        raise RuntimeError('Mode automatique : fournir --auth-file (root:0600).')
+    if not args.auth_file and not web_url:
+        raise RuntimeError('Aucun domaine HTTPS détecté : configurer Nginx ou --public-url.')
+
+    # Download the Jenkins CLI before asking for a token, not after.
+    with Activity('Préparation de Jenkins CLI'):
+        ensure_cli_jar(True)
     if args.auth_file:
-        yield str(secure_file(args.auth_file))
-        return
-    if not args.interactive:
-        raise RuntimeError('Mode non interactif : fournir --auth-file avec username:API_TOKEN')
-    if not web_url:
-        raise RuntimeError('Aucun accès HTTPS Jenkins détecté : fournir --public-url ou configurer Nginx avant la création du token')
-    output('›', 'Créer un API token : ' + web_url + 'me/security/')
-    output('›', 'Dans Jenkins : Security → API Token → Add new Token → Generate → Copy.')
-    user = ask('Identifiant administrateur Jenkins', hint='Saisir le nom du compte Jenkins déjà créé et connecté.')
-    token = read_masked('Coller le token API (saisie masquée)')
-    with transient_credentials(user, token) as path:
-        token = None
+        path = str(secure_file(args.auth_file))
+        with Activity('Vérification des permissions Jenkins'):
+            verify_admin(path)
+        output('✓', 'Administrateur Jenkins authentifié')
         yield path
+        return
+
+    _short_step('ACCÈS ADMINISTRATEUR')
+    output('›', 'Créer le token : ' + web_url + 'me/security/')
+    output('›', 'Compte = identifiant de connexion Jenkins, pas le token API.')
+    def incorrect(reason, remaining):
+        if remaining:
+            output('⚠', f'{reason} · {remaining} essai(s) restant(s).')
+        else:
+            raise RuntimeError('Connexion Jenkins refusée après 3 essais. Aucun plugin ni paramètre de sécurité modifié.') from None
+
+    for number in range(1, 4):
+        remaining = 3 - number
+        try:
+            username = ask(f'Compte Jenkins · essai {number}/3',
+                           hint='Exemple : admin ou votre identifiant de connexion (pas le token).').strip()
+            if not username or not re.fullmatch(r'[A-Za-z0-9_.@-]{1,100}', username):
+                raise AuthenticationRejected('Identifiant Jenkins vide ou incorrect.')
+            secret = read_masked('Token API · saisie masquée')
+        except (AuthenticationRejected, ValueError) as error:
+            incorrect(str(error), remaining)
+            continue
+
+        # Important: no catch around yield. Any future plugin/Groovy error
+        # propagates immediately; it must NOT be treated as a bad password.
+        with transient_credentials(username, secret) as path:
+            secret = None
+            try:
+                with Activity('Authentification auprès de Jenkins'):
+                    verify_admin(path, expected_username=username)
+            except AuthenticationRejected as error:
+                incorrect(str(error), remaining)
+                continue
+            output('✓', 'Compte administrateur vérifié')
+            yield path
+            return
 
 
 def prepare_extra_admin(args, stack):
@@ -213,13 +303,22 @@ def prepare_extra_admin(args, stack):
         return
     if not args.interactive:
         raise ValueError('--admin-password-file requis pour --admin-user sans terminal interactif')
-    password = read_masked('Mot de passe du nouvel administrateur (16 caractères minimum)')
-    again = read_masked('Confirmer ce mot de passe')
-    if password != again or len(password) < 16:
-        raise ValueError('Les mots de passe diffèrent ou sont trop courts (16 caractères minimum)')
-    context = stack.enter_context(transient_credentials('unused', password, 'admin-password'))
-    args.admin_password_file = context
-    password = again = None
+    for attempt in range(1, 4):
+        try:
+            password = read_masked('Nouveau mot de passe administrateur (16 caractères min.)')
+            again = read_masked('Confirmer le mot de passe')
+        except ValueError:
+            password = again = ''
+        if password == again and len(password) >= 16:
+            context = stack.enter_context(transient_credentials('unused', password, 'admin-password'))
+            args.admin_password_file = context
+            password = again = None
+            return
+        password = again = None
+        remaining = 3 - attempt
+        if remaining:
+            output('⚠', f'Confirmation du mot de passe invalide · {remaining} essai(s) restant(s).')
+    raise RuntimeError('Mot de passe du nouvel administrateur invalide après 3 essais. Aucun compte créé.')
 
 
 def plugin_ids(profile, include_multibranch_scan=False):
@@ -352,7 +451,6 @@ def harden(auth_file, apply, controller_zero=False, disable_agents=False):
     text = (ROOT/'config/jenkins/harden-existing.groovy').read_text(encoding='utf-8')
     text = text.replace('__AUTOKOM_CONTROLLER_ZERO__', 'true' if controller_zero else 'false')
     text = text.replace('__AUTOKOM_DISABLE_AGENTS__', 'true' if disable_agents else 'false')
-    output('›', 'Politique : CSRF, inscription publique interdite, droits existants préservés')
     if not apply:
         return
     result = cli(auth_file, ['groovy', '='], stdin=text, timeout=120)
@@ -369,7 +467,8 @@ def configure(args):
     apply = args.mode == 'apply'
     state = jenkins_state()
     web_url = trusted_web_url(args.public_url)
-    output('›', 'État Jenkins : ' + {'secure': 'déjà configuré', 'wizard': 'nouveau (assistant initial)', 'unsafe': 'sécurité incertaine'}[state])
+    if state != 'secure':
+        output('›', 'État Jenkins : ' + {'wizard': 'premier démarrage', 'unsafe': 'sécurité incertaine'}[state])
     if state == 'unsafe':
         raise RuntimeError('Sécurité Jenkins absente ou incohérente : aucune modification automatique autorisée')
     if state == 'wizard':
@@ -379,11 +478,10 @@ def configure(args):
     plugins = plugin_ids(args.profile, args.multibranch_scan)
     present = local_plugin_ids()
     missing = [p for p in plugins if p.split(':',1)[0] not in present]
-    output('›', f'Jenkins détecté : {len(present)} plugins sur disque')
-    output('✓', f'Profil {args.profile} : {len(plugins) - len(missing)} plugins déjà présents, {len(missing)} à installer')
+    _short_step('PLUGINS ET SÉCURITÉ')
+    output('+' if missing else '✓', f'Profil {args.profile} · {len(plugins) - len(missing)} présents · {len(missing)} à installer')
     if args.multibranch_scan:
-        output('⚠', 'Multibranch Scan Webhook Trigger : SECURITY-2875 (comparaison de token non constante).')
-        output('›', 'L’endpoint de webhook doit rester filtré/protégé ; ne pas mettre le token dans les journaux ou URLs publiques.')
+        output('⚠', 'Webhook Multibranch optionnel : SECURITY-2875 ; filtrer son endpoint.')
     changes = bool(missing or args.admin_user or args.harden)
     if apply and not args.confirm_restart and changes:
         raise RuntimeError('Option --confirm-restart requise AVANT toute modification')
@@ -415,11 +513,7 @@ def configure(args):
             if len(password) < 16 or '\n' in password or '\r' in password:
                 raise ValueError('Mot de passe nouvel administrateur : 16 caractères minimum')
             password = None
-        ensure_cli_jar(True)
-        # Prove Overall/Administer using the newly provided token BEFORE any mutation.
-        result = cli(auth_file, ['groovy', '='], stdin='import jenkins.model.Jenkins; Jenkins.get().checkPermission(Jenkins.ADMINISTER); println("AUTOKOM_ADMIN_AUTHORIZED")', timeout=45)
-        if 'AUTOKOM_ADMIN_AUTHORIZED' not in result:
-            raise RuntimeError('Token Jenkins invalide ou permissions Overall/Administer insuffisantes')
+        # Le jeton a déjà été vérifié avant toute modification.
         if args.admin_user or args.harden:
             precheck = '''import jenkins.model.Jenkins
 import hudson.security.HudsonPrivateSecurityRealm
@@ -434,15 +528,16 @@ def j = Jenkins.get()
             precheck += 'println("AUTOKOM_PRECHECK_OK")\n'
             if 'AUTOKOM_PRECHECK_OK' not in cli(auth_file, ['groovy', '='], stdin=precheck, timeout=60):
                 raise RuntimeError('Pré-contrôles Jenkins non confirmés')
+        _short_step('APPLICATION')
         if missing:
-            output('+', 'Plugins à installer : ' + ', '.join(missing))
+            output('+', f'Installation de {len(missing)} plugins manquants')
             cli(auth_file, ['install-plugin', *missing], timeout=1800, status='Installation des plugins Jenkins')
             output('✓', f'Téléchargement de {len(missing)} plugins demandé à Jenkins')
         if args.admin_user:
             handle_admin(auth_file, args.admin_user, args.admin_password_file, True)
         if args.harden:
             harden(auth_file, True, controller_zero=args.controller_zero, disable_agents=args.disable_inbound_agents)
-        output('›', 'Redémarrage contrôlé : Jenkins attend la fin des builds en cours (safe-restart)')
+        output('›', 'Redémarrage sécurisé après les builds en cours')
         cli(auth_file, ['safe-restart'], timeout=60, status='Redémarrage sécurisé Jenkins')
         output('✓', 'safe-restart accepté ; vérifier la reprise et les plugins après les builds')
 
@@ -472,22 +567,19 @@ def choose_optional_multibranch(args):
     A caller specifying --multibranch-scan has already opted in.
     """
     if args.multibranch_scan:
-        output('⚠', 'Plugin Multibranch Scan Webhook Trigger demandé explicitement (SECURITY-2875).')
         return args
     if args.profile == 'minimal':
         return args
-    option = pick('Jenkins — scan Multibranch par webhook',
+    option = pick('Webhook Multibranch (optionnel)',
                   ['Non : utiliser GitHub Branch Source (recommandé)',
                    'Oui : installer Multibranch Scan Webhook Trigger'],
                   hint='SECURITY-2875 : avertissement non résolu sur les tokens. Activer seulement si nécessaire.')
     args.multibranch_scan = (option == 2)
-    if args.multibranch_scan:
-        output('⚠', 'Plugin optionnel sélectionné : endpoint webhook à protéger et token fort à utiliser.')
     return args
 
 
 def interactive_configure(args):
-    choice = pick('Jenkins — configuration AUTOKOM',
+    choice = pick('Configuration Jenkins',
                   ['Recommandée : plugins DevSecOps + sécurité, préserver comptes et agents',
                    'Personnaliser les composants'],
                   hint='Option 1 : configuration sécurisée en limitant les interactions et sans remplacer les administrateurs.')
@@ -498,7 +590,6 @@ def interactive_configure(args):
         args.controller_zero = False
         args.disable_inbound_agents = False
         args.confirm_restart = args.mode == 'apply'  # Consentement donné par la sélection de ce profil.
-        output('✓', 'Profil recommandé sélectionné : comptes et agents existants préservés.')
         return choose_optional_multibranch(args)
     i = pick('Jenkins — profil de plugins',
              ['DevSecOps complet', 'Base suggérée AUTOKOM', 'Aucun nouveau plugin'],
@@ -541,10 +632,9 @@ def main():
     args = parse()
     if args.wizard_timeout < 1:
         raise ValueError('--wizard-timeout doit être positif')
+    section('Jenkins · Configuration', 'Plugins · Identifiants · Sécurité', tone='jenkins')
     if args.interactive:
         args = interactive_configure(args)
-    section('Jenkins · Post-configuration', 'Administrateur · Plugins · Sécurité')
-    output('›', 'Mode : ' + ('Simulation' if args.mode == 'check' else 'Application'))
     configure(args)
 
 

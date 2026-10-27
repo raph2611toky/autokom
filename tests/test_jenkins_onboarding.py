@@ -54,7 +54,8 @@ class JenkinsOnboardingTests(unittest.TestCase):
         self.assertFalse(Path(path).exists())
     def test_masked_input_username_and_token_no_manual_file(self):
         args=m.parse(['--apply','--interactive'])
-        with mock.patch.object(m,'ask',return_value='my-admin'), mock.patch.object(m,'read_masked',return_value='API_TOKEN'):
+        with mock.patch.object(m,'ask',return_value='my-admin'), mock.patch.object(m,'read_masked',return_value='API_TOKEN'), \
+             mock.patch.object(m,'ensure_cli_jar'), mock.patch.object(m,'verify_admin'):
             with m.authorization_context(args,'https://jenkins.ik0m.tech/',apply=True) as path:
                 self.assertEqual(Path(path).read_text(), 'my-admin:API_TOKEN\n')
             self.assertFalse(Path(path).exists())
