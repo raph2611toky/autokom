@@ -78,6 +78,8 @@ def save_state():
         'grafana_port': settings.grafana_port,
         'prometheus_storage_path': settings.storage_path,
         'grafana_datasource_uid': settings.datasource_uid,
+        'prometheus_domain': settings.prometheus_domain,
+        'grafana_domain': settings.grafana_domain,
     }
     owned_write(CONFIG_STATE, json.dumps(record, sort_keys=True, indent=2) + '\n', mode=0o600)
 
@@ -489,7 +491,11 @@ def existing_vhosts(domain):
 
 
 def vhost_target_ok(vhosts, port):
-    return any(f'127.0.0.1:{port}' in v or f'localhost:{port}' in v for v in vhosts)
+    # Original direct proxy and managed named upstreams are both supported.
+    return any(f'127.0.0.1:{port}' in v or f'localhost:{port}' in v or
+               f'proxy_pass http://autokom_prometheus_{port}' in v or
+               f'proxy_pass http://autokom_grafana_{port}' in v
+               for v in vhosts)
 
 
 def valid_cert(domain):
@@ -511,7 +517,12 @@ def vhost_content(domain, port, *, prometheus=False, gated=True):
                 '    location / { return 503; }\n}\n')
     auth = ('        auth_basic "AUTOKOM Metrics";\n'
             '        auth_basic_user_file /etc/nginx/.autokom-prometheus.htpasswd;\n') if prometheus else ''
+    upstream_name = f'autokom_{"prometheus" if prometheus else "grafana"}_{port}'
     return (f'# AUTOKOM MANAGED {domain} : {port} — HTTPS\n'
+            f'upstream {upstream_name} {{\n'
+            f'    server 127.0.0.1:{port};\n'
+            '    keepalive 8;\n'
+            '}\n'
             'server {\n'
             '    listen 80;\n'
             f'    server_name {domain};\n'
@@ -525,16 +536,23 @@ def vhost_content(domain, port, *, prometheus=False, gated=True):
             '    ssl_protocols TLSv1.2 TLSv1.3;\n'
             '    ssl_session_tickets off;\n'
             '    location / {\n' + auth +
-            f'        proxy_pass http://127.0.0.1:{port};\n'
+            f'        proxy_pass http://{upstream_name};\n'
             '        proxy_http_version 1.1;\n'
             '        proxy_set_header Host $host;\n'
             '        proxy_set_header X-Real-IP $remote_addr;\n'
             '        proxy_set_header X-Forwarded-Proto $scheme;\n'
             '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n'
-            '        proxy_set_header Upgrade $http_upgrade;\n'
-            '        proxy_set_header Connection "upgrade";\n'
+            '        proxy_set_header Connection "";\n'
             '    }\n'
-            '}\n')
+            + (f'    location /api/live/ {{\n'
+               f'        proxy_pass http://{upstream_name};\n'
+               '        proxy_http_version 1.1;\n'
+               '        proxy_set_header Host $host;\n'
+               '        proxy_set_header X-Forwarded-Proto $scheme;\n'
+               '        proxy_set_header Upgrade $http_upgrade;\n'
+               '        proxy_set_header Connection "upgrade";\n'
+               '    }\n' if not prometheus else '')
+            + '}\n')
 
 
 def ensure_prom_basic_auth(username, passwd):
@@ -595,8 +613,28 @@ def configure_nginx(domain, port, kind, args):
             return
         if not valid_cert(domain):
             raise SetupError(f'{domain} est déjà configuré mais son TLS n’est pas valide : intervention manuelle requise')
-        if kind == 'prometheus' and not any('auth_basic_user_file' in block and 'auth_basic ' in block for block in existing):
+        if kind == 'prometheus' and not any(
+                ('auth_basic_user_file' in block and 'auth_basic ' in block) or
+                'auth_request /internal/autokom/authz;' in block for block in existing):
             raise SetupError('Proxy Prometheus existant sans authentification HTTP : correction manuelle exigée')
+        # Upgrade only our own vhost, and only with interactive approval.
+        if managed.is_file() and not managed.is_symlink():
+            old = managed.read_text(encoding='utf-8')
+            target = vhost_content(domain, port, prometheus=(kind=='prometheus'), gated=False)
+            if (old.startswith(f'# AUTOKOM MANAGED {domain} :') and
+                    old != target and 'upstream autokom_' not in old):
+                if yesno(f'Migrer le vhost {domain} vers un upstream Nginx nommé ?',
+                         default=False, noninteractive=args.non_interactive):
+                    try:
+                        owned_write(managed,target)
+                        run(['nginx','-t'])
+                        run(['systemctl','reload','nginx'])
+                    except Exception:
+                        owned_write(managed,old)
+                        run(['nginx','-t'])
+                        run(['systemctl','reload','nginx'])
+                        raise
+                    out('✓', f'{domain} : upstream Nginx nommé configuré')
         out('✓', f'{domain} : virtual host et certificat existants réutilisés')
         return
     ips = resolve_domain(domain)
@@ -1280,8 +1318,13 @@ def preflight(args):
     if args.prometheus_domain and not shutil.which('openssl'):
         raise SetupError('OpenSSL requis pour protéger Prometheus par mot de passe')
     # Refuse unhandled local port conflicts or public exposures.
+    extra_ports=[]
+    if getattr(args, 'setup_node', False):
+        extra_ports.append((9100,'prometheus-node-exporter'))
+    if getattr(args, 'setup_alertmanager', False):
+        extra_ports.append((9093,'prometheus-alertmanager'))
     for port, expected in ((cfg().prometheus_port, 'prometheus'),
-                           (cfg().grafana_port, 'grafana-server')):
+                           (cfg().grafana_port, 'grafana-server'), *extra_ports):
         if listener(port) and not active(expected):
             raise SetupError(f'TCP/{port} est déjà occupé par un service inconnu : ne pas écraser')
 
@@ -1347,9 +1390,30 @@ def main(argv=None):
     args = parser.parse_args(argv)
     global SETTINGS
     SETTINGS = load_settings(custom_path=args.config, changes=args.set)
+    # Reuse validated AUTOKOM-owned domains on subsequent runs; the operator
+    # should not have to re-enter domains after installing Node Exporter later.
+    stored = previous_state() if args.mode == 'apply' else {}
+    def adopted_domain(kind, existing):
+        if existing:
+            return existing
+        last=stored.get(f'{kind}_domain','')
+        if last:
+            return validate_domain(last)
+        # Upgrade from pre-v16 installations where domains weren't persisted.
+        folder=Path('/etc/nginx/sites-enabled')
+        if not folder.is_dir():
+            return ''
+        found=[]
+        for entry in folder.glob(f'autokom-{kind}-*.conf'):
+            domain=entry.name[len(f'autokom-{kind}-'):-5]
+            try:
+                if validate_domain(domain): found.append(domain)
+            except SetupError:
+                continue
+        return found[0] if len(found)==1 else ''
     SETTINGS = validate_settings(replace(SETTINGS,
-        prometheus_domain=SETTINGS.prometheus_domain if args.prometheus_domain is None else args.prometheus_domain,
-        grafana_domain=SETTINGS.grafana_domain if args.grafana_domain is None else args.grafana_domain,
+        prometheus_domain=adopted_domain('prometheus', SETTINGS.prometheus_domain) if args.prometheus_domain is None else args.prometheus_domain,
+        grafana_domain=adopted_domain('grafana', SETTINGS.grafana_domain) if args.grafana_domain is None else args.grafana_domain,
         email=SETTINGS.email if args.email is None else args.email))
     if args.show_config:
         print('AUTOKOM · Configuration d’observabilité (aucun secret)')
@@ -1362,6 +1426,9 @@ def main(argv=None):
     args.prometheus_password = ''
     args.prometheus_user = ''
     args.grafana_new_password = ''
+    args.setup_node = False
+    args.setup_alertmanager = False
+    args.smtp = None
     args.prometheus_domain = validate_domain(args.prometheus_domain)
     args.grafana_domain = validate_domain(args.grafana_domain)
     if args.prometheus_domain and args.prometheus_domain == args.grafana_domain:
@@ -1374,6 +1441,8 @@ def main(argv=None):
             args.non_interactive = True
     section('Observabilité', 'Jenkins → Prometheus → Grafana')
     interactive_options(args)
+    from observability_extras import collect_options
+    collect_options(sys.modules[__name__], args)
     SETTINGS = validate_settings(replace(SETTINGS, prometheus_domain=args.prometheus_domain,
                                           grafana_domain=args.grafana_domain, email=args.email))
     out('›', f'Ports actifs ciblés : Jenkins {cfg().jenkins_port} · Prometheus {cfg().prometheus_port} · Grafana {cfg().grafana_port}')
@@ -1397,6 +1466,10 @@ def main(argv=None):
     ensure_grafana(args)
     configure_nginx(args.prometheus_domain, cfg().prometheus_port, 'prometheus', args)
     configure_nginx(args.grafana_domain, cfg().grafana_port, 'grafana', args)
+    # Additional services are strictly opt-in and do not alter existing accounts.
+    from observability_extras import ensure_node, ensure_alertmanager
+    ensure_node(sys.modules[__name__], args)
+    ensure_alertmanager(sys.modules[__name__], args)
     # Final functional check: Prometheus must actually scrape the Jenkins job.
     seen = False
     with Activity('Collecte Jenkins → Prometheus (cible UP)', delay=0.4):

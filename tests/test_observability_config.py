@@ -48,7 +48,7 @@ class DynamicConfigTests(unittest.TestCase):
         self.assertIn('GF_SERVER_HTTP_PORT=3124', o.unit_override_grafana('graf.example.com'))
         self.assertIn('http://127.0.0.1:9124', o.datasource_yaml())
         self.assertIn('timeInterval: 25s', o.datasource_yaml())
-        self.assertIn('proxy_pass http://127.0.0.1:3124;', o.vhost_content('graf.example.com', 3124, gated=False))
+        self.assertIn('proxy_pass http://autokom_grafana_3124;', o.vhost_content('graf.example.com', 3124, gated=False))
         self.assertEqual(o.cfg().jenkins_metrics_url, 'http://127.0.0.1:8117/prometheus/')
 
     def test_dynamic_http_allowlist(self):

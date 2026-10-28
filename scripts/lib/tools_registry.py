@@ -45,7 +45,7 @@ SPECS = (
     Tool('ansible','00 · Fondations','Orchestration Ansible',('ansible-playbook',),files=((str(ROOT/'ansible/ansible.cfg'),'Configuration AUTOKOM'),),docs='docs/FOUNDATION.md'),
     Tool('terraform','00 · Fondations','Provisionnement IaC',('terraform',),docs='README.md'),
     Tool('nginx','01 · Réseau','Reverse proxy et TLS',('nginx',),'nginx',(
-        ('/etc/nginx/nginx.conf','Configuration principale'),('/etc/nginx/sites-available','Virtual hosts disponibles'),('/etc/nginx/sites-enabled','Virtual hosts actifs'),(str(ROOT/'config/nginx/00-catchall.conf'),'Règles par défaut AUTOKOM')),docs='docs/FOUNDATION.md',critical=True),
+        ('/etc/nginx/nginx.conf','Configuration principale'),('/etc/nginx/sites-available','Virtual hosts disponibles'),('/etc/nginx/sites-enabled','Virtual hosts actifs'),('/var/log/nginx/access.log','Requêtes Nginx'),('/var/log/nginx/error.log','Erreurs Nginx'),(str(ROOT/'config/nginx/00-catchall.conf'),'Règles par défaut AUTOKOM')),docs='docs/FOUNDATION.md',critical=True),
     Tool('certbot','01 · Réseau','Certificats Let’s Encrypt',('certbot',),files=(('/etc/letsencrypt/renewal','Profils de renouvellement'),('/etc/letsencrypt/live','Certificats : accès restreint')),docs='docs/OBSERVABILITY.md'),
     Tool('ufw','01 · Réseau','Pare-feu hôte',('ufw',),'ufw', (('/etc/ufw','Règles du pare-feu'),),docs='docs/PHASE2-NETWORK-SECURITY.md',critical=True),
     Tool('docker','02 · Conteneurs','Moteur Docker',('docker',),'docker', (('/etc/docker/daemon.json','Paramètres du démon Docker'),('/var/lib/docker','Volumes, images et métadonnées : ne pas modifier manuellement')),docs='docs/FOUNDATION.md',critical=True),
@@ -53,9 +53,10 @@ SPECS = (
     Tool('postgresql','03 · Données','Serveur PostgreSQL',('psql',),'postgresql', (('/etc/postgresql','Clusters PostgreSQL et pg_hba.conf'),('/var/lib/postgresql','Données PostgreSQL : ne pas modifier manuellement')),docs='docs/JENKINS-DATABASES.md',critical=True),
     Tool('redis','03 · Données','Cache et messages',('redis-server',),'redis-server', (('/etc/redis/redis.conf','Configuration Redis'),('/var/lib/redis','Persistance Redis')),critical=True),
     Tool('jenkins','04 · CI/CD','Automatisation CI/CD',('jenkins',),'jenkins', (('/usr/lib/systemd/system/jenkins.service','Unité système (lecture seule)'),('/etc/systemd/system/jenkins.service.d','Overrides systemd'),('/var/lib/jenkins/config.xml','Configuration Jenkins (peut contenir des secrets)'),('/var/lib/jenkins/plugins','Plugins installés'),('/var/lib/jenkins/jobs','Définitions de jobs'),('/var/lib/jenkins/secrets','Secrets Jenkins : ne jamais publier'),(str(ROOT/'config/jenkins'),'Profils de plugins et Groovy AUTOKOM')),docs='docs/JENKINS-POSTINSTALL.md',critical=True),
-    Tool('prometheus','05 · Observabilité','Collecte des métriques',('prometheus',),'prometheus', (('/etc/prometheus/prometheus.yml','Cibles et intervalles scrape'),('/etc/systemd/system/prometheus.service.d','Overrides systemd AUTOKOM'),('/etc/autokom/observability.ini','Configuration dynamique AUTOKOM'),('/var/lib/prometheus','Données de séries temporelles')),docs='docs/OBSERVABILITY-CONFIG.md'),
-    Tool('grafana','05 · Observabilité','Tableaux de bord',('grafana-server',),'grafana-server', (('/etc/grafana/grafana.ini','Paramètres Grafana'),('/etc/grafana/provisioning/datasources','Sources de données'),('/etc/grafana/provisioning/dashboards','Provisionnement des tableaux de bord'),('/etc/systemd/system/grafana-server.service.d','Overrides systemd AUTOKOM'),('/etc/autokom/observability.ini','Configuration dynamique AUTOKOM'),('/var/lib/grafana','Base de données locale et tableaux de bord')),docs='docs/OBSERVABILITY.md'),
-    Tool('node-exporter','05 · Observabilité','Métriques de l’hôte',('prometheus-node-exporter',),'prometheus-node-exporter', (('/etc/default/prometheus-node-exporter','Variables service node exporter'),)),
+    Tool('prometheus','05 · Observabilité','Collecte des métriques',('prometheus',),'prometheus', (('/etc/prometheus/prometheus.yml','Cibles et intervalles scrape'),('/etc/prometheus/rules/autokom-alerts.yml','Règles d’alertes liées'),('/etc/prometheus/alertmanager.yml','Configuration Alertmanager associée'),('/etc/nginx/.autokom-prometheus.htpasswd','Accès HTTP : hash restreint'),('/etc/systemd/system/prometheus.service.d','Overrides systemd AUTOKOM'),('/etc/autokom/observability.ini','Configuration dynamique AUTOKOM'),('/var/lib/prometheus','Données de séries temporelles'),('/etc/autokom/state/observability.json','État de configuration AUTOKOM'),('/var/log/nginx/access.log','Journal proxy (global)'),('/var/log/nginx/error.log','Erreurs proxy (global)')),docs='docs/OBSERVABILITY-CONFIG.md'),
+    Tool('grafana','05 · Observabilité','Tableaux de bord',('grafana-server',),'grafana-server', (('/etc/grafana/grafana.ini','Paramètres Grafana'),('/etc/grafana/provisioning/datasources','Sources de données'),('/etc/grafana/provisioning/dashboards','Provisionnement des tableaux de bord'),('/etc/systemd/system/grafana-server.service.d','Overrides systemd AUTOKOM'),('/etc/autokom/observability.ini','Configuration dynamique AUTOKOM'),('/etc/grafana/provisioning/datasources/autokom-prometheus.yaml','Source Prometheus AUTOKOM'),('/etc/systemd/system/grafana-server.service.d/90-autokom.conf','Bind et domaine Grafana'),('/var/lib/grafana','Base de données locale et tableaux de bord')),docs='docs/OBSERVABILITY.md'),
+    Tool('node-exporter','05 · Observabilité','Métriques de l’hôte',('prometheus-node-exporter',),'prometheus-node-exporter', (('/etc/default/prometheus-node-exporter','Variables service node exporter'),('/etc/systemd/system/prometheus-node-exporter.service.d/90-autokom.conf','Bind privé AUTOKOM')),docs='docs/OBSERVABILITY-OPERATIONS-v16.md'),
+    Tool('alertmanager','05 · Observabilité','Routage des alertes',('prometheus-alertmanager',),'prometheus-alertmanager', (('/etc/prometheus/alertmanager.yml','Récepteurs et routage SMTP'),('/etc/prometheus/rules/autokom-alerts.yml','Règles d’alerte AUTOKOM'),('/etc/systemd/system/prometheus-alertmanager.service.d/90-autokom.conf','Bind local du service'),('/etc/prometheus/.autokom-smtp-password','Mot de passe SMTP : ne pas afficher')),docs='docs/OBSERVABILITY-OPERATIONS-v16.md'),
     Tool('trivy','06 · Sécurité','Scan images et dépendances',('trivy',),docs='docs/FOUNDATION.md'),
     Tool('semgrep','06 · Sécurité','Analyse de code statique',('semgrep',),docs='docs/FOUNDATION.md'),
     Tool('nikto','06 · Sécurité','Audit web',('nikto',),docs='docs/FOUNDATION.md'),
@@ -82,6 +83,11 @@ def proc(args, timeout=7):
 
 
 def service_state(t):
+    if t.name == 'ufw':
+        result=proc(['ufw','status'])
+        if not result or result.returncode:
+            return 'indisponible'
+        return 'active' if result.stdout.lower().startswith('status: active') else 'inactive'
     if not t.unit:
         return 'outil CLI' if any(shutil.which(c) for c in t.binaries) else 'absent'
     if not Path('/run/systemd/system').is_dir():
@@ -129,6 +135,58 @@ def _state_cell(state):
     return Cell('− ' + state, 'muted')
 
 
+def discovered_service_files(name):
+    """Files really present for a service, including AUTOKOM Nginx vhosts.
+
+    Discover only small, readable Nginx config files; never crawl TSDB/data,
+    follow secret symlinks, or read certificate private keys.
+    """
+    if name not in ('prometheus','grafana','jenkins','nginx','alertmanager','node-exporter'):
+        return []
+    out=[]
+    paths=[]
+    for root in (Path('/etc/nginx/sites-available'),Path('/etc/nginx/sites-enabled'),Path('/etc/nginx/conf.d')):
+        if root.is_dir():
+            paths.extend(sorted(root.glob('*.conf'))[:200])
+    domains={'prometheus':'prometheus','grafana':'grafana','jenkins':'jenkins'}
+    for candidate in paths:
+        try:
+            # Resolve only under /etc/nginx, rejecting arbitrary symlink targets.
+            actual=candidate.resolve(strict=True)
+            if not actual.is_relative_to(Path('/etc/nginx')) or not actual.is_file():
+                continue
+            if actual.stat().st_size>512_000:
+                continue
+            if name != 'nginx':
+                content=actual.read_text(encoding='utf-8')
+                markers={'prometheus':('autokom-prometheus','127.0.0.1:9090','autokom_prometheus'),
+                         'grafana':('autokom-grafana','127.0.0.1:3000','autokom_grafana'),
+                         'jenkins':('jenkins','127.0.0.1:8080'),
+                         'alertmanager':('alertmanager','127.0.0.1:9093'),
+                         'node-exporter':('node-exporter','127.0.0.1:9100')}
+                if not any(m in str(candidate).lower() or m in content.lower() for m in markers[name]):
+                    continue
+            out.append((str(candidate), 'Virtual host / upstream Nginx' + (' (actif)' if 'sites-enabled' in candidate.parts else '')))
+        except (OSError,UnicodeError):
+            continue
+    # Include systemd's actual unit and environment files; these paths are
+    # read as metadata, not dereferenced, and editing is separately restricted.
+    t=get(name)
+    if t.unit:
+        for key, label in (('FragmentPath','Unité systemd chargée'),('DropInPaths','Overrides systemd actifs'),
+                           ('EnvironmentFiles','Fichiers environnement déclarés')):
+            p=proc(['systemctl','show',t.unit,'--property='+key,'--value'])
+            if p and p.returncode==0:
+                for match in re.findall(r'/[^\s()]+',p.stdout):
+                    path=match.rstrip(';')
+                    if path.startswith(('/etc/','/usr/lib/systemd/','/lib/systemd/','/opt/autokom/')):
+                        out.append((path,label))
+    unique={}
+    for key,desc in out:
+        unique.setdefault(key,desc)
+    return list(unique.items())
+
+
 def show(name):
     t=get(name)
     state=service_state(t)
@@ -141,8 +199,12 @@ def show(name):
 
     print('\n  CONFIGURATION ET DONNÉES')
     files=[]
-    for path, desc in t.files:
+    seen_paths=set()
+    for path, desc in (*t.files, *discovered_service_files(name)):
         full=str(Path(path).absolute())
+        if full in seen_paths:
+            continue
+        seen_paths.add(full)
         present=Path(full).exists()
         files.append((Cell('✓ présent','success') if present else Cell('− absent','muted'), full, desc))
     if files:
@@ -171,6 +233,10 @@ def show(name):
     refs.append(('Variables · noms','autokom services show '+name+' -e'))
     refs.append(('Variables · valeurs', 'sudo autokom services show '+name+' -E'))
     refs.append(('Configurer', 'sudo autokom services configure '+name))
+    refs.append(('Fichiers et alias',f'autokom tools {name} files'))
+    refs.append(('Lire un fichier',f'autokom tools {name} cat ALIAS'))
+    refs.append(('Éditer un fichier',f'sudo autokom tools {name} nano ALIAS'))
+    refs.append(('Modifier environnement',f'sudo autokom tools {name} env set VARIABLE'))
     table(['Action', 'Chemin ou commande'], refs)
 
 
@@ -207,6 +273,15 @@ def effective_env(t, *, runtime=True):
                 found.update(_parse_env_lines(x.decode('utf-8','replace') for x in envdata.split(b'\0') if x))
             except (PermissionError,OSError):
                 pass
+    # Include staged AUTOKOM EnvironmentFile keys, even before service restart.
+    # Runtime variables take precedence; an edit may still require restart.
+    try:
+        from tool_files import managed_env,ENV_TOOLS
+        if t.name in ENV_TOOLS:
+            staged=managed_env(t.name)
+            found={**staged,**found}
+    except (OSError,ValueError):
+        pass
     return dict(sorted(found.items()))
 
 
@@ -376,6 +451,10 @@ def dispatch(args):
     verb=args.tool_cmd
     if not verb:
         print('  Utiliser autokom tools -h pour découvrir les commandes.');return 0
+    if verb in TOOLS:
+        from tool_files import dispatch_tool_files
+        dispatch_tool_files(verb,args.file_action,args.file_target,args.file_extra)
+        return 0
     if verb=='list':list_tools(all_tools=args.all);return 0
     if verb=='show':
         if args.environments or args.environments_values:

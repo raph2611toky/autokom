@@ -58,7 +58,7 @@ class TestObservability(unittest.TestCase):
         self.assertNotIn('auth_basic_user_file', text)  # no password challenge over HTTP
         self.assertNotIn('proxy_pass', text)
         result = o.vhost_content('prom.example.com', 9090, prometheus=True, gated=False)
-        self.assertIn('proxy_pass http://127.0.0.1:9090;', result)
+        self.assertIn('proxy_pass http://autokom_prometheus_9090;', result)
         self.assertIn('auth_basic_user_file', result)
         self.assertIn('listen 443 ssl;', result)
 
@@ -125,7 +125,7 @@ server {
     def test_nginx_443_only_for_app(self):
         config = o.vhost_content('grafana.example.com', 3000, gated=False)
         self.assertIn('return 301 https://$host$request_uri;', config)
-        self.assertEqual(config.count('proxy_pass'), 1)
+        self.assertEqual(config.count('proxy_pass'), 2)  # Default + Grafana Live WebSocket
         self.assertNotIn('auth_basic_user_file', config)
 
     def test_auth_deny_if_public_jenkins(self):

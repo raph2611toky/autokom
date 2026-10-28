@@ -103,6 +103,8 @@ class Snapshot:
     datasource_ok: bool
     ufw_active: bool
     domains_ready: bool = True
+    node_ready: bool = True
+    alertmanager_ready: bool = True
 
 
 def domains_ok(cfg):
@@ -157,6 +159,10 @@ def snapshot(cfg):
         datasource_ok=datasource_ok,
         ufw_active=bool(ufw and 'Status: active' in ufw.stdout),
         domains_ready=domains_ok(cfg),
+        node_ready=(works(['systemctl','is-active','--quiet','prometheus-node-exporter']) and
+                    private_listener(bindings(9100)) and http_code('http://127.0.0.1:9100/metrics') == 200),
+        alertmanager_ready=(works(['systemctl','is-active','--quiet','prometheus-alertmanager']) and
+                            private_listener(bindings(9093)) and http_code('http://127.0.0.1:9093/-/ready') == 200),
     )
 
 
@@ -167,7 +173,8 @@ def actions(state: Snapshot):
         'services': not state.jenkins_installed or not state.jenkins_active or not state.jenkins_private,
         'plugins': not state.jenkins_installed or not state.jenkins_active or bool(state.jenkins_plugins_missing),
         'observability': (not state.prometheus_active or not state.grafana_active or
-                          not state.metrics_up or not state.datasource_ok or not state.domains_ready),
+                          not state.metrics_up or not state.datasource_ok or not state.domains_ready or
+                          not state.node_ready or not state.alertmanager_ready),
     }
 
 
@@ -473,6 +480,13 @@ def make_parser():
         ch.add_argument('tool_name')
         ch.add_argument('settings', nargs='*', metavar='CLE=VALEUR')
         ch.add_argument('--apply', action='store_true', help='Valider et enregistrer après confirmation')
+        # Natural syntax: autokom tools prometheus nano nginx-configuration.
+        from tools_registry import SPECS
+        for tool in SPECS:
+            fp=ops.add_parser(tool.name,help=f'Inspecter les fichiers et variables de {tool.name}')
+            fp.add_argument('file_action',choices=('files','cat','head','tail','nano','nano-end','env','auth'))
+            fp.add_argument('file_target',nargs='?',default='')
+            fp.add_argument('file_extra',nargs='?',default='')
     subcommand('update', help='Mise à jour Git fast-forward uniquement (explicite)',
                epilog='Exemple : sudo autokom update')
     return p
