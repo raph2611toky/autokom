@@ -15,46 +15,63 @@ GIB = 1024**3
 
 class LoggingInteractiveUX(unittest.TestCase):
     def test_low_ram_menu_choose_loki_or_opensearch(self):
-        for selection, expected in ((b'1', 'loki'), (b'2','opensearch')):
-            with self.subTest(selection=selection), \
+        import menu
+        for number, expected in ((1,'loki'),(2,'opensearch')):
+            with self.subTest(number=number), \
                  mock.patch.object(logging,'platform_resources',return_value=(int(7.6*GIB), 50*GIB)), \
-                 mock.patch.object(cli.os,'open',return_value=42), \
-                 mock.patch.object(cli.os,'read',side_effect=[selection,b'\n']), \
-                 mock.patch.object(cli.os,'write'), \
-                 mock.patch.object(cli.os,'close') as closer, \
+                 mock.patch.object(menu,'pick',return_value=number) as selector, \
                  contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(cli.choose_logs_backend('both'), expected)
                 self.assertIn('7.6 Gio', output.getvalue())
-                closer.assert_called_once_with(42)
+                self.assertEqual(len(selector.call_args.args[1]),2)
+                self.assertIn('cancel_label', selector.call_args.kwargs)
 
     def test_8_to_12_gib_can_explicitly_keep_both(self):
+        import menu
         with mock.patch.object(logging,'platform_resources',return_value=(10*GIB, 50*GIB)), \
-             mock.patch.object(cli.os,'open',return_value=42), \
-             mock.patch.object(cli.os,'read',side_effect=[b'3', b'\n']), \
-             mock.patch.object(cli.os,'write'),mock.patch.object(cli.os,'close'), \
+             mock.patch.object(menu,'pick',return_value=3) as selector, \
              contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.choose_logs_backend('both'), 'both')
+            self.assertEqual(cli.choose_logs_backend('both'),'both')
+            self.assertEqual(len(selector.call_args.args[1]),3)
 
     def test_unattended_requires_explicit_backend(self):
+        import menu
         with mock.patch.object(logging,'platform_resources',return_value=(int(7.6*GIB),50*GIB)), \
-             mock.patch.object(cli.os,'open',side_effect=OSError('no tty')), \
+             mock.patch.object(menu,'pick',side_effect=RuntimeError('TTY inaccessible')), \
              contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(cli.CLIError, '--backend loki'):
                 cli.choose_logs_backend('both')
 
     def test_explicit_loki_never_prompts(self):
-        with mock.patch.object(cli.os,'open',side_effect=AssertionError('prompt forbidden')):
+        import menu
+        with mock.patch.object(menu,'pick',side_effect=AssertionError('prompt forbidden')):
             self.assertEqual(cli.choose_logs_backend('loki'), 'loki')
 
     def test_small_ram_no_unsafe_opensearch_option(self):
+        import menu
         with mock.patch.object(logging,'platform_resources',return_value=(3*GIB,50*GIB)), \
-             mock.patch.object(cli.os,'open',return_value=42), \
-             mock.patch.object(cli.os,'read',side_effect=[b'2',b'\n',b'1',b'\n']), \
-             mock.patch.object(cli.os,'write'),mock.patch.object(cli.os,'close'), \
-             contextlib.redirect_stdout(io.StringIO()) as out:
+             mock.patch.object(menu,'pick',return_value=1) as selector, \
+             contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.choose_logs_backend('both'),'loki')
-            self.assertNotIn('Data Prepper',out.getvalue())
-            self.assertIn('Choix invalide',out.getvalue())
+            self.assertEqual(len(selector.call_args.args[1]),1)
+            self.assertNotIn('Data Prepper', str(selector.call_args))
+
+    def test_cancel_menu_preserves_no_side_effect(self):
+        import menu
+        with mock.patch.object(logging,'platform_resources',return_value=(int(7.6*GIB),50*GIB)), \
+             mock.patch.object(menu,'pick',return_value=0), \
+             mock.patch.object(cli,'call_module',side_effect=AssertionError('install forbidden')), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                cli.choose_logs_backend('both')
+
+    def test_unusable_ram_denies_even_loki(self):
+        import menu
+        with mock.patch.object(logging,'platform_resources',return_value=(int(.5*GIB),50*GIB)), \
+             mock.patch.object(menu,'pick',side_effect=AssertionError('should never prompt')), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(cli.CLIError,'minimum 1 Gio'):
+                cli.choose_logs_backend('both')
 
     def test_optional_install_positional_and_no_ambiguous_targets(self):
         parser=cli.make_parser()

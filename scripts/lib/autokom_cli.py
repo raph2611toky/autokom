@@ -242,11 +242,11 @@ def yesno(question):
 
 
 def choose_logs_backend(requested):
-    """Ask for an explicit safe fallback on memory-constrained hosts.
+    """Select a safe logging stack using AUTOKOM's existing keyboard UI.
 
-    The interactive selection is never implicit, especially when `both` was
-    explicitly requested. A non-interactive deployment must specify a feasible
-    single backend in its original command.
+    No second ad-hoc input loop: menu.pick owns raw-mode, arrow navigation,
+    immediate 1–9 selection, Enter, cancellation and terminal restoration.
+    An unattended installation needs an explicitly selected feasible backend.
     """
     if requested != 'both':
         return requested
@@ -255,45 +255,32 @@ def choose_logs_backend(requested):
     gib = total / (1024 ** 3)
     if not total or gib >= 12:
         return requested
-    choices = {'1': ('loki', 'Loki + Alloy (léger, recommandé ici)')}
+
+    # Match preflight's hard RAM thresholds, not the *recommended* targets.
+    options = [('loki', 'Loki + Alloy (léger, recommandé ici)')]
     if gib >= 5:
-        choices['2'] = ('opensearch', 'OpenSearch + Data Prepper + Dashboards (plus gourmand)')
+        options.append(('opensearch', 'OpenSearch + Data Prepper + Dashboards (plus gourmand)'))
     if gib >= 8:
-        choices['3'] = ('both', 'Installer les deux (avertissement : 12 Gio recommandés)')
+        options.append(('both', 'Installer les deux (12 Gio recommandés)'))
     message(f'  ! Hôte : {gib:.1f} Gio de RAM ; installation conjointe recommandée à partir de 12 Gio.')
     message('  › AUTOKOM ne force pas les deux moteurs et ne modifie encore aucun service.')
-    message('  Choisir la stack à installer :')
-    for key, (_, label) in choices.items():
-        message(f'    {key}. {label}')
-    message('    0. Annuler sans modifier l’infrastructure')
-    prompt = '  ? Votre choix [' + '/'.join(choices) + '/0] : '
+    if gib < 1:
+        raise CLIError('RAM insuffisante même pour Loki (minimum 1 Gio) : aucune installation.')
+
+    from menu import pick
     try:
-        fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
-    except OSError as exc:
+        index = pick('AUTOKOM · Choisir la stack de journaux',
+                     [label for _, label in options], default=1,
+                     cancel_label='Annuler sans modifier l’infrastructure')
+    except RuntimeError as exc:
+        # Do not fall back to implicit choice or block the CI / SSH without TTY.
         raise CLIError('RAM limitée et terminal non interactif : choisir explicitement '
                        '`--backend loki` ou `--backend opensearch` (si RAM >= 5 Gio).') from exc
-    try:
-        for _ in range(3):
-            os.write(fd, prompt.encode('utf-8'))
-            data = bytearray()
-            while len(data) < 16:
-                ch = os.read(fd, 1)
-                if not ch or ch in (b'\n', b'\r'):
-                    break
-                data.extend(ch)
-            value = data.decode('ascii', errors='ignore').strip()
-            if value == '0' or not value:
-                raise CLIError('Installation des logs annulée à votre demande, aucune modification.')
-            if value in choices:
-                selected, label = choices[value]
-                message(f'  ✓ Choix explicite : {label}')
-                return selected
-            if not ch:
-                raise CLIError('Entrée terminal fermée : aucune installation lancée.')
-            message('  ! Choix invalide. Sélectionner un numéro proposé ou 0.')
-        raise CLIError('Aucune sélection valide : installation annulée.')
-    finally:
-        os.close(fd)
+    if index == 0:
+        raise KeyboardInterrupt
+    chosen, label = options[index - 1]
+    message(f'  ✓ Choix explicite : {label}')
+    return chosen
 
 
 def call_module(path: str, *args):

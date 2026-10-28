@@ -102,3 +102,28 @@ ciblerait un Loki absent. L'état remonté dans l'inventaire reflète le
 conteneur Docker (`active`, `inactive`, `absent`), pas une preuve d'ingestion.
 Il faut toujours valider l'arrivée de vrais journaux et les requêtes après
 installation.
+
+## Mise à jour v20 : menus AUTOKOM unifiés (sans régression)
+
+L'installation adaptative des logs utilise **exactement le sélecteur commun**
+`scripts/lib/menu.py:pick` déjà employé par la configuration des bases
+PostgreSQL/MySQL et par Jenkins. Elle ne lit plus les flèches comme une
+chaîne de caractères dans une saisie canonique.
+
+En terminal interactif avec moins de 12 Gio, sélectionner par **↑/↓ puis
+Entrée**, par **1**, **2** (ou **3** si la RAM permet la double stack), ou
+appuyer directement sur **Entrée** pour le premier choix recommandé. La
+ligne **0. Annuler sans modifier l’infrastructure** est accessible par les
+flèches, la touche **0**, **q** ou **Ctrl-C**. Le menu conserve le titre
+cyan, le curseur vert, les messages d'avertissement et le nettoyage visuel
+avant l'installation ; aucune animation n'est démarrée pendant la question.
+
+Le composant commun possède maintenant un paramètre facultatif
+`cancel_label`, sans modifier la signature ou le comportement des menus
+anciens quand il n'est pas fourni. Les commandes `--check`, `--backend
+loki`, `--backend opensearch` et les alias d'installation restent identiques.
+Pas de basculement implicite vers un moteur lorsque le terminal est absent.
+
+Les tests couvrent les chemins numériques, les touches ↑/↓, Entrée, 0,
+q et les annulations, y compris sur un pseudo-terminal effectif, en plus
+de la suite de non-régression historique.
