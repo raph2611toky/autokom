@@ -100,3 +100,15 @@ sudo autokom check
 ```
 
 Les fonctionnalités ont été testées localement avec unités simulées. Leur exécution réelle n'a pas encore été validée sur ce serveur AWS.
+
+### Journaux (AUTOKOM v19)
+
+Le groupe `06 · Journalisation` distingue Loki, Alloy, OpenSearch,
+Data Prepper et OpenSearch Dashboards. Les services Docker Compose sont
+contrôlés en lecture seule avec `docker ps` et les étiquettes de projet/service.
+Le catalogue affiche les cinq moteurs même absents lorsque `--all` est demandé.
+Les commandes courtes `autokom services --all` et `autokom tools show --all`
+sont des alias de `autokom tools list --all`. Pour les détails d'un composant,
+utiliser `autokom tools show loki` ou `autokom tools show opensearch`.
+Les journaux des composants Docker ne sont pas des unités systemd et ne
+peuvent donc pas être redémarrés avec `autokom tools restart`.

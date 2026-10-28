@@ -57,6 +57,12 @@ SPECS = (
     Tool('grafana','05 · Observabilité','Tableaux de bord',('grafana-server',),'grafana-server', (('/etc/grafana/grafana.ini','Paramètres Grafana'),('/etc/grafana/provisioning/datasources','Sources de données'),('/etc/grafana/provisioning/dashboards','Provisionnement des tableaux de bord'),('/etc/systemd/system/grafana-server.service.d','Overrides systemd AUTOKOM'),('/etc/autokom/observability.ini','Configuration dynamique AUTOKOM'),('/etc/grafana/provisioning/datasources/autokom-prometheus.yaml','Source Prometheus AUTOKOM'),('/etc/systemd/system/grafana-server.service.d/90-autokom.conf','Bind et domaine Grafana'),('/var/lib/grafana','Base de données locale et tableaux de bord')),docs='docs/OBSERVABILITY.md'),
     Tool('node-exporter','05 · Observabilité','Métriques de l’hôte',('prometheus-node-exporter',),'prometheus-node-exporter', (('/etc/default/prometheus-node-exporter','Variables service node exporter'),('/etc/systemd/system/prometheus-node-exporter.service.d/90-autokom.conf','Bind privé AUTOKOM')),docs='docs/OBSERVABILITY-OPERATIONS-v16.md'),
     Tool('alertmanager','05 · Observabilité','Routage des alertes',('prometheus-alertmanager',),'prometheus-alertmanager', (('/etc/prometheus/alertmanager.yml','Récepteurs et routage SMTP'),('/etc/prometheus/rules/autokom-alerts.yml','Règles d’alerte AUTOKOM'),('/etc/systemd/system/prometheus-alertmanager.service.d/90-autokom.conf','Bind local du service'),('/etc/prometheus/.autokom-smtp-password','Mot de passe SMTP : ne pas afficher')),docs='docs/OBSERVABILITY-OPERATIONS-v16.md'),
+    # Stack de logs AUTOKOM : services Docker Compose, pas unités systemd.
+    Tool('loki','06 · Journalisation','Stockage et recherche LogQL',files=(('/etc/autokom/logs/loki.yaml','Paramètres Loki'),('/etc/autokom/logs/compose.yaml','Orchestration Docker Compose'),('/var/lib/grafana/dashboards/autokom/autokom-logs.json','Tableau de bord des logs')),docs='docs/LOGGING-DUAL-BACKEND-v18.md'),
+    Tool('alloy','06 · Journalisation','Collecteur de journaux Docker et système',files=(('/etc/autokom/logs/config.alloy','Pipeline Alloy'),('/etc/autokom/logs/compose.yaml','Orchestration Docker Compose')),docs='docs/LOGGING-DUAL-BACKEND-v18.md'),
+    Tool('opensearch','06 · Journalisation','Moteur de recherche et indexation de logs',files=(('/etc/autokom/logs/compose.yaml','Orchestration Docker Compose'),('/etc/autokom/logs/.env','Secrets OpenSearch : accès restreint')),docs='docs/LOGGING-DUAL-BACKEND-v18.md'),
+    Tool('data-prepper','06 · Journalisation','Pipeline OpenSearch de traitement des logs',files=(('/etc/autokom/logs/pipelines.yaml','Pipeline Data Prepper : contient des secrets'),('/etc/autokom/logs/compose.yaml','Orchestration Docker Compose')),docs='docs/LOGGING-DUAL-BACKEND-v18.md'),
+    Tool('opensearch-dashboards','06 · Journalisation','Interface de recherche de logs OpenSearch',files=(('/etc/autokom/logs/compose.yaml','Orchestration Docker Compose'),),docs='docs/LOGGING-DUAL-BACKEND-v18.md'),
     Tool('trivy','06 · Sécurité','Scan images et dépendances',('trivy',),docs='docs/FOUNDATION.md'),
     Tool('semgrep','06 · Sécurité','Analyse de code statique',('semgrep',),docs='docs/FOUNDATION.md'),
     Tool('nikto','06 · Sécurité','Audit web',('nikto',),docs='docs/FOUNDATION.md'),
@@ -82,7 +88,35 @@ def proc(args, timeout=7):
         return None
 
 
+LOG_DOCKER_SERVICES = frozenset(('loki', 'alloy', 'opensearch',
+                                 'data-prepper', 'opensearch-dashboards'))
+
+
+def logging_docker_state(name):
+    """Read-only container state; no docker compose `up`, no secret output.
+
+    Rely on Compose's service/project labels, not guessed container names.
+    Distinguish absent, stopped and running without requiring a systemd unit.
+    """
+    if name not in LOG_DOCKER_SERVICES:
+        return 'absent'
+    if not shutil.which('docker'):
+        return 'absent'
+    p = proc(['docker', 'ps', '--all',
+              '--filter', 'label=com.docker.compose.project=autokom-logs',
+              '--filter', f'label=com.docker.compose.service={name}',
+              '--format', '{{.State}}'],timeout=6)
+    if p is None or p.returncode:
+        return 'indisponible'
+    states = p.stdout.strip().splitlines()
+    if not states:
+        return 'absent'
+    return 'active' if 'running' in states else 'inactive'
+
+
 def service_state(t):
+    if t.name in LOG_DOCKER_SERVICES:
+        return logging_docker_state(t.name)
     if t.name == 'ufw':
         result=proc(['ufw','status'])
         if not result or result.returncode:
@@ -457,6 +491,13 @@ def dispatch(args):
         return 0
     if verb=='list':list_tools(all_tools=args.all);return 0
     if verb=='show':
+        if args.all:
+            if args.tool_name:
+                raise ToolError('`show --all` ne prend pas de nom ; utiliser `show NOM` pour un outil')
+            list_tools(all_tools=True)
+            return 0
+        if not args.tool_name:
+            raise ToolError('Spécifier un outil (ex. `show loki`) ou `show --all` pour le catalogue')
         if args.environments or args.environments_values:
             environments(args.tool_name,values=args.environments_values)
         else:show(args.tool_name)

@@ -68,3 +68,37 @@ Pour OpenSearch, **ne pas afficher le mot de passe dans le shell ou les logs**. 
 ## Conduite de changement
 
 Ce correctif n'est pas poussé sur GitHub et n'est pas déployé sur l'EC2 : les fichiers sont préparés et testés localement (tests Python + parsing YAML). Aucun test Docker réel n'était possible dans cet environnement. La compatibilité exacte des images et des flux doit être vérifiée sur l'hôte avant mise en production. La transition vers un environnement pleinement durci fera partie de l'étape d'intégration live.
+
+## Mise à jour v19 : RAM et inventaire
+
+Sur un hôte disposant de moins de **12 Gio** de RAM physique, une demande
+`sudo autokom install logs` (ou `--only logs --backend both`) propose
+explicitement un backend unique. Aucun choix n'est appliqué silencieusement.
+Le choix est demandé sur le terminal interactif avant tout lancement de
+Docker Compose. Une installation non interactive doit indiquer `--backend
+loki` ou `--backend opensearch`. Si la RAM est inférieure à 5 Gio, OpenSearch
+n'est pas proposé ; le garde-fou propre à chaque backend reste actif.
+
+Le mode `--check` donne les avertissements et les options sans demander de
+réponse ni modifier la configuration. Sur un serveur de 7,6 Gio déjà chargé
+par Jenkins/Grafana, **Loki + Alloy est le choix privilégié**. OpenSearch
+exige `vm.max_map_count >= 262144` et peut nécessiter davantage de mémoire
+au démarrage. Une installation `both` peut être refaite après augmentation de
+la RAM, en tenant compte de la mémoire consommée par les services existants.
+
+Inventaire des composants Docker, sans unités systemd artificielles :
+
+```bash
+autokom tools list --all
+autokom services --all         # alias de list --all
+autokom tools show --all       # alias de list --all
+autokom tools show loki
+autokom tools show opensearch
+autokom tools alloy files
+```
+
+En mode OpenSearch seul, AUTOKOM ne crée pas de tableau de bord Grafana qui
+ciblerait un Loki absent. L'état remonté dans l'inventaire reflète le
+conteneur Docker (`active`, `inactive`, `absent`), pas une preuve d'ingestion.
+Il faut toujours valider l'arrivée de vrais journaux et les requêtes après
+installation.

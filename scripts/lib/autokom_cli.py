@@ -192,10 +192,12 @@ def actions(state: Snapshot):
 
 
 def selected(args):
-    if args.only and args.start_at:
-        raise CLIError('--only et --from ne peuvent pas être combinés')
-    if args.only:
-        return INSTALL_ALIASES.get(args.only, (args.only,))
+    module = getattr(args, 'module', None)
+    if sum(bool(x) for x in (module, args.only, args.start_at)) > 1:
+        raise CLIError('Choisir une seule cible : MODULE, --only ou --from')
+    if module or args.only:
+        target = module or args.only
+        return INSTALL_ALIASES.get(target, (target,))
     if args.start_at:
         if args.start_at == 'logs':
             return ('logs',)
@@ -237,6 +239,61 @@ def yesno(question):
     finally:
         if fd is not None:
             os.close(fd)
+
+
+def choose_logs_backend(requested):
+    """Ask for an explicit safe fallback on memory-constrained hosts.
+
+    The interactive selection is never implicit, especially when `both` was
+    explicitly requested. A non-interactive deployment must specify a feasible
+    single backend in its original command.
+    """
+    if requested != 'both':
+        return requested
+    from logging_stack import platform_resources
+    total, _ = platform_resources()
+    gib = total / (1024 ** 3)
+    if not total or gib >= 12:
+        return requested
+    choices = {'1': ('loki', 'Loki + Alloy (léger, recommandé ici)')}
+    if gib >= 5:
+        choices['2'] = ('opensearch', 'OpenSearch + Data Prepper + Dashboards (plus gourmand)')
+    if gib >= 8:
+        choices['3'] = ('both', 'Installer les deux (avertissement : 12 Gio recommandés)')
+    message(f'  ! Hôte : {gib:.1f} Gio de RAM ; installation conjointe recommandée à partir de 12 Gio.')
+    message('  › AUTOKOM ne force pas les deux moteurs et ne modifie encore aucun service.')
+    message('  Choisir la stack à installer :')
+    for key, (_, label) in choices.items():
+        message(f'    {key}. {label}')
+    message('    0. Annuler sans modifier l’infrastructure')
+    prompt = '  ? Votre choix [' + '/'.join(choices) + '/0] : '
+    try:
+        fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
+    except OSError as exc:
+        raise CLIError('RAM limitée et terminal non interactif : choisir explicitement '
+                       '`--backend loki` ou `--backend opensearch` (si RAM >= 5 Gio).') from exc
+    try:
+        for _ in range(3):
+            os.write(fd, prompt.encode('utf-8'))
+            data = bytearray()
+            while len(data) < 16:
+                ch = os.read(fd, 1)
+                if not ch or ch in (b'\n', b'\r'):
+                    break
+                data.extend(ch)
+            value = data.decode('ascii', errors='ignore').strip()
+            if value == '0' or not value:
+                raise CLIError('Installation des logs annulée à votre demande, aucune modification.')
+            if value in choices:
+                selected, label = choices[value]
+                message(f'  ✓ Choix explicite : {label}')
+                return selected
+            if not ch:
+                raise CLIError('Entrée terminal fermée : aucune installation lancée.')
+            message('  ! Choix invalide. Sélectionner un numéro proposé ou 0.')
+        raise CLIError('Aucune sélection valide : installation annulée.')
+    finally:
+        os.close(fd)
 
 
 def call_module(path: str, *args):
@@ -312,33 +369,44 @@ def perform(args, cfg):
         state = snapshot(cfg)
     plan = actions(state)
     # Contrôle ciblé du backend plutôt que de considérer 'both' toujours requis.
-    if 'logs' in stages and args.backend:
+    if 'logs' in stages:
         from logging_stack import ready
-        plan['logs'] = not ready(args.backend)
+        plan['logs'] = not ready(args.backend or 'both')
     print_plan(state, plan, stages)
     if args.check:
+        if 'logs' in stages:
+            from logging_stack import resource_warnings, platform_resources
+            for warning in resource_warnings(args.backend or 'both'):
+                message('  ! '+warning)
+            ram, _ = platform_resources()
+            if (args.backend or 'both') == 'both' and ram and ram < 12 * 1024**3:
+                message('  › RAM limitée : installation interactive proposera Loki ou OpenSearch ; '
+                        'ou choisir --backend loki / --backend opensearch.')
         message('  ✓ Simulation en lecture seule : aucune installation lancée.')
         return 0
     if os.geteuid() != 0:
         raise CLIError('Utiliser sudo autokom install')
+    logs_backend = args.backend or 'both'
+    if 'logs' in stages and plan['logs']:
+        logs_backend = choose_logs_backend(logs_backend)
     for index, stage in enumerate(stages, 1):
         with Activity(f'Contrôle {LABELS[stage]}'):
             state = snapshot(cfg)
-        should = (not __import__('logging_stack').ready(args.backend)
-                  if stage == 'logs' and args.backend else actions(state)[stage])
+        should = (not __import__('logging_stack').ready(logs_backend)
+                  if stage == 'logs' else actions(state)[stage])
         if not should:
             message(f'  - {LABELS[stage]} : déjà conforme, ignoré')
             phase_progress(index, len(stages), LABELS[stage], skipped=True)
             continue
-        apply_stage(stage, state, cfg, logs_backend=args.backend or 'both')
+        apply_stage(stage, state, cfg, logs_backend=logs_backend)
         # Avancement par phases TERMINEES (pas un pourcentage temporel).
         # La conformité réelle de tous les services est revérifiée ensuite.
         message(f'  ✓ {LABELS[stage]} : module exécuté, vérification finale à venir')
         phase_progress(index, len(stages), LABELS[stage])
     with Activity('Contrôle final des services'):
         state = snapshot(cfg)
-    remaining = [LABELS[s] for s in stages if (not __import__('logging_stack').ready(args.backend)
-                 if s == 'logs' and args.backend else actions(state)[s])]
+    remaining = [LABELS[s] for s in stages if (not __import__('logging_stack').ready(logs_backend)
+                 if s == 'logs' else actions(state)[s])]
     if remaining:
         message('  ! À revoir : ' + ', '.join(remaining))
         message('  › sudo autokom check affiche les contrôles détaillés.')
@@ -477,7 +545,7 @@ def make_parser():
 
     i = subcommand('install', help='Détecte et traite automatiquement les composants manquants',
                    formatter_class=argparse.RawDescriptionHelpFormatter,
-                   epilog='''Modules installables séparément (--only) :
+                   epilog='''Modules installables séparément (MODULE ou --only) :
   foundation | core          Base Ubuntu, Ansible, Docker et outils système
   services                   Jenkins et services essentiels
   plugins                    Extensions Jenkins et sécurité
@@ -487,6 +555,7 @@ def make_parser():
   logs | logging             Loki + Alloy, OpenSearch + Data Prepper + Dashboards
 
 Exemples :
+  sudo autokom install logs             # choix adapté à la RAM
   sudo autokom install --only logs --backend both
   sudo autokom install --only observability
   sudo autokom install --only pipeline
@@ -496,6 +565,8 @@ Exemples :
 
 Sans --only, le parcours historique (foundation/services/plugins/observability)
 est conservé. Les logs sont installés séparément pour éviter une charge imprévue.''')
+    i.add_argument('module', nargs='?', choices=STAGES+OPTIONAL_STAGES+tuple(INSTALL_ALIASES),
+                   help='Module facultatif : ex. `autokom install logs`')
     i.add_argument('--check', action='store_true', help='Afficher le plan sans rien modifier')
     i.add_argument('--from', dest='start_at', choices=STAGES+OPTIONAL_STAGES, help='Reprendre à partir de cette phase')
     i.add_argument('--only', choices=STAGES+OPTIONAL_STAGES+tuple(INSTALL_ALIASES), help='Installer uniquement le module ou alias indiqué')
@@ -512,12 +583,13 @@ est conservé. Les logs sont installés séparément pour éviter une charge imp
     lg.add_argument('backend', nargs='?', choices=('loki','opensearch'))
     for alias in ('tools','services'):
         tp=subcommand(alias, help='Catalogue, configuration et exploitation des outils DevSecOps',
-                      epilog='Exemples : autokom tools list | autokom tools show jenkins -e')
+                      epilog='Exemples : autokom tools list --all | autokom services --all | autokom tools show loki')
         ops=tp.add_subparsers(dest='tool_cmd')
         ls=ops.add_parser('list', help='Lister les outils présents (ou --all)')
-        ls.add_argument('--all', action='store_true', help='Inclure les outils absents')
+        ls.add_argument('--all', action='store_true', help='Inclure les outils absents, dont les moteurs de logs')
         sh=ops.add_parser('show', help='Chemins, environnement et documentation d’un outil')
-        sh.add_argument('tool_name', help='Exemple : jenkins, prometheus, mysql')
+        sh.add_argument('tool_name', nargs='?', help='Exemple : jenkins, loki, prometheus, mysql')
+        sh.add_argument('--all', action='store_true', help='Sans outil : alias de `list --all`')
         sh.add_argument('-e','--environnements', dest='environments', action='store_true',
                         help='Afficher les noms de variables (sans valeurs)')
         sh.add_argument('-E','--environnements-values', dest='environments_values', action='store_true',
@@ -552,6 +624,11 @@ def main(argv=None):
     option_tokens = arguments[:arguments.index('--')] if '--' in arguments else arguments
     if '-b' in option_tokens or '--with-banner' in option_tokens:
         show_brand()
+    # Ergonomic aliases, without swallowing unknown flags of individual tools.
+    # `show --all` is an inventory (not hundreds of verbose details).
+    if len(arguments) >= 2 and arguments[0] in ('tools', 'services'):
+        if arguments[1] == '--all':
+            arguments = arguments[:1] + ['list', '--all'] + arguments[2:]
     a = parser.parse_args(arguments)
     if not a.cmd:
         parser.print_help()

@@ -578,7 +578,10 @@ def main(argv=None):
         if a.backend in ('opensearch','both'):
             provision_retention(secret)
             print('  ✓ OpenSearch : politique ISM de rétention 14 jours confirmée')
-        provision_grafana()
+        if a.backend in ('loki','both'):
+            provision_grafana()
+        else:
+            print('  › OpenSearch seul : aucun dashboard Grafana/Loki inutilisable n’est créé.')
         print('  ✓ Services lancés : '+', '.join(desired_services(a.backend)))
         print('  › Vérifier ingestion réelle dans Grafana et OpenSearch Dashboards avant déclaration de conformité.')
         return 0
