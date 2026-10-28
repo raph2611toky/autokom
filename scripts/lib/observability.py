@@ -277,6 +277,38 @@ def assert_private(port):
     out('✓', f'TCP/{port} limité à loopback : {", ".join(addresses)}')
 
 
+
+def wait_service_ready(unit, port, url, *, attempts=35, interval=2):
+    """Attendre une écoute privée ET un endpoint HTTP prêt, sans course systemd.
+
+    `systemctl restart` peut réussir alors que le processus (Type=simple) n'a
+    pas encore ouvert le socket. L'absence transitoire de port n'est donc pas
+    une erreur, contrairement à un port effectivement exposé à Internet.
+    """
+    with Activity(f'{unit} · démarrage et contrôle de santé', delay=0.4):
+        for n in range(attempts):
+            addresses = listener(port)
+            if addresses:
+                if not private_listener(addresses):
+                    raise SetupError(f'{unit} : TCP/{port} accessible hors loopback '
+                                     f'({", ".join(addresses)}). Arrêt par sécurité.')
+                status, _ = get_local(url, timeout=3)
+                if status == 200:
+                    return addresses
+            if n < attempts - 1:
+                time.sleep(interval)
+    # A failure may be a crash-loop, invalid flags, or permissions on TSDB;
+    # explain safe diagnostic commands without dumping logs (possibly secrets).
+    try:
+        state = subprocess.run(['systemctl', 'is-active', unit], capture_output=True,
+                               text=True, timeout=5, check=False).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        state = 'indéterminé'
+    raise SetupError(f'{unit} non prêt sur 127.0.0.1:{port} après '
+                     f'{attempts * interval}s (systemd : {state}). '
+                     f'Diagnostic : systemctl status {unit} --no-pager ; '
+                     f'journalctl -u {unit} -n 50 --no-pager')
+
 def owned_write(path, content, *, mode=0o644, group=None):
     """Atomically write managed file, never replace symlink; preserve on no change."""
     path = Path(path)
@@ -612,6 +644,30 @@ def configure_nginx(domain, port, kind, args):
         raise
 
 
+def ensure_prometheus_storage():
+    """Prépare uniquement un nouveau dossier TSDB et refuse les liens symboliques.
+
+    Le chemin est validé sous /var/lib/prometheus par observability_config.
+    Ne touche jamais aux données/permissions d'un répertoire existant.
+    """
+    import pwd
+    destination = Path(cfg().storage_path)
+    if destination.is_symlink() or destination.parent.is_symlink():
+        raise SetupError('Stockage Prometheus via lien symbolique : vérification manuelle requise')
+    if destination.exists():
+        if not destination.is_dir():
+            raise SetupError(f'Le chemin TSDB Prometheus n’est pas un dossier : {destination}')
+        return False
+    try:
+        user = pwd.getpwnam('prometheus')
+    except KeyError as err:
+        raise SetupError('Utilisateur système prometheus absent après installation du paquet') from err
+    destination.mkdir(parents=True, mode=0o750, exist_ok=False)
+    os.chown(destination, user.pw_uid, user.pw_gid)
+    os.chmod(destination, 0o750)
+    return True
+
+
 def ensure_prometheus(args, *, auth_user=None, auth_password=None):
     exists = package_installed('prometheus')
     if first_install(args.mode, exists):
@@ -646,6 +702,7 @@ def ensure_prometheus(args, *, auth_user=None, auth_password=None):
     if not exists:
         run(['apt-get', 'update', '-qq'], timeout=240)
         run(['apt-get', 'install', '-y', '--no-install-recommends', 'prometheus', 'promtool'], timeout=420)
+    ensure_prometheus_storage()
     auth_path = None
     if auth_user and auth_password:
         auth_path = Path('/etc/prometheus/autokom-jenkins-token')
@@ -664,11 +721,10 @@ def ensure_prometheus(args, *, auth_user=None, auth_password=None):
         run(['systemctl', 'restart', 'prometheus'], timeout=120)
     else:
         run(['systemctl', 'start', 'prometheus'])
-    assert_private(cfg().prometheus_port)
-    status, _ = get_local(cfg().prometheus_base + '/-/ready')
-    if status != 200:
-        raise SetupError(f'Prometheus installé mais /-/ready retourne {status}')
-    out('✓', 'Prometheus fonctionnel, scraping Jenkins configuré')
+    addresses = wait_service_ready('prometheus', cfg().prometheus_port,
+                                   cfg().prometheus_base + '/-/ready')
+    out('✓', f'Prometheus prêt · TCP/{cfg().prometheus_port} privé '
+             f'({", ".join(addresses)}) · collecte Jenkins configurée')
 
 
 def grafana_api(user, pwd, path, method='GET', data=None):
@@ -685,7 +741,9 @@ def grafana_credentials(is_fresh, args):
         username = args.grafana_user or prompt_text('Identifiant Grafana', default='admin', noninteractive=args.non_interactive)
         if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]{2,39}', username):
             raise SetupError('Identifiant Grafana invalide')
-        new_password = password_twice('Grafana', noninteractive=args.non_interactive)
+        prepared = getattr(args, 'grafana_new_password', None)
+        new_password = prepared if isinstance(prepared, str) and prepared else password_twice(
+            'Grafana', noninteractive=args.non_interactive)
         code, _ = grafana_api('admin', 'admin', '/api/user')
         if code != 200:
             raise SetupError('Compte initial Grafana admin/admin indisponible : ne pas réinitialiser automatiquement')
@@ -708,23 +766,32 @@ def grafana_credentials(is_fresh, args):
             raise SetupError('Identifiants Grafana finaux non vérifiés')
         out('✓', f'Administrateur Grafana créé et testé : {username}')
         return username, new_password
-    # Preserve existing users; offer optional change only with old credentials.
-    if not args.non_interactive and yesno('Changer les identifiants de Grafana existant ?', False):
-        username = prompt_text('Utilisateur Grafana actuel', default='admin')
-        old = secret('Mot de passe Grafana actuel')
+    # Existing accounts: options were already collected in the GRAFANA form.
+    # Keep direct/expert invocations compatible with the previous prompt.
+    staged = getattr(args, 'grafana_rotate', None)
+    rotate = staged is True or (staged is not False and not args.non_interactive and
+                                yesno('Changer les identifiants de Grafana existant ?', False))
+    if rotate:
+        username = getattr(args, 'grafana_rotate_user', None)
+        old = getattr(args, 'grafana_old_password', None)
+        new = getattr(args, 'grafana_new_password', None)
+        if not isinstance(username, str) or not username:
+            username = prompt_text('Utilisateur Grafana actuel', default='admin')
+        if not isinstance(old, str) or not old:
+            old = secret('Mot de passe Grafana actuel')
+        if not isinstance(new, str) or not new:
+            new = password_twice('Nouveau mot de passe Grafana')
         code, _ = grafana_api(username, old, '/api/user')
         if code != 200:
-            raise SetupError('Identifiant Grafana existant incorrect; rien n’a été modifié')
-        new = password_twice('Nouveau mot de passe Grafana')
+            raise SetupError('Identifiant Grafana existant incorrect ; rien n’a été modifié')
         code, _ = grafana_api(username, old, '/api/user/password', 'PUT',
                               {'oldPassword': old, 'newPassword': new})
         if code != 200 or grafana_api(username, new, '/api/user')[0] != 200:
             raise SetupError('Échec de vérification du nouveau mot de passe Grafana')
         out('✓', 'Mot de passe Grafana modifié et validé')
         return username, new
-    else:
-        out('✓', 'Comptes Grafana existants conservés')
-        return None
+    out('✓', 'Comptes Grafana existants conservés')
+    return None
 
 
 def verify_grafana_datasource(username: str, password: str, attempts: int = 5):
@@ -770,8 +837,8 @@ def ensure_grafana(args):
             raise SetupError('Grafana existant conservé : modification non autorisée')
     changed_override = owned_write(GRAFANA_DROPIN, unit_override_grafana(args.grafana_domain))
     run(['systemctl', 'daemon-reload'])
-    fresh = not exists or (Path('/var/lib/grafana/grafana.db').exists() and
-                           grafana_api('admin', 'admin', '/api/user')[0] == 200)
+    fresh = (not exists or not Path('/var/lib/grafana/grafana.db').exists() or
+             grafana_api('admin', 'admin', '/api/user')[0] == 200)
     if not exists:
         run(['apt-get', 'install', '-y', 'ca-certificates', 'gnupg', 'wget', 'apt-transport-https'], timeout=240)
         key = Path('/etc/apt/keyrings/grafana.asc')
@@ -1078,25 +1145,93 @@ def prompt_domain(label, *, max_attempts=3, expected_ipv4=None, unavailable=()):
                      'corriger les enregistrements DNS A/AAAA et relancer AUTOKOM')
 
 
+def _certificate_email_for(args, domain):
+    """Demander le courriel au premier service nécessitant un nouveau TLS.
+
+    Le même courriel sert ensuite à Grafana, sans deuxième saisie.
+    """
+    if domain and not args.email and not existing_vhosts(domain):
+        args.email = prompt_text('E-mail Let’s Encrypt',
+                                 hint='Notification des renouvellements TLS')
+        if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', args.email):
+            raise SetupError('E-mail Let’s Encrypt invalide')
+
+
+def grafana_requires_initial_admin():
+    """Détecter installation nouvelle ou admin Grafana initial non remplacé."""
+    if not package_installed('grafana'):
+        return True
+    if not Path('/var/lib/grafana/grafana.db').exists():
+        return True
+    return active('grafana-server') and grafana_api('admin', 'admin', '/api/user')[0] == 200
+
+
 def interactive_options(args):
+    """Deux formulaires complets, dans l'ordre Prometheus puis Grafana.
+
+    Les secrets restent en mémoire (jamais dans le plan, les logs ni les URLs).
+    --check ne demande pas de secrets ; les validations DNS sont immédiates.
+    """
     if args.non_interactive:
         args.prometheus_domain = validate_domain(args.prometheus_domain)
         args.grafana_domain = validate_domain(args.grafana_domain)
         return
-    if not args.prometheus_domain:
-        if yesno('Prometheus dispose-t-il d’un domaine HTTPS ?', False):
-            args.prometheus_domain = prompt_domain('Domaine Prometheus', expected_ipv4=args.public_ip,
-                                                   unavailable={args.grafana_domain} if args.grafana_domain else ())
-    if not args.grafana_domain:
-        if yesno('Grafana dispose-t-il d’un domaine HTTPS ?', False):
-            args.grafana_domain = prompt_domain('Domaine Grafana', expected_ipv4=args.public_ip,
-                                                unavailable={args.prometheus_domain} if args.prometheus_domain else ())
-    if args.prometheus_domain == args.grafana_domain and args.prometheus_domain:
+
+    section('Prometheus · paramètres', 'Domaine · TLS · accès HTTPS', tone='prometheus')
+    if not args.prometheus_domain and yesno('Prometheus dispose-t-il d’un domaine HTTPS ?', False):
+        args.prometheus_domain = prompt_domain(
+            'Domaine Prometheus', expected_ipv4=args.public_ip,
+            unavailable={args.grafana_domain} if args.grafana_domain else ())
+    if args.prometheus_domain:
+        _certificate_email_for(args, args.prometheus_domain)
+        # Ces informations sont demandées avant le formulaire Grafana.
+        interactive_prometheus_password(args)
+    else:
+        out('✓', f'Prometheus : accès privé {cfg().prometheus_base}')
+
+    section('Grafana · paramètres', 'Domaine · TLS · administration', tone='grafana')
+    if not args.grafana_domain and yesno('Grafana dispose-t-il d’un domaine HTTPS ?', False):
+        args.grafana_domain = prompt_domain(
+            'Domaine Grafana', expected_ipv4=args.public_ip,
+            unavailable={args.prometheus_domain} if args.prometheus_domain else ())
+    if args.grafana_domain:
+        _certificate_email_for(args, args.grafana_domain)
+    else:
+        out('✓', f'Grafana : accès privé {cfg().grafana_base}')
+
+    # Collecter tous les champs Grafana avant tout apt-get / Certbot.
+    first_credentials = grafana_requires_initial_admin()
+    if getattr(args, 'mode', 'check') == 'apply':
+        if first_credentials:
+            username = args.grafana_user or prompt_text(
+                'Administrateur Grafana', default='admin', hint='Compte local, pas un token API')
+            if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]{2,39}', username):
+                raise SetupError('Identifiant administrateur Grafana invalide')
+            args.grafana_user = username
+            args.grafana_new_password = password_twice('Grafana', args.non_interactive)
+        else:
+            args.grafana_rotate = yesno('Modifier le mot de passe Grafana existant ?', False)
+            if args.grafana_rotate:
+                args.grafana_rotate_user = prompt_text('Utilisateur Grafana actuel', default='admin')
+                args.grafana_old_password = secret('Mot de passe Grafana actuel')
+                args.grafana_new_password = password_twice('Nouveau mot de passe Grafana')
+            else:
+                out('✓', 'Grafana existant : comptes conservés')
+
+    if args.prometheus_domain and args.prometheus_domain == args.grafana_domain:
         raise SetupError('Prometheus et Grafana ne peuvent pas utiliser le même domaine')
-    if (args.prometheus_domain or args.grafana_domain) and not args.email:
-        # cert issuance requires email only for new domains; existing domains don't.
-        if any(not existing_vhosts(d) for d in [args.prometheus_domain, args.grafana_domain] if d):
-            args.email = prompt_text('E-mail Let’s Encrypt', hint='Pour certificats nouveaux et alertes de renouvellement')
+
+def preflight_credentials(args):
+    """Empêcher une application partielle faute de secrets avant toute mutation."""
+    if args.mode != 'apply':
+        return
+    if (args.prometheus_domain and not PROM_HTPASSWD.exists() and
+            not args.prometheus_password):
+        raise SetupError('Authentification HTTPS Prometheus requise avant installation : '
+                         'lancer en mode interactif')
+    if (grafana_requires_initial_admin() and not getattr(args, 'grafana_new_password', '')):
+        raise SetupError('Mot de passe administrateur Grafana requis avant installation : '
+                         'lancer en mode interactif')
 
 
 def preflight(args):
@@ -1150,7 +1285,7 @@ def preflight_domains(args):
 
 def interactive_prometheus_password(args):
     """Les secrets sont demandés seulement APRÈS validation des domaines."""
-    if (args.prometheus_domain and args.mode == 'apply' and
+    if (args.prometheus_domain and getattr(args, 'mode', 'check') == 'apply' and
             not PROM_HTPASSWD.exists()):
         args.prometheus_user = prompt_text('Utilisateur Prometheus HTTPS',
             default='metricsadmin', hint='Authentification Nginx ; identifiants locaux')
@@ -1194,6 +1329,7 @@ def main(argv=None):
     args.email = SETTINGS.email
     args.prometheus_password = ''
     args.prometheus_user = ''
+    args.grafana_new_password = ''
     args.prometheus_domain = validate_domain(args.prometheus_domain)
     args.grafana_domain = validate_domain(args.grafana_domain)
     if args.prometheus_domain and args.prometheus_domain == args.grafana_domain:
@@ -1204,17 +1340,19 @@ def main(argv=None):
             fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY); os.close(fd)
         except OSError:
             args.non_interactive = True
-    section('06 / 06 · Observabilité', 'Jenkins → Prometheus → Grafana')
+    section('Observabilité', 'Jenkins → Prometheus → Grafana')
     interactive_options(args)
     SETTINGS = validate_settings(replace(SETTINGS, prometheus_domain=args.prometheus_domain,
                                           grafana_domain=args.grafana_domain, email=args.email))
     out('›', f'Ports actifs ciblés : Jenkins {cfg().jenkins_port} · Prometheus {cfg().prometheus_port} · Grafana {cfg().grafana_port}')
     preflight(args)
     preflight_domains(args)
+    preflight_credentials(args)
     if args.mode == 'check':
         check_only(args)
         return 0
-    interactive_prometheus_password(args)
+    # Les formulaires Prometheus/Grafana sont terminés avant les modifications.
+    # En mode non interactif, le garde-fou du secret Prometheus reste ci-dessous.
     ensure_private_jenkins(args)
     harden_public_jenkins(args)
     auth = ensure_jenkins_exporter(args)
