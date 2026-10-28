@@ -98,16 +98,26 @@ def say(text):
 
 
 def list_tools(*, all_tools=False):
+    """Inventaire lisible, par catégorie, sans changer les autres vues CLI.
+
+    Afficher seulement les outils détectés par défaut ; --all affiche aussi
+    les absents. Les tables sont en lecture seule, avec largeur adaptative.
+    """
     print('  ◈ AUTOKOM / OUTILS & SERVICES')
-    current = ''
+    groups = {}
     for t in SPECS:
         state = service_state(t)
         if not all_tools and state == 'absent':
             continue
-        if current != t.group:
-            print('\n  '+t.group); current=t.group
-        symbol = '✓' if state in ('active','outil CLI') else '!' if state in ('inactive','failed','activating') else '-'
-        say(f'    {symbol} {t.name:<19} {state:<11} {t.info}')
+        groups.setdefault(t.group, []).append((
+            Cell(t.name, 'info'), _state_cell(state), t.info,
+        ))
+    if not groups:
+        say('  − Aucun outil détecté ; utiliser autokom tools list --all')
+    for group, rows in groups.items():
+        print()
+        say('  › ' + group)
+        table(['Outil', 'État', 'Fonction'], rows, row_dividers=False)
     print('\n  › autokom tools show jenkins · autokom tools list --all')
 
 

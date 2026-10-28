@@ -93,8 +93,13 @@ def _enable_color(stream, enabled):
             and os.environ.get('TERM','') not in ('', 'dumb'))
 
 
-def render_table(headers, rows, *, width=None, color=None, stream=None, indent='  ') -> str:
-    """Return table. With a narrow terminal, cells wrap rather than truncate."""
+def render_table(headers, rows, *, width=None, color=None, stream=None,
+                 indent='  ', row_dividers=True) -> str:
+    """Return table. With a narrow terminal, cells wrap rather than truncate.
+
+    `row_dividers=False` groups catalogue rows compactly; the default keeps
+    the existing detailed `show` tables unchanged.
+    """
     output = stream if stream is not None else sys.stdout
     color = _enable_color(output, color)
     heads = [safe_text(h) for h in headers]
@@ -150,7 +155,7 @@ def render_table(headers, rows, *, width=None, color=None, stream=None, indent='
     lines.append(rule('├', '┼', '┤'))
     for index, row in enumerate(normalized):
         lines.extend(render_cells(row))
-        if index < len(normalized) - 1:
+        if row_dividers and index < len(normalized) - 1:
             lines.append(rule('├', '┼', '┤'))
     lines.append(rule('╰', '┴', '╯'))
     return '\n'.join(lines)

@@ -1,4 +1,4 @@
-"""Non-régression: la mise en tableau est réservée à `tools/services show`."""
+"""Non-régression: tableaux réservés à `tools/services list` et `show`."""
 from __future__ import annotations
 
 import contextlib
@@ -23,21 +23,48 @@ class ShowOnlyLayout(unittest.TestCase):
             fn(*args, **kwargs)
         return buf.getvalue()
 
-    def test_catalogue_list_conserve_le_format_lignes_v9(self):
+    def test_catalogue_list_est_un_tableau_groupé_colorable(self):
         with mock.patch.object(tools, 'service_state', return_value='active'):
             output = self.capture(tools.list_tools)
         self.assertIn('00 · Fondations', output)
+        self.assertIn('06 · Sécurité', output)
+        self.assertIn('│ Outil', output)
+        self.assertIn('│ État', output)
+        self.assertIn('│ Fonction', output)
         self.assertIn('jenkins', output)
-        self.assertNotIn('╭', output)
-        self.assertNotIn('│', output)
-        self.assertNotIn('Outil / service', output)
+        self.assertIn('╭', output)
+        self.assertIn('╰', output)
+        self.assertNotIn('Propriété', output)
 
-    def test_services_alias_list_conserve_le_format(self):
-        for name in ('tools', 'services'):
-            with self.subTest(alias=name), mock.patch.object(tools,'service_state',return_value='active'):
-                output = self.capture(cli.main, [name, 'list'])
-                self.assertIn('AUTOKOM / OUTILS & SERVICES',output)
-                self.assertNotIn('╭',output)
+    def test_services_et_tools_list_meme_rendu(self):
+        with mock.patch.object(tools,'service_state',return_value='active'):
+            output_tools = self.capture(cli.main, ['tools','list'])
+            output_services = self.capture(cli.main, ['services','list'])
+        self.assertEqual(output_services, output_tools)
+        self.assertIn('│ Outil', output_tools)
+
+    def test_list_exclut_absents_par_defaut_et_all_les_inclut(self):
+        def state(t):
+            return 'active' if t.name == 'jenkins' else 'absent'
+        with mock.patch.object(tools, 'service_state', side_effect=state):
+            base = self.capture(tools.list_tools)
+            expanded = self.capture(tools.list_tools, all_tools=True)
+        self.assertIn('jenkins', base)
+        self.assertNotIn('wazuh-manager', base)
+        self.assertIn('wazuh-manager', expanded)
+        self.assertIn('− absent', expanded)
+
+    def test_list_une_sonde_par_outil(self):
+        with mock.patch.object(tools, 'service_state', return_value='active') as probe:
+            self.capture(tools.list_tools, all_tools=True)
+        self.assertEqual(probe.call_count, len(tools.SPECS))
+
+    def test_list_groupes_sans_diviseurs_entre_lignes(self):
+        with mock.patch.object(tools,'service_state',return_value='active'):
+            output = self.capture(tools.list_tools)
+        # La première catégorie compte quatre outils et un seul trait sous les titres.
+        group = output.split('00 · Fondations', 1)[1].split('01 · Réseau', 1)[0]
+        self.assertEqual(group.count('├'), 1)
 
     def test_status_conserve_son_entete_compact_et_lignes(self):
         s=types.SimpleNamespace(
@@ -116,6 +143,28 @@ class ShowOnlyLayout(unittest.TestCase):
         self.assertEqual(''.join(tables._chunks(p,11)),p)
         for line in output.splitlines():
             self.assertLessEqual(tables.visible_width(line),49)
+
+    def test_tableau_compact_adapte_aux_terminaux_etroits(self):
+        rows = [(tables.Cell('jenkins','info'), tables.Cell('✓ active','success'), 'Automatisation CI/CD'),
+                ('ansible','outil CLI','Orchestration Ansible')]
+        for width in (40, 60, 95):
+            with self.subTest(width=width):
+                rendered=tables.render_table(['Outil','État','Fonction'], rows, width=width,
+                                             row_dividers=False, stream=io.StringIO())
+                self.assertEqual(rendered.count('├'), 1)
+                self.assertIn('jenkins', rendered)
+                for line in rendered.splitlines():
+                    self.assertLessEqual(tables.visible_width(line), width)
+
+    def test_status_dans_tableau_coloré_uniquement_en_tty(self):
+        rendered=tables.render_table(['Outil','État','Fonction'],
+             [('mysql',tables.Cell('✓ active','success'),'Serveur SQL')],
+             width=70, color=True)
+        self.assertIn('\x1b[38;2;134;239;172m', rendered)
+        without=tables.render_table(['Outil','État','Fonction'],
+             [('mysql',tables.Cell('✓ active','success'),'Serveur SQL')],
+             width=70, color=False)
+        self.assertNotIn('\x1b[', without)
 
     def test_no_color_sur_sortie_redirigee(self):
         output=tables.render_table(['Clé','Valeur'],[('KEY',tables.Cell('secret','warning'))],stream=io.StringIO())

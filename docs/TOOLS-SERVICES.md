@@ -39,28 +39,34 @@ Ces actions sont limitées à une unité systemd d'un outil connu et nécessiten
 * `change` valide et met à jour uniquement les clés **non sensibles** reconnues dans `/etc/autokom/observability.ini` ; simulation sans `--apply`. Une sauvegarde `.ini.bak` est conservée lors du premier changement. Aucun service n'est redémarré automatiquement : `sudo autokom install --check`, puis `sudo autokom install` pour réconcilier. Les migrations de données historiques nécessitent une procédure séparée. Le port Jenkins réel n'est pas modifiable par ce fichier seul : utiliser l'assistant de services et systemd.
 
 
-## Mise en forme ciblée : tableaux uniquement pour `show`
+## Présentation ciblée des tableaux (`list` et `show`)
 
-Les affichages déjà colorés de `autokom status`, `autokom config`,
-`autokom install --check`, `autokom tools list` et `autokom tools change`
-**restent inchangés** (lignes compactes, statuts en couleur, pas de tableau).
-
-Les tableaux à colonnes adaptatives ne concernent que :
+Seules les commandes `autokom tools/services list` et `show` utilisent des
+**tableaux à colonnes**. Les commandes `autokom status`, `autokom config`,
+`autokom install --check` et `autokom tools change` conservent leurs **lignes
+colorées et compactes**.
 
 ```bash
-autokom tools show jenkins
-autokom tools show jenkins -e
-sudo autokom tools show jenkins -E
-# Alias identique :
-autokom services show jenkins
+autokom tools list            # outils installés regroupés par famille
+autokom services list --all   # alias : inclure les outils absents
+autokom tools show jenkins   # propriétés, chemins, descriptions
+autokom tools show jenkins -e  # noms des variables sans leurs valeurs
+sudo autokom tools show jenkins -E  # valeurs complètes après confirmation
 ```
 
-- `show` : propriété/valeur, fichiers et leurs rôles, chemins système, documentation.
-- `show -e` : variable et « masquée » : aucune valeur exposée.
-- `show -E` : variable et valeur après vérification root, TTY et confirmation.
-- Les chemins longs sont renvoyés à la ligne plutôt que coupés ; pas de code ANSI dans les journaux.
+- `list` : tableaux **Outil / État / Fonction**, séparés par famille,
+  avec état coloré (vert actif, jaune attention, gris absent) et
+  détection unique de chaque outil. Les lignes n'ont pas de trait
+  horizontal supplémentaire ; l'inventaire reste compact.
+- `show` : propriétés, chemins absolus et explications, dans les tableaux
+  détaillés inchangés.
+- `show -e` : noms des variables, valeurs masquées.
+- `show -E` : noms et valeurs après confirmation root + terminal interactif.
+- Les tableaux s'adaptent à la largeur du terminal, avec retour à la ligne
+  plutôt que troncature ; aucune séquence ANSI dans les logs.
 
-Le correctif est prévu **directement sur la version v9**, sans installation préalable de la version v10 tabulaire globale.
+Le correctif s'applique sur la version **v10R** (qui conserve les anciens
+rendus de `status`, `config` et `install`).
 
 ## Mise à jour Git colorée
 
