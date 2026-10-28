@@ -606,8 +606,11 @@ def configure_nginx(domain, port, kind, args):
         return
     if managed.exists():
         raise SetupError(f'Un fichier Nginx AUTOKOM préexiste mais n’est pas actif : {managed}')
-    if not args.email or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', args.email):
-        raise SetupError('Adresse e-mail Let’s Encrypt valide obligatoire pour un nouveau domaine')
+    # Une adresse de contact est recommandée, mais Certbot peut fonctionner sans.
+    # Ne jamais transmettre --email avec une chaîne vide ; utiliser le drapeau
+    # explicitement prévu par Certbot et avertir l'utilisateur une seule fois.
+    if args.email and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', args.email):
+        raise SetupError('Format d’e-mail Let’s Encrypt invalide')
     link = NGINX_ENABLED / managed.name
     try:
         # Stage gated HTTP-only site: never expose Grafana credentials on HTTP.
@@ -617,8 +620,17 @@ def configure_nginx(domain, port, kind, args):
         run(['systemctl', 'reload', 'nginx'])
         # Certbot only obtains a certificate and temporarily configures nginx
         # for HTTP-01. AUTOKOM owns the final HTTPS reverse proxy configuration.
-        run(['certbot', 'certonly', '--nginx', '--non-interactive',
-             '--agree-tos', '--email', args.email, '-d', domain], timeout=300)
+        # Réutiliser un certificat déjà valide plutôt que de le réémettre.
+        if valid_cert(domain):
+            out('✓', f'{domain} : certificat TLS existant réutilisé')
+        else:
+            email_args = (['--email', args.email] if args.email else
+                          ['--register-unsafely-without-email'])
+            if not args.email and not getattr(args, '_cert_email_warning_emitted', False):
+                out('!', 'Certbot sans e-mail : aucune notification ACME d’expiration ou de révocation')
+                args._cert_email_warning_emitted = True
+            run(['certbot', 'certonly', '--nginx', '--non-interactive',
+                 '--agree-tos', '--no-eff-email', *email_args, '-d', domain], timeout=300)
         if not valid_cert(domain):
             raise SetupError(f'Certificat de {domain} non confirmé')
         owned_write(managed, vhost_content(domain, port,
@@ -1146,15 +1158,35 @@ def prompt_domain(label, *, max_attempts=3, expected_ipv4=None, unavailable=()):
 
 
 def _certificate_email_for(args, domain):
-    """Demander le courriel au premier service nécessitant un nouveau TLS.
+    """Un seul contact ACME facultatif pour l'ensemble de l'installation.
 
-    Le même courriel sert ensuite à Grafana, sans deuxième saisie.
+    La décision (même vide) est conservée dans args pendant toute la commande.
+    En simulation ou avec un certificat déjà valable, aucune saisie nécessaire.
     """
-    if domain and not args.email and not existing_vhosts(domain):
-        args.email = prompt_text('E-mail Let’s Encrypt',
-                                 hint='Notification des renouvellements TLS')
-        if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', args.email):
-            raise SetupError('E-mail Let’s Encrypt invalide')
+    if (not domain or getattr(args, 'mode', 'check') != 'apply' or
+            getattr(args, '_cert_email_decided', False)):
+        return
+    if args.email:
+        # Valeur déjà fournie via le fichier de configuration ou --email.
+        args._cert_email_decided = True
+        return
+    if existing_vhosts(domain) or valid_cert(domain):
+        # Un vhost existant n'est pas réécrit ; un certificat valide est réutilisé.
+        return
+    args._cert_email_decided = True
+    for _ in range(3):
+        value = prompt_text('E-mail Let’s Encrypt (facultatif, Entrée pour ignorer)',
+                            hint='Une seule saisie pour Prometheus et Grafana').strip()
+        if not value:
+            args.email = ''
+            out('!', 'Sans e-mail : pas d’alerte Let’s Encrypt sur l’expiration/révocation du certificat')
+            args._cert_email_warning_emitted = True
+            return
+        if re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', value):
+            args.email = value
+            return
+        out('!', 'Format d’e-mail invalide ; corriger ou laisser vide')
+    raise SetupError('E-mail Let’s Encrypt invalide après trois saisies')
 
 
 def grafana_requires_initial_admin():
