@@ -8,6 +8,8 @@ import json
 import os
 import re
 import shutil
+from pathlib import Path
+from datetime import datetime, timezone
 import subprocess
 import urllib.error
 import urllib.parse
@@ -117,6 +119,22 @@ def installed():
     if result.returncode:raise PluginsError('Impossible de lire les plugins installés')
     return result.stdout
 
+
+def format_installed(raw, needle=''):
+    """Best-effort structured Grafana CLI display, preserving unknown lines."""
+    from terminal_table import Cell, render_table
+    rows=[];other=[]
+    for line in raw.splitlines():
+        m=re.match(r'^\s*([a-z0-9][a-z0-9-]+)\s+@\s+(\S+)',line,re.I)
+        if m:
+            if not needle or needle.casefold() in m.group(1).casefold():
+                rows.append((Cell(m.group(1),'info'),Cell(m.group(2),'success')))
+        elif line.strip():
+            other.append(line)
+    if rows:
+        return render_table(['Plugin officiel','Version installée'],rows,row_dividers=False)
+    return '\n'.join(line for line in raw.splitlines() if not needle or needle.casefold() in line.casefold()) or '  › Aucun plugin correspondant'
+
 def install(plugin_id,apply=False,version=None):
     obj=detail(plugin_id)  # Always verify against live official catalogue.
     name=str(obj.get('name') or plugin_id)
@@ -155,6 +173,108 @@ def install(plugin_id,apply=False,version=None):
     print('  ✓ Plugin installé. Contrôler Grafana > Administration > Plugins.')
     return 0
 
+
+def backup_plugins():
+    """Back up user-installed plugin directories before an upgrade or removal."""
+    plugin_dir=Path(os.environ.get('GF_PATHS_PLUGINS','/var/lib/grafana/plugins'))
+    if plugin_dir.is_symlink():raise PluginsError('Répertoire de plugins Grafana symbolique : sauvegarde refusée')
+    backup=Path('/var/backups/autokom/grafana-plugins')/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    if backup.exists():raise PluginsError('Un répertoire de sauvegarde existe déjà à cette seconde : réessayer')
+    backup.mkdir(parents=True,mode=0o700)
+    os.chmod(backup,0o700)
+    if plugin_dir.is_dir():
+        shutil.copytree(plugin_dir,backup/'plugins',symlinks=True)
+    return backup
+
+
+def execute_mutation(command, description):
+    from tool_banner import Activity
+    try:
+        with Activity(description):
+            result=subprocess.run(command,capture_output=True,text=True,timeout=1200)
+    except (subprocess.TimeoutExpired,OSError) as exc:
+        raise PluginsError('Commande Grafana interrompue / délai dépassé') from exc
+    if result.returncode:
+        # never leak secrets or huge plugin logs; the Grafana CLI uses no auth args
+        raise PluginsError('Commande Grafana échouée : '+(result.stderr or result.stdout)[-450:])
+    return result
+
+
+def preinstalled(plugin_id):
+    """Prevent deleting Grafana plugins managed by provisioning."""
+    from configparser import ConfigParser
+    names=os.environ.get('GF_PLUGINS_PREINSTALL','')
+    parser=ConfigParser(interpolation=None)
+    try:parser.read('/etc/grafana/grafana.ini')
+    except Exception as exc:raise PluginsError('Configuration preinstall Grafana illisible : retrait refusé') from exc
+    if parser.has_option('plugins','preinstall'):
+        names+=','+parser.get('plugins','preinstall')
+    return plugin_id in {s.strip().split('@',1)[0] for s in names.split(',') if s.strip()}
+
+def manage_plugin(action, plugin_id='', apply=False):
+    if action=='remove' and (not ID.fullmatch(plugin_id)):
+        raise PluginsError('Identifiant de plugin invalide')
+    available=installed()
+    names=available.casefold()
+    present=lambda name: bool(re.search(r'(?<![a-z0-9-])'+re.escape(name.casefold())+r'(?![a-z0-9-])',names))
+    if action=='remove' and preinstalled(plugin_id):
+        raise PluginsError('Plugin géré par Grafana preinstall : modifier d’abord son provisioning, retrait refusé')
+    if action=='remove' and not present(plugin_id):
+        raise PluginsError('Plugin non visible dans la liste locale : retrait refusé')
+    if action=='update' and not ID.fullmatch(plugin_id):
+        raise PluginsError('Identifiant de plugin invalide')
+    if action=='update':
+        detail(plugin_id)  # refuse a nonexistent/retired official plugin
+        if not present(plugin_id):raise PluginsError('Plugin non installé')
+    print('  ◈ AUTOKOM / PLUGINS GRAFANA · '+action.upper())
+    if action=='upgrade':print('  › Mise à jour globale : Grafana CLI update-all (versions compatibles à confirmer).')
+    else:print('  › '+plugin_id)
+    if not apply:
+        print('  › Simulation ; relancer avec --apply après analyse des impacts.')
+        return 0
+    if os.geteuid()!=0:raise PluginsError('Opération exige sudo')
+    from menu import pick
+    yes=pick('AUTOKOM · Confirmer '+action+' ?',
+             ['Sauvegarder les plugins puis appliquer'],cancel_label='Annuler sans modification',
+             hint='Vérifier les plugins utilisés par les dashboards avant suppression.')
+    if yes!=1:return 1
+    backup=backup_plugins()
+    cmd=cli_command()+['plugins']
+    if action=='upgrade':cmd+=['update-all']
+    elif action=='update':cmd+=['update',plugin_id]
+    else:cmd+=['remove',plugin_id]
+    execute_mutation(cmd,'Grafana : '+action+' '+(plugin_id or 'tous les plugins'))
+    print('  ✓ Opération terminée ; sauvegarde : '+str(backup))
+    print('  ! Plugins Grafana : prévoir un redémarrage contrôlé après vérification des dashboards ; aucun restart automatique.')
+    return 0
+
+
+def interface():
+    from menu import pick, ask
+    while True:
+        choice=pick('AUTOKOM · PLUGINS GRAFANA',[
+            'Rechercher au catalogue officiel',
+            'Lister et filtrer les plugins installés',
+            'Installer un plugin',
+            'Mettre à jour tous les plugins installés',
+            'Mettre à jour un plugin précis',
+            'Supprimer un plugin (contrôle préalable)',
+        ],cancel_label='Quitter le gestionnaire')
+        if not choice:return 0
+        if choice==1:
+            q=ask('Recherche Grafana')
+            if q:main(['search',q,'--select'])
+        elif choice==2:
+            q=ask('Filtre (vide = tous)')
+            main(['list']+(['--filter',q] if q else []))
+        else:
+            action={3:'install',4:'upgrade',5:'update',6:'remove'}[choice]
+            ident=ask('ID officiel du plugin') if action in ('install','update','remove') else ''
+            target=([ident] if ident else [])
+            main([action]+target)
+            if pick('AUTOKOM · Exécuter ?', ['Appliquer après sauvegarde'],cancel_label='Annuler'):
+                main([action]+target+['--apply'])
+
 def parser():
     p=argparse.ArgumentParser(prog='autokom grafana plugins',description='Catalogue réel Grafana : recherche sémantique légère, filtres, installation confirmée.')
     s=p.add_subparsers(dest='action')
@@ -164,7 +284,8 @@ def parser():
     q.add_argument('--signed-only',action='store_true',help='Seulement les signatures connues du catalogue')
     q.add_argument('--limit',type=int,choices=range(1,41),metavar='1..40',default=12)
     q.add_argument('--select',action='store_true',help='Sélecteur clavier AUTOKOM ; affiche la commande (lecture seule)')
-    s.add_parser('list',help='Plugins installés localement (CLI Grafana)')
+    listing=s.add_parser('list',help='Plugins installés localement (CLI Grafana)')
+    listing.add_argument('--filter',default='',help='Filtrer par nom / ID dans la liste')
     info=s.add_parser('info',help='Fiche officielle d’un plugin')
     info.add_argument('plugin_id')
     add=s.add_parser('install',help='Installer un plugin officiellement vérifié après confirmation')
@@ -173,19 +294,30 @@ def parser():
     grp=add.add_mutually_exclusive_group()
     grp.add_argument('--apply',action='store_true',help='Installer réellement (sudo et confirmation TTY)')
     grp.add_argument('--check',action='store_true',help='Vérification seule (défaut)')
+    for action,helptext in [('upgrade','Mettre à jour tous les plugins installés'),('update','Mettre à jour un plugin installé'),('remove','Retirer un plugin installé')]:
+        sub=s.add_parser(action,help=helptext)
+        if action in ('update','remove'):sub.add_argument('plugin_id')
+        group=sub.add_mutually_exclusive_group()
+        group.add_argument('--apply',action='store_true',help='Appliquer après confirmation TTY (défaut : simulation)')
+        group.add_argument('--check',action='store_true',help='Afficher le plan sans changement')
     return p
 
 def main(args=None):
     p=parser(); a=p.parse_args(args)
-    if not a.action:p.print_help();return 0
+    if not a.action:
+        if os.isatty(0):return interface()
+        p.print_help();return 0
     if a.action=='list':
-        print('  ◈ PLUGINS GRAFANA INSTALLÉS');print(installed());return 0
+        print('  ◈ PLUGINS GRAFANA INSTALLÉS')
+        print(format_installed(installed(),a.filter));return 0
     if a.action=='info':
         data=detail(a.plugin_id)
         for k in ('name','slug','type','description','status','signature'):
             print('  '+k+': '+str(data.get(k,'non indiqué'))[:250])
         return 0
     if a.action=='install':return install(a.plugin_id,apply=a.apply,version=a.version)
+    if a.action in ('upgrade','update','remove'):
+        return manage_plugin(a.action,getattr(a,'plugin_id',''),apply=a.apply)
     query=' '.join(a.query)
     if renderer_intent(query):
         print('  ! La recherche concerne possiblement l’export d’images : Grafana 13 ne prend plus en charge le plugin Image Renderer.')

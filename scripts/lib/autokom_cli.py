@@ -646,8 +646,13 @@ est conservé. Les logs sont installés séparément pour éviter une charge imp
         # Natural syntax: autokom tools prometheus nano nginx-configuration.
         from tools_registry import SPECS
         for tool in SPECS:
-            fp=ops.add_parser(tool.name,help=f'Inspecter les fichiers et variables de {tool.name}')
-            fp.add_argument('file_action',choices=('files','cat','head','tail','nano','nano-end','env','auth'))
+            plugin_help = ('\nGestion des plugins :\n  autokom tools '+tool.name+' plugins [search|list|info|install|upgrade|remove]\n  autokom tools '+tool.name+' plugins -h\n' if tool.name in ('jenkins','grafana') else '')
+            fp=ops.add_parser(tool.name,help=f'Inspecter les fichiers et variables de {tool.name}',
+                              formatter_class=argparse.RawDescriptionHelpFormatter,
+                              description=f'Fichiers et configuration de {tool.name}',
+                              epilog='Exemples : autokom tools '+tool.name+' files ; autokom tools '+tool.name+' cat ALIAS'+plugin_help)
+            fp.add_argument('file_action',choices=('files','cat','head','tail','nano','nano-end','env','auth'),nargs='?',
+                            help='Action. Pour les plugins Jenkins/Grafana : « plugins » (menu séparé)')
             fp.add_argument('file_target',nargs='?',default='')
             fp.add_argument('file_extra',nargs='?',default='')
     subcommand('update', help='Mise à jour Git fast-forward uniquement (explicite)',
@@ -664,6 +669,22 @@ def main(argv=None):
     option_tokens = arguments[:arguments.index('--')] if '--' in arguments else arguments
     if '-b' in option_tokens or '--with-banner' in option_tokens:
         show_brand()
+    # Plugin managers are service-specific but share AUTOKOM keyboard menus.
+    # Delegate BEFORE argparse's generic tools/files grammar; all nested -h
+    # actions belong to their dedicated parser. Preserve legacy file actions.
+    if len(arguments)>=3 and arguments[0] in ('tools','services') and arguments[1] in ('jenkins','grafana') and arguments[2] in ('plugins','pluggins'):
+        if arguments[1]=='jenkins':
+            from jenkins_plugins import main as plugins_main, PluginError
+            try:return plugins_main(arguments[3:])
+            except (PluginError,RuntimeError,OSError) as exc:raise CLIError(str(exc)) from exc
+        from grafana_plugins import main as plugins_main, PluginsError
+        try:return plugins_main(arguments[3:])
+        except (PluginsError,RuntimeError,OSError) as exc:raise CLIError(str(exc)) from exc
+    # Calling a service without an action displays its local help, not a
+    # cryptic positional-argument error. No mutation occurs.
+    if len(arguments)==2 and arguments[0] in ('tools','services'):
+        from tools_registry import TOOLS
+        if arguments[1] in TOOLS:arguments.append('-h')
     # Ergonomic aliases, without swallowing unknown flags of individual tools.
     # `show --all` is an inventory (not hundreds of verbose details).
     if len(arguments) >= 2 and arguments[0] in ('tools', 'services'):
@@ -688,8 +709,6 @@ def main(argv=None):
             specific.add_argument('alias',nargs='?',help='Alias du fichier / variable ; autokom tools '+arguments[1]+' files')
             specific.print_help();return 0
     # Preserve existing tools grafana files / cat ... commands.
-    if len(arguments)>=3 and arguments[:3] in (['tools','grafana','plugins'],['services','grafana','plugins']):
-        arguments=['grafana','plugins']+arguments[3:]
     a = parser.parse_args(arguments)
     if not a.cmd:
         parser.print_help()

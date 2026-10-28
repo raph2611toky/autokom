@@ -97,3 +97,7 @@ Voir [guide de migration v23](docs/LOGGING-RUNTIME-v23.md).
 ### v26 — cohérence Grafana pendant `install logs`
 
 Le module `logs` vérifie et crée le fournisseur partagé des dashboards, déploie la datasource Loki et les 4 dashboards, puis recharge **seulement** Grafana si une modification ou une datasource réellement absente le justifie. Il conserve les modes Docker et systemd, évite la réinstallation de Loki déjà sain et n’écrase pas les configurations Grafana personnalisées. Le tableau CI/CD privilégie les logs réels des applications Docker et les logs Jenkins systemd. Voir [guide v26](docs/LOGGING-GRAFANA-INSTALL-v26.md).
+
+## Gestion des plugins Jenkins et Grafana (v27)
+
+Consulter [docs/TOOLS-PLUGINS-v27.md](docs/TOOLS-PLUGINS-v27.md) pour les menus interactifs, la recherche officielle, les opérations avec confirmation, les sauvegardes et les procédures de retour arrière.
