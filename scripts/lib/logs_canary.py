@@ -67,16 +67,18 @@ def probe(wait=45):
     t0=time.monotonic()
     try:
         emit(token)
-        while time.monotonic()-t0 < wait:
-            try:
-                if seen(token,started):
-                    ok=True
-                    detail='verified'
-                    break
-                detail='not_ingested_yet'
-            except Exception as exc:
-                detail=type(exc).__name__
-            time.sleep(3)
+        from tool_banner import Activity
+        with Activity('Vérification de l’ingestion journald → Alloy → Loki'):
+            while time.monotonic()-t0 < wait:
+                try:
+                    if seen(token,started):
+                        ok=True
+                        detail='verified'
+                        break
+                    detail='not_ingested_yet'
+                except Exception as exc:
+                    detail=type(exc).__name__
+                time.sleep(3)
     except Exception as exc:
         detail=type(exc).__name__
     result={'schema':1,'success':int(ok),'timestamp':int(time.time()),

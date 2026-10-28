@@ -29,7 +29,10 @@ class RuntimeErrorSafe(RuntimeError): pass
 
 def cmd(*args, timeout=180, check=True):
     try:
-        p=subprocess.run(list(args),capture_output=True,text=True,timeout=timeout,check=False)
+        from tool_banner import Activity
+        label=' '.join(str(x) for x in args[:2])
+        with Activity('Exécution : '+label):
+            p=subprocess.run(list(args),capture_output=True,text=True,timeout=timeout,check=False)
     except (OSError,subprocess.TimeoutExpired) as exc:
         raise RuntimeErrorSafe('Commande indisponible ou expirée: '+str(args[0])) from exc
     if check and p.returncode:
@@ -289,10 +292,12 @@ def docker_volume_path():
 
 def wait_ready():
     from logging_health import http_status
+    from tool_banner import Activity
     until=time.monotonic()+75
-    while time.monotonic()<until:
-        if all(http_status(item)['ok'] for item in UNITS):return
-        time.sleep(3)
+    with Activity('Attente de disponibilité Loki et Alloy'):
+        while time.monotonic()<until:
+            if all(http_status(item)['ok'] for item in UNITS):return
+            time.sleep(3)
     raise RuntimeErrorSafe('Endpoints Loki/Alloy inaccessibles à 127.0.0.1; aucune suppression lancée')
 
 
@@ -337,7 +342,9 @@ def migrate_to_native(backend):
             store.mkdir()
             cmd('docker','cp',old+':/loki/.',str(store),timeout=600)
             if any(DATA.iterdir()):raise RuntimeErrorSafe('Données natives déjà présentes : fusion automatique interdite')
-            shutil.copytree(store,DATA,dirs_exist_ok=True)
+            from tool_banner import Activity
+            with Activity('Transfert sécurisé des données Loki'):
+                shutil.copytree(store,DATA,dirs_exist_ok=True)
         except Exception:
             docker_compose('up','-d','--no-build','alloy','loki')
             raise
@@ -393,8 +400,10 @@ def migrate_to_docker(backend):
     for unit in UNITS:cmd('systemctl','stop',unit)
     try:
         if DATA.is_dir():
-            shutil.copytree(DATA,backup/'loki-data',symlinks=False)
-            shutil.copytree(DATA,volume,dirs_exist_ok=True)
+            from tool_banner import Activity
+            with Activity('Sauvegarde et copie des données Loki'):
+                shutil.copytree(DATA,backup/'loki-data',symlinks=False)
+                shutil.copytree(DATA,volume,dirs_exist_ok=True)
         for folder,dirs,files in os.walk(volume,followlinks=False):
             os.chown(folder,10001,10001)
             for name in dirs+files:

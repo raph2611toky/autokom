@@ -602,7 +602,7 @@ est conservé. Les logs sont installés séparément pour éviter une charge imp
     c.add_argument('service', choices=('services', 'plugins', 'observability','logs'))
     lg = subcommand('logs', help='Superviser les logs et choisir le mode Docker ou systemd',
                     epilog='Exemples : autokom logs status | sudo autokom logs use opensearch')
-    lg.add_argument('action', nargs='?', choices=('status','use','reconcile','verify','doctor','runtime'), default='status')
+    lg.add_argument('action', nargs='?', choices=('status','use','reconcile','verify','doctor','runtime','audit'), default='status')
     lg.add_argument('--apply', action='store_true', help='Appliquer la réconciliation du backend déjà installé')
     lg.add_argument('--check', action='store_true', help='Prévisualiser la réconciliation')
     lg.add_argument('backend', nargs='?', choices=('loki','opensearch','docker','systemd'))

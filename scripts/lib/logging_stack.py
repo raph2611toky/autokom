@@ -40,7 +40,10 @@ class LogError(RuntimeError):
 
 
 def run(cmd, *, timeout=90):
-    return subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+    # Existing AUTOKOM spinner; only visible for real TTY, never for --check.
+    from tool_banner import Activity
+    with Activity('Exécution : '+ ' '.join(str(x) for x in cmd[:2])):
+        return subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
 
 
 def docker(*args):
@@ -700,11 +703,13 @@ def apply_docker(backend):
     expected = ('loki','alloy') if backend in ('loki','both') else ('alloy',)
     deadline = time.monotonic() + 45
     broken = list(expected)
-    while time.monotonic() < deadline:
-        broken = [name for name in expected if not http_status(name)['ok']]
-        if not broken:
-            break
-        time.sleep(3)
+    from tool_banner import Activity
+    with Activity('Attente des endpoints privés Loki / Alloy'):
+        while time.monotonic() < deadline:
+            broken = [name for name in expected if not http_status(name)['ok']]
+            if not broken:
+                break
+            time.sleep(3)
     if broken:
         raise LogError('Conteneurs lancés mais endpoints locaux non joignables : '+', '.join(broken)+
                        '. Vérifier autokom logs status et autokom tools show loki/alloy ; '
@@ -717,7 +722,7 @@ def apply_docker(backend):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(prog='autokom logging',description='Loki + Alloy et OpenSearch + Data Prepper + Dashboards')
-    parser.add_argument('action',nargs='?',choices=('status','use','reconcile','verify','doctor','runtime'),default='status')
+    parser.add_argument('action',nargs='?',choices=('status','use','reconcile','verify','doctor','runtime','audit'),default='status')
     parser.add_argument('choice',nargs='?',choices=('loki','opensearch','docker','systemd'))
     parser.add_argument('--apply',action='store_true')
     parser.add_argument('--check',action='store_true')
@@ -725,6 +730,9 @@ def main(argv=None):
     parser.add_argument('--runtime',choices=('docker','systemd'),help='Exécution de Loki/Alloy : Docker Compose ou systemd')
     a=parser.parse_args(argv)
     from logging_runtime import detected, runtime_ready, plan as runtime_plan, apply as apply_runtime, report as runtime_report, RuntimeErrorSafe
+    if a.action == 'audit':
+        from logging_audit import run_audit
+        return run_audit()
     if a.action == 'runtime':
         if not a.choice:
             runtime_report()

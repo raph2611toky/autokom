@@ -1,9 +1,0 @@
-AUTOKOM v22 — correctif sur v21 uniquement.
-Avant patch : git status --short ; sauvegarder /etc/autokom/logs, snapshot EBS.
-git apply --check /tmp/AUTOKOM-v22-Logging-Network-Health.patch
-git apply /tmp/AUTOKOM-v22-Logging-Network-Health.patch
-sudo autokom logs reconcile --check
-sudo autokom logs reconcile --apply
-sudo autokom logs doctor
-sudo autokom logs verify
-Lire docs/LOGGING-NETWORK-v22.md.

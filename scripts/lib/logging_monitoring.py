@@ -25,7 +25,9 @@ MARKER='# AUTOKOM MANAGED — Loki/Alloy v21\n'
 class MonitorError(RuntimeError):pass
 
 def command(*args, timeout=40):
-    p=subprocess.run(list(args),capture_output=True,text=True,timeout=timeout)
+    from tool_banner import Activity
+    with Activity('Exécution : '+ ' '.join(str(x) for x in args[:2])):
+        p=subprocess.run(list(args),capture_output=True,text=True,timeout=timeout)
     if p.returncode:
         raise MonitorError('Commande échouée : '+args[0]+' (exit '+str(p.returncode)+')')
     return p.stdout

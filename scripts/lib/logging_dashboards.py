@@ -4,14 +4,17 @@ import json
 LOKI={'type':'loki','uid':'autokom-loki'}
 PROM={'type':'prometheus','uid':'autokom-prometheus'}
 
-def query_var(name,label,query):
+def query_var(name,label,stream='{platform="autokom"}'):
+    # Grafana Loki structured variable query: type=1 means 'label values'.
+    # Avoid legacy label_values(...) text parsing and keep an explicit stream selector.
     return {'name':name,'label':label,'type':'query','datasource':LOKI,
-            'query':query,'refresh':2,'multi':True,'includeAll':True,'allValue':'.*',
+            'query':{'type':1,'label':name,'stream':stream},
+            'refresh':2,'sort':1,'multi':True,'includeAll':True,'allValue':'.*',
             'current':{'text':'All','value':'$__all'}}
 
 def variables():
-    return [query_var('source','Source','label_values({platform="autokom"}, source)'),
-            query_var('service_name','Service','label_values({platform="autokom"}, service_name)'),
+    return [query_var('source','Source'),
+            query_var('service_name','Service'),
             {'name':'search','label':'Contenu (regex)','type':'textbox','query':'',
              'current':{'text':'','value':''}}]
 
@@ -37,12 +40,13 @@ def make(uid,title,description,panels,*,vars=True):
 def dashboards():
     stream='{platform="autokom",source=~"$source",service_name=~"$service_name"}'
     general=make('autokom-logs','Journaux',
-         'Exploration centralisée des logs. Le diagnostic est dans le dashboard Santé des logs; filtrez par source, service et contenu.',[
-         panel(1,'Journaux des services','logs',stream+' |~ "${search:regex}"',0,0,24,14),
-         panel(2,'Débit de journaux (lignes/s)','timeseries','sum by (source) (rate('+stream+'[5m]))',0,14),
-         panel(3,'Volume par service','timeseries','sum by (service_name) (rate('+stream+'[5m]))',12,14),
-         panel(4,'Erreurs / 5 minutes','timeseries','sum by (source) (count_over_time('+stream+' |~ "(?i)(error|exception|fatal|panic)" [5m]))',0,22),
-         panel(5,'Avertissements / 5 minutes','timeseries','sum by (source) (count_over_time('+stream+' |~ "(?i)(warn|warning|timeout)" [5m]))',12,22)
+         'Flux bruts indépendants des variables Source/Service en premier. Utiliser Explore pour isoler les erreurs de connexion, d’ingestion et de filtres.',[
+         panel(1,'Flux bruts AUTOKOM (sans filtres)','logs','{platform="autokom"}',0,0,24,10),
+         panel(2,'Journaux filtrés','logs',stream+' |~ "${search:regex}"',0,10,24,10),
+         panel(3,'Débit de journaux (lignes/s)','timeseries','sum by (source) (rate({platform="autokom"}[5m]))',0,20),
+         panel(4,'Volume par service','timeseries','sum by (service_name) (rate({platform="autokom"}[5m]))',12,20),
+         panel(5,'Erreurs / 5 minutes','timeseries','sum by (source) (count_over_time({platform="autokom"} |~ "(?i)(error|exception|fatal|panic)" [5m]))',0,28),
+         panel(6,'Avertissements / 5 minutes','timeseries','sum by (source) (count_over_time({platform="autokom"} |~ "(?i)(warn|warning|timeout)" [5m]))',12,28)
     ])
     health=make('autokom-logging-health','Santé des logs',
          'Disponibilité Loki/Alloy, qualité et fraîcheur de la chaîne journald → Alloy → Loki. Les alertes sont évaluées dans Prometheus et envoyées via Alertmanager.',[
@@ -59,9 +63,9 @@ def dashboards():
         ],vars=False)
     security=make('autokom-logging-security','Sécurité des journaux',
          'Vue opérationnelle, sans exposition Internet; expressions heuristiques : vérifier les faux positifs avant toute remédiation.',[
-         panel(1,'Échecs SSH et authentifications','timeseries',
+         panel(1,'Échecs SSH et authentifications / 5 min','timeseries',
                'sum(count_over_time({platform="autokom",source="systemd"} |~ "(?i)(failed password|authentication failure|invalid user)" [5m]))',0,0),
-         panel(2,'Nginx HTTP 4xx/5xx','timeseries',
+         panel(2,'Nginx HTTP 4xx/5xx / 5 min','timeseries',
                'sum by (source) (count_over_time({platform="autokom",source="nginx"} |~ "HTTP/[0-9.]+\\\" (4[0-9]{2}|5[0-9]{2}) " [5m]))',12,0),
          panel(3,'Événements de sécurité','logs',
                '{platform="autokom"} |~ "(?i)(unauthorized|denied|authentication failure|permission denied|attack)"',0,8,24,12),
