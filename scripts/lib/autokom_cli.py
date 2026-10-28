@@ -381,7 +381,8 @@ def perform(args, cfg):
     if 'logs' in stages:
         from logging_runtime import detected, runtime_ready
         mode = args.runtime or detected()
-        plan['logs'] = not runtime_ready(args.backend or ('loki' if mode=='systemd' else 'both'),mode)
+        from logging_stack import install_complete
+        plan['logs'] = not install_complete(args.backend or ('loki' if mode=='systemd' else 'both'),mode)
     print_plan(state, plan, stages)
     if args.check:
         if 'logs' in stages:
@@ -409,20 +410,30 @@ def perform(args, cfg):
     for index, stage in enumerate(stages, 1):
         with Activity(f'Contrôle {LABELS[stage]}'):
             state = snapshot(cfg)
-        should = (not __import__('logging_runtime').runtime_ready(logs_backend,logs_runtime)
+        should = (not __import__('logging_stack').install_complete(logs_backend,logs_runtime)
                   if stage == 'logs' else actions(state)[stage])
         if not should:
             message(f'  - {LABELS[stage]} : déjà conforme, ignoré')
             phase_progress(index, len(stages), LABELS[stage], skipped=True)
             continue
-        apply_stage(stage, state, cfg, logs_backend=logs_backend,logs_runtime=logs_runtime)
+        if stage == 'logs' and __import__('logging_runtime').runtime_ready(logs_backend,logs_runtime):
+            # Existing Loki/Alloy healthy: repair only missing Grafana integration.
+            # Never recreate containers, reinstall native packages or restart Loki.
+            from logging_stack import provision_grafana, sync_grafana_after_install
+            from logging_monitoring import apply as apply_monitoring
+            message('  › Loki/Alloy sains : réconciliation Grafana uniquement (sans toucher aux moteurs)')
+            changed=provision_grafana()
+            apply_monitoring()
+            sync_grafana_after_install(changed=changed)
+        else:
+            apply_stage(stage, state, cfg, logs_backend=logs_backend,logs_runtime=logs_runtime)
         # Avancement par phases TERMINEES (pas un pourcentage temporel).
         # La conformité réelle de tous les services est revérifiée ensuite.
         message(f'  ✓ {LABELS[stage]} : module exécuté, vérification finale à venir')
         phase_progress(index, len(stages), LABELS[stage])
     with Activity('Contrôle final des services'):
         state = snapshot(cfg)
-    remaining = [LABELS[s] for s in stages if (not __import__('logging_runtime').runtime_ready(logs_backend,logs_runtime)
+    remaining = [LABELS[s] for s in stages if (not __import__('logging_stack').install_complete(logs_backend,logs_runtime)
                  if s == 'logs' else actions(state)[s])]
     if remaining:
         message('  ! À revoir : ' + ', '.join(remaining))

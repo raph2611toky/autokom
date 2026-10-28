@@ -72,10 +72,10 @@ def dashboards():
          panel(4,'Logs Nginx','logs','{platform="autokom",source="nginx"}',0,20,24,12)
         ],vars=False)
     pipeline=make('autokom-logging-cicd','CI/CD et services',
-         'Logs de Jenkins et des services systemd; si Jenkins tourne dans Docker il est visible par son service_name.',[
+         'Jenkins natif et journaux des applications Docker. Une absence d’erreur sur cinq minutes est affichée à zéro; vérifier le panneau Docker pour confirmer la collecte.',[
          panel(1,'Jenkins systemd','logs','{platform="autokom",source="systemd",unit="jenkins.service"}',0,0,24,12),
-         panel(2,'Jenkins Docker','logs','{platform="autokom",source="docker",service_name=~"(?i).*jenkins.*"}',0,12,24,12),
-         panel(3,'Docker : erreurs et exceptions','logs','{platform="autokom",source="docker"} |~ "(?i)(error|fatal|exception|panic)"',0,24,24,12),
+         panel(2,'Applications Docker · journaux (tous les services)','logs','{platform="autokom",source="docker"}',0,12,24,12),
+         panel(3,'Erreurs Docker / 5 min (0 = aucune)','timeseries','sum(count_over_time({platform="autokom",source="docker"} |~ "(?i)(error|fatal|exception|panic)" [5m])) or vector(0)',0,24,24,8),
         ],vars=False)
     return general,health,security,pipeline
 

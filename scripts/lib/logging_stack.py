@@ -633,6 +633,55 @@ def use_backend(name):
     print('  › Les deux stockages continuent de collecter si installés ; les anciens logs ne sont pas migrés.')
 
 
+
+GRAFANA_PROVIDER = Path('/etc/grafana/provisioning/dashboards/autokom.yaml')
+GRAFANA_DASH_DIRECTORY = Path('/var/lib/grafana/dashboards/autokom')
+
+
+def provider_content():
+    # Same provider / folder / path as the observability module.  Do not
+    # register a second provider for the same dashboards, or duplicate UIDs.
+    return ("# AUTOKOM MANAGED dashboards\n"
+            "apiVersion: 1\nproviders:\n"
+            "  - name: autokom\n    orgId: 1\n    folder: AUTOKOM\n"
+            "    type: file\n    disableDeletion: true\n"
+            "    allowUiUpdates: false\n    updateIntervalSeconds: 30\n"
+            "    options:\n      path: /var/lib/grafana/dashboards/autokom\n")
+
+
+def verify_provider(path=None):
+    """Read-only check: existing providers belong to observability or AUTOKOM.
+
+    Never overwrite a provider owned by another module/operator.
+    """
+    path = GRAFANA_PROVIDER if path is None else path
+    if path.is_symlink():raise LogError('Lien symbolique provider Grafana refusé')
+    if not path.is_file():return False
+    try:
+        content=path.read_text()
+        import yaml
+        try:doc=yaml.safe_load(content)
+        except yaml.YAMLError as exc:raise LogError('Provider Grafana YAML invalide') from exc
+        entries=doc.get('providers',[]) if isinstance(doc,dict) else []
+        matches=[x for x in entries if isinstance(x,dict) and x.get('name')=='autokom']
+        if len(matches)!=1 or matches[0].get('type')!='file' or matches[0].get('options',{}).get('path')!=str(GRAFANA_DASH_DIRECTORY):
+            raise LogError('Fournisseur Grafana autokom existant incohérent : intervention manuelle requise')
+    except ImportError:
+        # No PyYAML required by the CLI itself.  Conservative validation.
+        if ('name: autokom' not in content or str(GRAFANA_DASH_DIRECTORY) not in content):
+            raise LogError('Fournisseur Grafana existant non vérifiable sans PyYAML')
+    except (OSError,ValueError,TypeError,AttributeError) as exc:
+        raise LogError('Fournisseur Grafana invalide') from exc
+    return True
+
+
+def ensure_provider():
+    """Create the provider only when absent; preserve observability-owned file."""
+    if verify_provider():return False
+    atomic_write(GRAFANA_PROVIDER,provider_content(),0o644)
+    return True
+
+
 def provision_grafana():
     """Write only AUTOKOM-owned Grafana objects; protect operator changes.
 
@@ -655,6 +704,9 @@ def provision_grafana():
         if not isinstance(manifest,dict):raise ValueError()
     except (OSError,ValueError,KeyError,TypeError) as exc:
         raise LogError('Manifest Grafana invalide : intervention requise') from exc
+    # Validate the shared provider *before* any write. The original provider
+    # from `install observability` is left byte-for-byte unchanged.
+    verify_provider()
     # Read-only preflight of every resource before any file is changed.
     for path,content in mapping.items():
         if path.is_symlink():raise LogError('Symlink Grafana refusé : '+str(path))
@@ -670,14 +722,60 @@ def provision_grafana():
     if old_dash.is_file() and old_dash.read_text()==grafana_dashboard():
         backup=old_dash.with_name('autokom-logs.v20-backup')
         if not backup.exists():atomic_write(backup,old_dash.read_text(),0o600)
+    provider_created=ensure_provider()
+    changed=provider_created
     for path,content in mapping.items():
         if not path.exists() or path.read_text()!=content:
             atomic_write(path,content,0o644)
+            changed=True
     atomic_write(state,json.dumps({'schema':1,'files':{str(path):sha(content)
                                             for path,content in mapping.items()}},indent=2)+'\n',0o600)
     print('  ✓ Grafana : datasource Loki et 4 dashboards provisionnés (fichiers).')
-    print('  › Redémarrer Grafana de façon contrôlée si la datasource Loki n’apparaît pas (provisioning datasources au démarrage).')
+    print('  › Provider Grafana vérifié : /etc/grafana/provisioning/dashboards/autokom.yaml')
+    return changed
 
+
+
+
+def install_complete(backend, mode):
+    """Read-only installation completeness; includes Grafana, not just processes."""
+    from logging_runtime import runtime_ready
+    if not runtime_ready(backend, mode):return False
+    if backend not in ('loki','both'):return True
+    if not Path('/etc/grafana/provisioning/datasources/autokom-loki.yaml').is_file():
+        return False
+    try:
+        if not verify_provider():return False
+    except LogError:
+        return False
+    from logging_dashboards import serialized
+    if not all((GRAFANA_DASH_DIRECTORY/name).is_file() for name in serialized()):return False
+    # Compare AUTOKOM's last managed hashes; a manual edit means the phase is
+    # no longer conformant, but remediation still refuses to overwrite it.
+    manifest_file=STATE_DIR/'.grafana-managed.json'
+    if not manifest_file.is_file() or manifest_file.is_symlink():return False
+    try:
+        managed=json.loads(manifest_file.read_text())['files']
+        if not isinstance(managed,dict):return False
+        names=list(serialized())+['autokom-loki.yaml']
+        paths=[GRAFANA_DASH_DIRECTORY/name for name in serialized()]
+        paths.append(Path('/etc/grafana/provisioning/datasources/autokom-loki.yaml'))
+        if any(not file.is_file() or sha(file.read_text())!=managed.get(str(file))
+               for file in paths):return False
+    except (OSError,TypeError,KeyError,ValueError):return False
+    from grafana_bridge import datasource_loaded
+    # When SQLite is not the effective Grafana store, do not infer missing.
+    return datasource_loaded() is not False
+
+
+def sync_grafana_after_install(changed=False):
+    """Installation/reconciliation includes provisioning, not just file writes.
+
+    A restart is scoped to Grafana; if checks cannot prove healthy API afterwards
+    the installation fails with a useful error and never claims full success.
+    """
+    from grafana_bridge import finalize_install
+    return finalize_install(changed=changed)
 
 
 def apply_docker(backend):
@@ -694,7 +792,7 @@ def apply_docker(backend):
         provision_retention(secret)
         print('  ✓ OpenSearch : politique ISM de rétention 14 jours confirmée')
     if backend in ('loki','both'):
-        provision_grafana()
+        grafana_changed=provision_grafana()
         from logging_monitoring import apply as monitoring_apply
         monitoring_apply()
     else:
@@ -715,6 +813,8 @@ def apply_docker(backend):
         raise LogError('Conteneurs lancés mais endpoints locaux non joignables : '+', '.join(broken)+
                        '. Vérifier autokom logs status et autokom tools show loki/alloy ; '
                        'aucun service tiers n’a été redémarré.')
+    if backend in ('loki','both'):
+        sync_grafana_after_install(changed=grafana_changed)
     print('  ✓ Services démarrés et API locales vérifiées : '+', '.join(expected))
     print('  › Vérifier ingestion réelle dans Grafana et OpenSearch Dashboards avant déclaration de conformité.')
     return 0

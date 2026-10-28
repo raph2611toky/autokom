@@ -321,7 +321,9 @@ def migrate_to_native(backend):
         if not native_ready():raise RuntimeErrorSafe('Services systemd déjà présents mais indisponibles : diagnostic nécessaire')
         from logging_stack import provision_grafana
         from logging_monitoring import apply as apply_monitoring
-        provision_grafana();apply_monitoring()
+        changed=provision_grafana();apply_monitoring()
+        from logging_stack import sync_grafana_after_install
+        sync_grafana_after_install(changed)
         return
     # Pre-existing unmanaged packages must not be overwritten by AUTOKOM.
     if previous!='systemd' and (shutil.which('loki') or shutil.which('alloy')) and             not (NATIVE/'.autokom-installed').is_file():
@@ -374,7 +376,9 @@ def migrate_to_native(backend):
         print('  ✓ Ancien couple Loki/Alloy Docker retiré ; autres conteneurs inchangés')
     from logging_stack import provision_grafana
     from logging_monitoring import apply as apply_monitoring
-    provision_grafana();apply_monitoring()
+    changed=provision_grafana();apply_monitoring()
+    from logging_stack import sync_grafana_after_install
+    sync_grafana_after_install(changed)
     print('  ✓ Loki/Alloy natifs validés ; sauvegarde conservée : '+str(backup))
 
 
@@ -433,7 +437,9 @@ def migrate_to_docker(backend):
         print('  ! Paquets natifs non identifiés comme gérés : arrêtés mais purge manuelle nécessaire')
     from logging_stack import provision_grafana
     from logging_monitoring import apply as apply_monitoring
-    provision_grafana();apply_monitoring()
+    changed=provision_grafana();apply_monitoring()
+    from logging_stack import sync_grafana_after_install
+    sync_grafana_after_install(changed)
     print('  ✓ Couple Docker actif, ancien couple systemd désactivé ; sauvegarde : '+str(backup))
 
 
