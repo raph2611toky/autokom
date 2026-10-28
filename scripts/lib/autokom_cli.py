@@ -25,11 +25,17 @@ from tool_banner import section, message, colored_marker, Activity, phase_progre
 from jenkins_network import bindings, private_listener, enforce, NetworkError
 
 STAGES = ('foundation', 'services', 'plugins', 'observability')
+OPTIONAL_STAGES = ('logs',)
+# Alias publics : uniquement des étapes réellement prises en charge.
+INSTALL_ALIASES = {'core': ('foundation',), 'pipeline': ('services','plugins'),
+                   'cicd': ('services','plugins'), 'metrics': ('observability',),
+                   'monitoring': ('observability',), 'logging': ('logs',)}
 LABELS = {
     'foundation': 'Fondation système',
     'services': 'Jenkins / services',
     'plugins': 'Plugins et sécurité Jenkins',
     'observability': 'Prometheus / Grafana',
+    'logs': 'Loki / Alloy + OpenSearch / Data Prepper / Dashboards',
 }
 REQUIRED_COMMANDS = ('nginx', 'certbot', 'docker', 'ansible-playbook',
                      'trivy', 'semgrep', 'nikto')
@@ -106,6 +112,7 @@ class Snapshot:
     node_ready: bool = True
     alertmanager_ready: bool = True
     dashboards_ready: bool = True
+    logs_ready: bool = True
 
 
 def domains_ok(cfg):
@@ -167,6 +174,7 @@ def snapshot(cfg):
                     private_listener(bindings(9100)) and http_code('http://127.0.0.1:9100/metrics') == 200),
         alertmanager_ready=(works(['systemctl','is-active','--quiet','prometheus-alertmanager']) and
                             private_listener(bindings(9093)) and http_code('http://127.0.0.1:9093/-/ready') == 200),
+        logs_ready=__import__('logging_stack').ready('both'),
     )
 
 
@@ -179,6 +187,7 @@ def actions(state: Snapshot):
         'observability': (not state.prometheus_active or not state.grafana_active or
                           not state.metrics_up or not state.datasource_ok or not state.domains_ready or
                           not state.node_ready or not state.alertmanager_ready or not state.dashboards_ready),
+        'logs': not getattr(state, 'logs_ready', True),
     }
 
 
@@ -186,8 +195,10 @@ def selected(args):
     if args.only and args.start_at:
         raise CLIError('--only et --from ne peuvent pas être combinés')
     if args.only:
-        return (args.only,)
+        return INSTALL_ALIASES.get(args.only, (args.only,))
     if args.start_at:
+        if args.start_at == 'logs':
+            return ('logs',)
         return STAGES[STAGES.index(args.start_at):]
     return STAGES
 
@@ -238,7 +249,7 @@ def call_module(path: str, *args):
         raise CLIError(f'Phase interrompue ({p.returncode}) : {LABELS.get(Path(path).stem, path)}')
 
 
-def apply_stage(stage, state, cfg):
+def apply_stage(stage, state, cfg, *, logs_backend='both'):
     section(LABELS[stage], 'AUTOKOM · traitement uniquement des écarts')
     if stage == 'foundation':
         call_module('scripts/bootstrap/preflight.sh')
@@ -289,13 +300,21 @@ def apply_stage(stage, state, cfg):
         if not state.jenkins_active or not state.jenkins_private:
             raise CLIError('Jenkins doit être actif et privé avant Prometheus/Grafana')
         call_module('scripts/install/observability.sh', '--apply', '--interactive')
+    elif stage == 'logs':
+        call_module('scripts/install/logs.sh', '--apply', '--backend', logs_backend)
 
 
 def perform(args, cfg):
     stages = selected(args)
+    if args.backend and 'logs' not in stages:
+        raise CLIError('--backend est réservé à la phase logs')
     with Activity('Analyse de l’infrastructure'):
         state = snapshot(cfg)
     plan = actions(state)
+    # Contrôle ciblé du backend plutôt que de considérer 'both' toujours requis.
+    if 'logs' in stages and args.backend:
+        from logging_stack import ready
+        plan['logs'] = not ready(args.backend)
     print_plan(state, plan, stages)
     if args.check:
         message('  ✓ Simulation en lecture seule : aucune installation lancée.')
@@ -305,19 +324,21 @@ def perform(args, cfg):
     for index, stage in enumerate(stages, 1):
         with Activity(f'Contrôle {LABELS[stage]}'):
             state = snapshot(cfg)
-        should = actions(state)[stage]
+        should = (not __import__('logging_stack').ready(args.backend)
+                  if stage == 'logs' and args.backend else actions(state)[stage])
         if not should:
             message(f'  - {LABELS[stage]} : déjà conforme, ignoré')
             phase_progress(index, len(stages), LABELS[stage], skipped=True)
             continue
-        apply_stage(stage, state, cfg)
+        apply_stage(stage, state, cfg, logs_backend=args.backend or 'both')
         # Avancement par phases TERMINEES (pas un pourcentage temporel).
         # La conformité réelle de tous les services est revérifiée ensuite.
         message(f'  ✓ {LABELS[stage]} : module exécuté, vérification finale à venir')
         phase_progress(index, len(stages), LABELS[stage])
     with Activity('Contrôle final des services'):
         state = snapshot(cfg)
-    remaining = [LABELS[s] for s in stages if actions(state)[s]]
+    remaining = [LABELS[s] for s in stages if (not __import__('logging_stack').ready(args.backend)
+                 if s == 'logs' and args.backend else actions(state)[s])]
     if remaining:
         message('  ! À revoir : ' + ', '.join(remaining))
         message('  › sudo autokom check affiche les contrôles détaillés.')
@@ -343,6 +364,8 @@ def brief(cfg):
         message('  ! UFW inactif / inconnu, vérifier les règles du cloud')
     message('  › Source Grafana : provisioning vérifié, authentification API non vérifiée ici.')
     message('  › sudo autokom install  (reprend seulement les écarts)')
+    from logging_stack import ready, backend_state
+    message(f'  {"✓ opérationnel" if ready("both") else "+ à configurer"}  Logs (Loki + OpenSearch) · préférence {backend_state()}')
     return 0
 
 
@@ -453,16 +476,40 @@ def make_parser():
         return parser
 
     i = subcommand('install', help='Détecte et traite automatiquement les composants manquants',
-                   epilog='Exemples : sudo autokom install --check | sudo autokom install --from observability')
+                   formatter_class=argparse.RawDescriptionHelpFormatter,
+                   epilog='''Modules installables séparément (--only) :
+  foundation | core          Base Ubuntu, Ansible, Docker et outils système
+  services                   Jenkins et services essentiels
+  plugins                    Extensions Jenkins et sécurité
+  pipeline | cicd            Jenkins + plugins pour la chaîne CI/CD
+  observability | metrics    Prometheus, Grafana, Node Exporter et alertes
+  monitoring                 Alias de observability
+  logs | logging             Loki + Alloy, OpenSearch + Data Prepper + Dashboards
+
+Exemples :
+  sudo autokom install --only logs --backend both
+  sudo autokom install --only observability
+  sudo autokom install --only pipeline
+  autokom install --only logs --check
+  sudo autokom logs use opensearch
+  sudo autokom logs use loki
+
+Sans --only, le parcours historique (foundation/services/plugins/observability)
+est conservé. Les logs sont installés séparément pour éviter une charge imprévue.''')
     i.add_argument('--check', action='store_true', help='Afficher le plan sans rien modifier')
-    i.add_argument('--from', dest='start_at', choices=STAGES, help='Reprendre à partir de cette phase')
-    i.add_argument('--only', choices=STAGES, help='Traiter une seule phase (mode expert)')
+    i.add_argument('--from', dest='start_at', choices=STAGES+OPTIONAL_STAGES, help='Reprendre à partir de cette phase')
+    i.add_argument('--only', choices=STAGES+OPTIONAL_STAGES+tuple(INSTALL_ALIASES), help='Installer uniquement le module ou alias indiqué')
+    i.add_argument('--backend', choices=('loki','opensearch','both'), help='Pour logs : installer un backend ou les deux (défaut : both)')
     subcommand('status', help='État synthétique des composants', epilog='Exemple : autokom status')
     subcommand('check', help='Audit complet (équivalent script verify/stack.py)', epilog='Exemple : sudo autokom check')
     subcommand('config', help='Voir les ports, URLs et domaines, sans secrets', epilog='Exemple : autokom config')
     c = subcommand('configure', help='Configuration interactive ciblée (expert)',
                    epilog='Exemple : sudo autokom configure observability')
-    c.add_argument('service', choices=('services', 'plugins', 'observability'))
+    c.add_argument('service', choices=('services', 'plugins', 'observability','logs'))
+    lg = subcommand('logs', help='Consulter / choisir le backend de logs (sans désinstaller l’autre)',
+                    epilog='Exemples : autokom logs status | sudo autokom logs use opensearch')
+    lg.add_argument('action', nargs='?', choices=('status','use'), default='status')
+    lg.add_argument('backend', nargs='?', choices=('loki','opensearch'))
     for alias in ('tools','services'):
         tp=subcommand(alias, help='Catalogue, configuration et exploitation des outils DevSecOps',
                       epilog='Exemples : autokom tools list | autokom tools show jenkins -e')
@@ -547,6 +594,12 @@ def main(argv=None):
             if stat and stat.returncode == 0 and stat.stdout:
                 print(color_git_diffstat(stat.stdout, enabled=use_color), end='' if stat.stdout.endswith('\n') else '\n')
         return 0
+    if a.cmd == 'logs':
+        from logging_stack import main as logs_main, LogError
+        try:
+            return logs_main([a.action] + ([a.backend] if a.backend else []))
+        except LogError as exc:
+            raise CLIError(str(exc)) from exc
     if a.cmd in ('tools','services'):
         from tools_registry import dispatch, ToolError
         try:
@@ -567,8 +620,8 @@ def main(argv=None):
         if os.geteuid() != 0:
             raise CLIError('Utiliser sudo autokom configure ...')
         names = {'services': 'services.sh', 'plugins': 'jenkins.sh',
-                 'observability': 'observability.sh'}
-        flags = ('--interactive',) if a.service != 'services' else ()
+                 'observability': 'observability.sh', 'logs':'logs.sh'}
+        flags = ('--interactive',) if a.service not in ('services','logs') else ()
         call_module('scripts/install/' + names[a.service], '--apply', *flags)
         return 0
     return perform(a, cfg)
