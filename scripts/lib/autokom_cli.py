@@ -566,7 +566,9 @@ est conservé. Les logs sont installés séparément pour éviter une charge imp
     c.add_argument('service', choices=('services', 'plugins', 'observability','logs'))
     lg = subcommand('logs', help='Consulter / choisir le backend de logs (sans désinstaller l’autre)',
                     epilog='Exemples : autokom logs status | sudo autokom logs use opensearch')
-    lg.add_argument('action', nargs='?', choices=('status','use'), default='status')
+    lg.add_argument('action', nargs='?', choices=('status','use','reconcile','verify'), default='status')
+    lg.add_argument('--apply', action='store_true', help='Appliquer la réconciliation du backend déjà installé')
+    lg.add_argument('--check', action='store_true', help='Prévisualiser la réconciliation')
     lg.add_argument('backend', nargs='?', choices=('loki','opensearch'))
     for alias in ('tools','services'):
         tp=subcommand(alias, help='Catalogue, configuration et exploitation des outils DevSecOps',
@@ -661,7 +663,7 @@ def main(argv=None):
     if a.cmd == 'logs':
         from logging_stack import main as logs_main, LogError
         try:
-            return logs_main([a.action] + ([a.backend] if a.backend else []))
+            return logs_main([a.action] + ([a.backend] if a.backend else []) + (['--apply'] if a.apply else []) + (['--check'] if a.check else []))
         except LogError as exc:
             raise CLIError(str(exc)) from exc
     if a.cmd in ('tools','services'):

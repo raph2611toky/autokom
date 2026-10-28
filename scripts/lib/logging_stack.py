@@ -88,6 +88,7 @@ def yaml_loki():
 server:
   http_listen_port: 3100
   log_level: warn
+  # /metrics: Loki self-monitoring via private loopback
 common:
   path_prefix: /loki
   replication_factor: 1
@@ -151,6 +152,16 @@ discovery.relabel "autokom_docker" {
     source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
     target_label = "compose_service"
   }
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex = "/(.+)"
+    target_label = "service_name"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex = "(.+)"
+    target_label = "service_name"
+  }
 }
 
 loki.relabel "journal" {
@@ -158,6 +169,11 @@ loki.relabel "journal" {
   rule {
     source_labels = ["__journal__systemd_unit"]
     target_label = "unit"
+  }
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    regex = "(.+)"
+    target_label = "service_name"
   }
   rule {
     source_labels = ["__journal_priority_keyword"]
@@ -169,23 +185,46 @@ loki.relabel "journal" {
   host = "unix:///var/run/docker.sock"
   targets = discovery.relabel.autokom_docker.output
   labels = {platform = "autokom", source = "docker"}
-  forward_to = ''' + forward + '''
+  forward_to = [loki.process.autokom_sanitize.receiver]
 }
 
 loki.source.journal "host" {
   max_age = "2h"
-  labels = {platform = "autokom", source = "systemd"}
+  labels = {platform = "autokom", source = "systemd", service_name = "systemd"}
   relabel_rules = loki.relabel.journal.rules
-  forward_to = ''' + forward + '''
+  forward_to = [loki.process.autokom_sanitize.receiver]
 }
 
 local.file_match "nginx" {
-  path_targets = [{__path__ = "/var/log/nginx/*.log", platform = "autokom", source = "nginx"}]
+  path_targets = [{__path__ = "/var/log/nginx/*.log", platform = "autokom", source = "nginx", service_name = "nginx"}]
 }
 
 loki.source.file "nginx" {
   targets = local.file_match.nginx.targets
-  forward_to = ''' + forward + '''
+  forward_to = [loki.process.autokom_sanitize.receiver]
+}
+''')
+    pieces.append(r'''// Sanitization is best-effort: applications must still avoid emitting secrets.
+loki.process "autokom_sanitize" {
+  forward_to = ''' + forward + r'''
+  stage.replace {
+    expression = "(?i)(?P<secret>authorization:\\s*bearer\\s+[^\\s\\\"]+)"
+    replace = "[REDACTED_AUTHORIZATION]"
+  }
+  stage.replace {
+    expression = "(?i)(?P<secret>(password|passwd|api[_-]?key|secret|token)\\s*[:=]\\s*[^\\s,;\\\"]+)"
+    replace = "[REDACTED_CREDENTIAL]"
+  }
+  stage.json {
+    expressions = { level = "level", trace_id = "trace_id", request_id = "request_id" }
+    drop_malformed = false
+  }
+  stage.labels {
+    values = {level = "level"}
+  }
+  stage.structured_metadata {
+    values = {trace_id = "trace_id", request_id = "request_id"}
+  }
 }
 ''')
     if backend in ('loki','both'):
@@ -262,7 +301,7 @@ services:
     image: {IMAGES['alloy']}
     restart: unless-stopped
     user: "0:0"
-    command: ["run", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
     volumes:
       - ./config.alloy:/etc/alloy/config.alloy:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -270,6 +309,7 @@ services:
       - /run/log/journal:/run/log/journal:ro
       - /var/log/nginx:/var/log/nginx:ro
       - alloy-data:/var/lib/alloy/data
+    ports: ["127.0.0.1:12345:12345"]
     labels: {{com.autokom.logs.exclude: "true"}}
     security_opt: [no-new-privileges:true]
     networks: [logging]
@@ -500,6 +540,26 @@ def preflight(backend):
         raise LogError('Ressources insuffisantes : installation annulée pour protéger Jenkins et Grafana')
 
 
+def validate_alloy(backend):
+    """Validate generated Alloy components before replacing live configuration.
+
+    Uses the exact pinned image, without a network or running collector.
+    This checks River syntax and components, not actual Docker/journal access.
+    """
+    with tempfile.TemporaryDirectory(prefix='autokom-alloy-') as tmp:
+        filename=Path(tmp)/'config.alloy'
+        filename.write_text(alloy_config(backend))
+        os.chmod(tmp,0o755)
+        os.chmod(filename,0o644)
+        p=run(['docker','run','--rm','--network','none','--read-only',
+               '-v',str(filename)+':/etc/alloy/config.alloy:ro',
+               IMAGES['alloy'],'validate','/etc/alloy/config.alloy'],timeout=180)
+        if p.returncode:
+            # Validation output may reflect snippets of configuration. Never
+            # include it in CLI logs because future pipelines may contain secrets.
+            raise LogError('Validation Alloy échouée avant déploiement ; aucun fichier live remplacé. Vérifier la compatibilité du générateur avec l’image épinglée.')
+
+
 def profile_args(backend):
     result=[]
     if backend in ('loki','both'): result += ['--profile','loki']
@@ -521,6 +581,19 @@ def ready(backend):
     return p.returncode==0 and set(desired_services(backend))<=set(p.stdout.splitlines())
 
 
+def installed_backend():
+    """Determine installed outputs from the current managed Alloy config."""
+    path = STATE_DIR / 'config.alloy'
+    if not path.is_file() or path.is_symlink():
+        raise LogError('Installation logs absente ; exécuter sudo autokom install logs')
+    data=path.read_text()
+    loki='loki.write "autokom"' in data
+    search='otelcol.receiver.loki "opensearch"' in data
+    if loki and search:return 'both'
+    if loki:return 'loki'
+    if search:return 'opensearch'
+    raise LogError('Configuration Alloy non reconnue : réconciliation refusée')
+
 def backend_state():
     try:
         v=json.loads(PREFERENCE.read_text())['backend']
@@ -540,27 +613,72 @@ def use_backend(name):
 
 
 def provision_grafana():
-    # Only add our own files; no modification of Grafana/Prometheus credentials.
-    if not Path('/etc/grafana/provisioning').exists(): return
-    mapping = {
-        Path('/etc/grafana/provisioning/datasources/autokom-loki.yaml'): (grafana_datasource(), '# AUTOKOM MANAGED'),
-        Path('/var/lib/grafana/dashboards/autokom/autokom-logs.json'): (grafana_dashboard(), 'autokom-managed')}
-    for path,(content,marker) in mapping.items():
-        if path.is_symlink() or path.exists() and marker not in path.read_text():
-            raise LogError('Refus de modifier le fichier Grafana tiers : '+str(path))
-    for path,(content,_) in mapping.items():
-        if not path.exists() or path.read_text()!=content: atomic_write(path,content,0o644)
-    print('  › Grafana : datasource Loki et dashboard créés. Rechargement/restart Grafana à valider séparément.')
+    """Write only AUTOKOM-owned Grafana objects; protect operator changes.
+
+    First upgrade accepts the exact v20 dashboard. Later upgrades compare
+    checksums recorded at last AUTOKOM write, never just a cosmetic tag.
+    """
+    if not Path('/etc/grafana/provisioning').exists():
+        print('  ! Grafana absent : provisioning en attente (ne bloque pas Loki).')
+        return
+    from logging_dashboards import serialized
+    ds=Path('/etc/grafana/provisioning/datasources/autokom-loki.yaml')
+    old_dash=Path('/var/lib/grafana/dashboards/autokom/autokom-logs.json')
+    mapping = {ds:grafana_datasource()}
+    for filename, content in serialized().items():
+        mapping[old_dash.parent/filename]=content
+    state=STATE_DIR/'.grafana-managed.json'
+    if state.is_symlink():raise LogError('Manifest Grafana symbolique non autorisé')
+    try:
+        manifest=json.loads(state.read_text())['files'] if state.exists() else {}
+        if not isinstance(manifest,dict):raise ValueError()
+    except (OSError,ValueError,KeyError,TypeError) as exc:
+        raise LogError('Manifest Grafana invalide : intervention requise') from exc
+    # Read-only preflight of every resource before any file is changed.
+    for path,content in mapping.items():
+        if path.is_symlink():raise LogError('Symlink Grafana refusé : '+str(path))
+        if not path.exists():continue
+        existing=path.read_text()
+        prior=manifest.get(str(path))
+        if prior:
+            if prior!=sha(existing):
+                raise LogError('Dashboard/datasource modifié manuellement : '+str(path))
+        elif existing!=content and not (path==old_dash and existing==grafana_dashboard()):
+            raise LogError('Grafana existant non reconnu : '+str(path)+' ; refus d’écrasement')
+    # Record a byte-for-byte backup of the canonical v20 dashboard before migration.
+    if old_dash.is_file() and old_dash.read_text()==grafana_dashboard():
+        backup=old_dash.with_name('autokom-logs.v20-backup')
+        if not backup.exists():atomic_write(backup,old_dash.read_text(),0o600)
+    for path,content in mapping.items():
+        if not path.exists() or path.read_text()!=content:
+            atomic_write(path,content,0o644)
+    atomic_write(state,json.dumps({'schema':1,'files':{str(path):sha(content)
+                                            for path,content in mapping.items()}},indent=2)+'\n',0o600)
+    print('  ✓ Grafana : datasource Loki et 4 dashboards provisionnés (fichiers).')
+    print('  › Redémarrer Grafana de façon contrôlée si la datasource Loki n’apparaît pas (provisioning datasources au démarrage).')
 
 
 def main(argv=None):
     parser=argparse.ArgumentParser(prog='autokom logging',description='Loki + Alloy et OpenSearch + Data Prepper + Dashboards')
-    parser.add_argument('action',nargs='?',choices=('status','use'),default='status')
+    parser.add_argument('action',nargs='?',choices=('status','use','reconcile','verify'),default='status')
     parser.add_argument('choice',nargs='?',choices=('loki','opensearch'))
     parser.add_argument('--apply',action='store_true')
     parser.add_argument('--check',action='store_true')
     parser.add_argument('--backend',choices=BACKENDS,default='both',help='Composants à installer ; both par défaut')
     a=parser.parse_args(argv)
+    if a.action=='verify':
+        if os.geteuid()!=0:raise LogError('sudo requis pour émettre la sonde et écrire son état')
+        if not ready('loki'):raise LogError('Loki non actif : ne pas lancer une sonde en vain')
+        from logs_canary import probe
+        return probe()
+    if a.action=='reconcile':
+        if os.geteuid()!=0:raise LogError('sudo requis')
+        current = installed_backend()
+        if not a.apply:
+            print('  AUTOKOM LOGS / RECONCILIATION — lecture seule : '+current)
+            print('  › Pour appliquer sans supprimer de services : sudo autokom logs reconcile --apply')
+            return 0
+        a.backend=current
     if a.action=='use':
         if not a.choice: parser.error('use exige loki ou opensearch')
         if os.geteuid()!=0: raise LogError('sudo requis')
@@ -569,6 +687,8 @@ def main(argv=None):
     if a.apply:
         if os.geteuid()!=0: raise LogError('sudo requis')
         preflight(a.backend)
+        validate_alloy(a.backend)
+        print('  ✓ Configuration Alloy validée avec l’image conteneur épinglée')
         secret=install_files(a.backend)
         # Never print secret / JSON with credentials.
         p=run(docker(*profile_args(a.backend),'config','-q'))
@@ -580,14 +700,21 @@ def main(argv=None):
             print('  ✓ OpenSearch : politique ISM de rétention 14 jours confirmée')
         if a.backend in ('loki','both'):
             provision_grafana()
+            from logging_monitoring import apply as monitoring_apply
+            monitoring_apply()
         else:
             print('  › OpenSearch seul : aucun dashboard Grafana/Loki inutilisable n’est créé.')
         print('  ✓ Services lancés : '+', '.join(desired_services(a.backend)))
         print('  › Vérifier ingestion réelle dans Grafana et OpenSearch Dashboards avant déclaration de conformité.')
         return 0
+    if a.action=='status' and (STATE_DIR/'config.alloy').is_file():
+        a.backend=installed_backend()
     print('  AUTOKOM logs | installation cible : '+a.backend+' | préférence : '+backend_state())
     print('  Services actifs : '+('oui' if ready(a.backend) else 'non / non confirmé'))
     for warning in resource_warnings(a.backend): print('  ! '+warning)
+    if a.action=='status' and (STATE_DIR/'config.alloy').is_file():
+        from logging_monitoring import report
+        report()
     print('  Endpoints prévus : Loki http://127.0.0.1:3100 ; OpenSearch https://127.0.0.1:9200 ; Dashboards http://127.0.0.1:5601')
     print('  Simulation en lecture seule ; pour installer : sudo autokom install --only logs --backend both')
     return 0

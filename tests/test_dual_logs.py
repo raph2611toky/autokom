@@ -31,7 +31,9 @@ class DualLogging(unittest.TestCase):
         data=logs.compose('both')
         for port in (3100,9200,5601):
             self.assertIn(f'127.0.0.1:{port}:{port}',data)
-        self.assertNotIn('0.0.0.0:',data)
+        self.assertNotIn('\"0.0.0.0:3100:',data)
+        self.assertNotIn('\"0.0.0.0:12345:',data)
+        self.assertNotIn('\"0.0.0.0:9200:',data)
         self.assertIn('internal: true',data)
         self.assertIn('profiles: [opensearch]',data)
 

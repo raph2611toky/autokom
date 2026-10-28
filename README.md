@@ -58,3 +58,10 @@ Voir [documentation détaillée](docs/AUTOKOM-CLI.md).
 ## Observabilité v17
 
 Les dashboards Serveur/Jenkins/Docker/Collecte sont provisionnés pendant `autokom configure observability`. cAdvisor est proposé pour les métriques Docker. La fusion des règles vides, leur rechargement et leur contrôle via API sont corrigés. Voir [diagnostic, mise à jour et test SMTP de bout en bout](docs/OBSERVABILITY-v17.md).
+
+### Supervision avancée des journaux (v21)
+
+Voir [`docs/LOGGING-OBSERVABILITY-v21.md`](docs/LOGGING-OBSERVABILITY-v21.md) pour
+l'intégration Alloy/Loki dans Prometheus, Grafana, Alertmanager et la sonde
+end-to-end systemd. Mise à jour non destructive d'une installation existante :
+`sudo autokom logs reconcile --check` puis `sudo autokom logs reconcile --apply`.
