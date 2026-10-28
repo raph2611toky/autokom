@@ -34,7 +34,7 @@ Les secrets ne sont jamais acceptés en paramètres de ligne de commande. L'opti
 6. Ajouter le job de collecte `jenkins` à `/etc/prometheus/prometheus.yml`, sans supprimer les jobs existants ; vérifier avec `promtool check config` et contrôle `/-/ready`.
 7. Installer Grafana OSS via APT signé par `https://apt.grafana.com`; service restreint à `127.0.0.1:3000`. Provisionner `/etc/grafana/provisioning/datasources/autokom-prometheus.yaml` → `http://127.0.0.1:9090`.
 8. Sur installation Grafana neuve, demander le nom et le mot de passe admin par TTY, masquer la saisie, changer le mot de passe initial via `PUT /api/user/password` en local, vérifier. Sur Grafana existant, conserver les comptes ou demander l'ancien mot de passe en cas de changement volontaire.
-9. Domaines facultatifs : si présent, vérifier le DNS et collisions de Nginx, obtenir un certificat via `certbot certonly --nginx`; publier ensuite **en HTTPS seulement**. Prometheus reçoit BasicAuth bcrypt en Nginx, Grafana utilise son login natif. Un site provisoire retourne `503` durant l'émission du certificat. En cas d'échec, retour au portail `503`, jamais à un reverse proxy HTTP non chiffré.
+9. Domaines facultatifs : si présent, vérifier le DNS et collisions de Nginx, obtenir un certificat via `certbot certonly --nginx`; publier ensuite **en HTTPS seulement**. Prometheus reçoit BasicAuth SHA-512 crypt en Nginx, Grafana utilise son login natif. Un site provisoire retourne `503` durant l'émission du certificat. En cas d'échec, retour au portail `503`, jamais à un reverse proxy HTTP non chiffré.
 10. Vérifier la cible Jenkins `UP` via `/api/v1/targets`, puis valider les ports/URLs.
 
 ## Domaines facultatifs
@@ -51,7 +51,7 @@ Avec domaine : seules les connexions entrantes HTTPS vers Nginx (443) sont publi
 
 ### Remarques sur l'authentification
 
-- **Prometheus n'est pas un système multi-utilisateurs** : le mode sans domaine est interne uniquement ; avec domaine, la sécurité est assurée par `auth_basic` en Nginx, hash bcrypt stocké `/etc/nginx/.autokom-prometheus.htpasswd` (`root:www-data`, 0640).
+- **Prometheus n'est pas un système multi-utilisateurs** : le mode sans domaine est interne uniquement ; avec domaine, la sécurité est assurée par `auth_basic` en Nginx, hash SHA-512 crypt via OpenSSL stocké `/etc/nginx/.autokom-prometheus.htpasswd` (`root:www-data`, 0640).
 - **Grafana** possède des comptes natifs. Ne jamais conserver de mot de passe en clair dans Git ou un argument CLI. AUTOKOM modifie les credentials existants uniquement si demandé.
 - **Jenkins** : le plugin Prometheus ne nécessite normalement pas d'authentification, mais un réglage Jenkins peut imposer `Metrics.VIEW`. Utiliser alors un utilisateur et token **lecture métriques**, pas un token administrateur ; le scraper local utilise `basic_auth.password_file`.
 - La route publique `/prometheus/` de Jenkins est bloquée dans le serveur Nginx Jenkins ; une connexion directe sur le port Jenkins hors localhost serait une faille, d'où la restriction loopback.

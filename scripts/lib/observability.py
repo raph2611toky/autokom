@@ -100,14 +100,22 @@ def run(args, *, input_data=None, timeout=120, allowed=(0,)):
     """
     show = (sys.stdout.isatty() and not os.environ.get('NO_COLOR') and
             os.environ.get('AUTOKOM_LIVE', '1') != '0')
+    child_env = os.environ.copy()
+    if args and args[0] == 'apt-get':
+        child_env.update(DEBIAN_FRONTEND='noninteractive', APT_LISTCHANGES_FRONTEND='none')
+        args = list(args)
+        args[1:1] = ['-o','DPkg::Lock::Timeout=60']
     if not show:
-        p = subprocess.run(args, input=input_data, capture_output=True, text=True,
-                           timeout=timeout, check=False)
+        try:
+            p = subprocess.run(args, input=input_data, capture_output=True, text=True,
+                               timeout=timeout, check=False, env=child_env)
+        except subprocess.TimeoutExpired as exc:
+            raise SetupError(f'{args[0]} a dépassé {timeout}s. Examiner les verrous dpkg et les sources APT ; aucun succès présumé.') from exc
     else:
         import itertools
         import time as clock
         proc = subprocess.Popen(args, stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=child_env)
         start = clock.monotonic()
         shown = False
         spinner = itertools.cycle('⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏')
@@ -134,7 +142,7 @@ def run(args, *, input_data=None, timeout=120, allowed=(0,)):
                         sys.stdout.write('\r\033[2K' + line + '\n')
                     sys.stdout.flush()
                     if elapsed >= timeout:
-                        raise subprocess.TimeoutExpired(args, timeout)
+                        raise SetupError(f'{args[0]} a dépassé {timeout}s ; vérifier journalctl et verrous dpkg.')
             p = subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
         except Exception:
             proc.kill()
@@ -499,16 +507,21 @@ def vhost_content(domain, port, *, prometheus=False, gated=True):
 def ensure_prom_basic_auth(username, passwd):
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{2,39}', username):
         raise SetupError('Nom utilisateur Prometheus invalide')
-    # htpasswd -i reads password from stdin rather than argv; -B uses bcrypt.
-    # The file lives under /etc/nginx so worker can traverse the directory.
+    # Nginx supports crypt() hashes. OpenSSL SHA-512 crypt avoids installing
+    # apache2-utils (which previously hung before provisioning); secret via stdin.
+    # /etc/nginx file stays root-owned, group www-data, mode 0640.
     path = PROM_HTPASSWD
     if path.exists():
         raise SetupError('Identifiants Prometheus déjà présents : aucune réinitialisation automatique')
-    p = subprocess.run(['htpasswd', '-nBi', username], input=passwd + '\n',
-                       capture_output=True, text=True, timeout=20)
-    if p.returncode or ':' not in p.stdout:
-        raise SetupError('Impossible de créer le hash bcrypt Prometheus')
-    changed = owned_write(path, p.stdout, mode=0o640, group='www-data')
+    try:
+        p = subprocess.run(['openssl', 'passwd', '-6', '-stdin'], input=passwd + '\n',
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SetupError('OpenSSL indisponible pour la protection HTTP Prometheus') from exc
+    hashed = p.stdout.strip()
+    if p.returncode or not hashed.startswith('$6$') or '\n' in hashed or ':' in hashed:
+        raise SetupError('Impossible de générer le hash SHA-512 crypt Prometheus')
+    changed = owned_write(path, username + ':' + hashed + '\n', mode=0o640, group='www-data')
     return changed
 
 
@@ -1063,8 +1076,8 @@ def preflight(args):
     if args.prometheus_domain or args.grafana_domain:
         if not shutil.which('certbot'):
             raise SetupError('Certbot doit être installé par AUTOKOM Foundation')
-    if args.prometheus_domain and not package_installed('apache2-utils') and args.mode == 'apply':
-        run(['apt-get', 'install', '-y', '--no-install-recommends', 'apache2-utils'], timeout=240)
+    if args.prometheus_domain and not shutil.which('openssl'):
+        raise SetupError('OpenSSL requis pour protéger Prometheus par mot de passe')
     # Refuse unhandled local port conflicts or public exposures.
     for port, expected in ((cfg().prometheus_port, 'prometheus'),
                            (cfg().grafana_port, 'grafana-server')):

@@ -360,6 +360,38 @@ def version_label():
                               'AUTOKOM · révision indisponible (Git absent)')
 
 
+def color_git_diffstat(value: str, *, enabled: bool) -> str:
+    """Colorize Git's diffstat graphs, which Git does not always color itself.
+
+    Does not alter file names, source content or plain-text logs; only the
+    +/- graph and final insertions/deletions counters when a TTY is present.
+    """
+    if not enabled:
+        return value
+    import re
+    value = re.sub(r'\x1b\[[0-9;]*m', '', value)
+    green = '\033[32m'
+    red = '\033[31m'
+    reset = '\033[0m'
+    lines=[]
+    for raw in value.splitlines(keepends=True):
+        ending = '\n' if raw.endswith('\n') else ''
+        line = raw.removesuffix('\n')
+        if ' | ' in line:
+            head,sep,tail=line.partition(' | ')
+            # Graph follows count; filenames are never touched.
+            match=re.match(r'([ ]*[0-9]+[ ]*)([+\-]+)(.*)$', tail)
+            if match:
+                count, graph, suffix=match.groups()
+                graph=re.sub(r'[+]+|[-]+', lambda m: (green if m.group()[0]=='+' else red)+m.group()+reset, graph)
+                line=head+sep+count+graph+suffix
+        else:
+            line=re.sub(r'(\d+ insertions?\()\+(\))', lambda m:m.group(1)+green+'+'+reset+m.group(2), line)
+            line=re.sub(r'(\d+ deletions?\()-(\))', lambda m:m.group(1)+red+'-'+reset+m.group(2), line)
+        lines.append(line+ending)
+    return ''.join(lines)
+
+
 def show_brand():
     """Render the official AUTOKOM logo only when the user asks for it.
 
@@ -420,6 +452,27 @@ def make_parser():
     c = subcommand('configure', help='Configuration interactive ciblée (expert)',
                    epilog='Exemple : sudo autokom configure observability')
     c.add_argument('service', choices=('services', 'plugins', 'observability'))
+    for alias in ('tools','services'):
+        tp=subcommand(alias, help='Catalogue, configuration et exploitation des outils DevSecOps',
+                      epilog='Exemples : autokom tools list | autokom tools show jenkins -e')
+        ops=tp.add_subparsers(dest='tool_cmd')
+        ls=ops.add_parser('list', help='Lister les outils présents (ou --all)')
+        ls.add_argument('--all', action='store_true', help='Inclure les outils absents')
+        sh=ops.add_parser('show', help='Chemins, environnement et documentation d’un outil')
+        sh.add_argument('tool_name', help='Exemple : jenkins, prometheus, mysql')
+        sh.add_argument('-e','--environnements', dest='environments', action='store_true',
+                        help='Afficher les noms de variables (sans valeurs)')
+        sh.add_argument('-E','--environnements-values', dest='environments_values', action='store_true',
+                        help='Afficher les valeurs, y compris les secrets (sudo + confirmation TTY)')
+        for action in ('configure','restart','stop'):
+            sp=ops.add_parser(action, help={'configure':'Configurer avec le module AUTOKOM',
+                'restart':'Redémarrage systemd avec confirmation',
+                'stop':'Arrêt systemd avec confirmation'}[action])
+            sp.add_argument('tool_name')
+        ch=ops.add_parser('change', help='Modifier une configuration AUTOKOM non sensible (simulation par défaut)')
+        ch.add_argument('tool_name')
+        ch.add_argument('settings', nargs='*', metavar='CLE=VALEUR')
+        ch.add_argument('--apply', action='store_true', help='Valider et enregistrer après confirmation')
     subcommand('update', help='Mise à jour Git fast-forward uniquement (explicite)',
                epilog='Exemple : sudo autokom update')
     return p
@@ -474,8 +527,14 @@ def main(argv=None):
                             '--color=always' if use_color else '--color=never',
                             '--stat', old_head, new_head], timeout=30)
             if stat and stat.returncode == 0 and stat.stdout:
-                print(stat.stdout, end='' if stat.stdout.endswith('\n') else '\n')
+                print(color_git_diffstat(stat.stdout, enabled=use_color), end='' if stat.stdout.endswith('\n') else '\n')
         return 0
+    if a.cmd in ('tools','services'):
+        from tools_registry import dispatch, ToolError
+        try:
+            return dispatch(a)
+        except ToolError as exc:
+            raise CLIError(str(exc)) from exc
     cfg = load_settings()
     if a.cmd == 'config':
         section('Paramètres', 'Aucune donnée sensible')
