@@ -41,6 +41,7 @@ def validate_smtp(host, port, login, sender, recipient):
 def collect_options(o, args):
     """Prompt Node Exporter, then Alertmanager; no interaction in --check."""
     args.setup_node = False
+    args.setup_cadvisor = False
     args.setup_alertmanager = False
     args.smtp = None
     if getattr(args,'mode','check') != 'apply' or getattr(args,'non_interactive',False):
@@ -51,6 +52,7 @@ def collect_options(o, args):
         o.out('✓', 'Node Exporter déjà installé : contrôle et correction ciblés')
     else:
         args.setup_node = o.yesno('Installer Node Exporter (écoute privée 127.0.0.1:9100) ?', True)
+    args.setup_cadvisor = o.yesno('Activer les métriques Docker via cAdvisor privé (8081) ? Accès privilégié en lecture au système hôte.', False)
     o.section('Alertmanager · gestion des alertes', 'Routage · notifications · SMTP optionnel')
     if o.package_installed('prometheus-alertmanager'):
         o.out('›', 'Alertmanager présent : préserver toute configuration tierce')
@@ -119,7 +121,7 @@ def _new_override(o, path, content):
     return o.owned_write(path,content)
 
 
-def merge_prom_extras(existing, *, node=False, alerts=False):
+def merge_prom_extras(existing, *, node=False, alerts=False, cadvisor=False):
     """Patch YAML conservatively: preserve all unrelated jobs and rules."""
     import yaml
     result=yaml.safe_load(existing)
@@ -136,14 +138,33 @@ def merge_prom_extras(existing, *, node=False, alerts=False):
             targets=[t for g in (groups or []) for t in g.get('targets',[])] if isinstance(groups,list) else []
             if targets not in (['localhost:9100'],['127.0.0.1:9100']):
                 raise ValueError('Job node personnalisé : correction manuelle nécessaire')
+    if cadvisor:
+        jobs=[j for j in result['scrape_configs'] if isinstance(j,dict) and j.get('job_name')=='cadvisor']
+        if len(jobs)>1:
+            raise ValueError('Plusieurs jobs cadvisor existants : conflit')
+        expected={'job_name':'cadvisor','scrape_interval':'30s',
+                  'static_configs':[{'targets':['127.0.0.1:8081']}]}
+        if not jobs:
+            result['scrape_configs'].append(expected)
+        elif jobs[0] != expected:
+            raise ValueError('Job cadvisor personnalisé : correction manuelle nécessaire')
     if alerts:
-        ams=result.setdefault('alerting',{}).setdefault('alertmanagers',[])
+        if result.get('alerting') is None:
+            result['alerting']={}
+        if not isinstance(result['alerting'],dict):
+            raise ValueError('alerting existant non standard')
+        if result['alerting'].get('alertmanagers') is None:
+            result['alerting']['alertmanagers']=[]
+        ams=result['alerting']['alertmanagers']
         if not isinstance(ams,list):
             raise ValueError('Alertmanager existant non standard')
-        if not any('127.0.0.1:9093' in g.get('targets',[]) for a in ams if isinstance(a,dict)
-                   for g in a.get('static_configs',[]) if isinstance(g,dict)):
+        if not any(set(g.get('targets') or []) & {'127.0.0.1:9093','localhost:9093','[::1]:9093'}
+                   for a in ams if isinstance(a,dict)
+                   for g in (a.get('static_configs') or []) if isinstance(g,dict)):
             ams.append({'static_configs':[{'targets':['127.0.0.1:9093']}]})
-        files=result.setdefault('rule_files',[])
+        if result.get('rule_files') is None:
+            result['rule_files']=[]
+        files=result['rule_files']
         if not isinstance(files,list):
             raise ValueError('rule_files existants non standard')
         if str(RULES) not in files:
@@ -153,10 +174,10 @@ def merge_prom_extras(existing, *, node=False, alerts=False):
     return yaml.safe_dump(result,allow_unicode=True,sort_keys=False)
 
 
-def update_prom_config(o, *, node=False, alerts=False):
+def update_prom_config(o, *, node=False, alerts=False, cadvisor=False):
     old=PROM_CONFIG.read_text(encoding='utf-8')
     try:
-        new=merge_prom_extras(old,node=node,alerts=alerts)
+        new=merge_prom_extras(old,node=node,alerts=alerts,cadvisor=cadvisor)
     except (ValueError,TypeError) as exc:
         raise o.SetupError(str(exc)) from exc
     if old != new:
@@ -238,15 +259,25 @@ def smtp_config(data):
             "route:\n  receiver: 'local-only'\nreceivers:\n- name: 'local-only'\n")
 
 
-def alert_rules():
-    return ("# AUTOKOM MANAGED — basic availability alerts\n"
-            "groups:\n  - name: autokom-availability\n    rules:\n"
-            "      - alert: AUTOKOMJenkinsDown\n        expr: up{job=\"jenkins\"} == 0\n"
-            "        for: 5m\n        labels:\n          severity: warning\n"
-            "        annotations:\n          summary: 'Jenkins inaccessible depuis Prometheus'\n"
-            "      - alert: AUTOKOMNodeDown\n        expr: up{job=\"node\"} == 0\n"
-            "        for: 5m\n        labels:\n          severity: warning\n"
-            "        annotations:\n          summary: 'Node Exporter inaccessible'\n")
+def alert_rules(jenkins_job='jenkins'):
+    import json
+    import yaml
+    job=json.dumps(jenkins_job)
+    specs=[
+        ('AUTOKOMJenkinsDown',f'up{{job={job}}} == 0 or absent(up{{job={job}}})','5m','Jenkins inaccessible depuis Prometheus'),
+        ('AUTOKOMNodeDown','up{job="node"} == 0 or absent(up{job="node"})','5m','Node Exporter inaccessible'),
+        ('AUTOKOMHostCPUHigh','100 * (1 - avg by(instance) (rate(node_cpu_seconds_total{job="node",mode="idle"}[5m]))) > 90','10m','CPU hôte supérieur à 90 %'),
+        ('AUTOKOMHostMemoryHigh','100 * (1 - node_memory_MemAvailable_bytes{job="node"} / node_memory_MemTotal_bytes{job="node"}) > 90','10m','Mémoire hôte utilisée supérieure à 90 %'),
+        ('AUTOKOMHostDiskLow','(100 * node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|overlay|squashfs|ramfs"} / node_filesystem_size_bytes{job="node",fstype!~"tmpfs|overlay|squashfs|ramfs"} < 10) and on(instance,device,mountpoint) (node_filesystem_readonly{job="node"} == 0)','10m','Moins de 10 % de disque disponible'),
+        ('AUTOKOMHostInodesLow','(100 * node_filesystem_files_free{job="node",fstype!~"tmpfs|overlay|squashfs|ramfs"} / node_filesystem_files{job="node",fstype!~"tmpfs|overlay|squashfs|ramfs"} < 10) and on(instance,device,mountpoint) (node_filesystem_readonly{job="node"} == 0)','10m','Moins de 10 % des inodes disponibles'),
+        ('AUTOKOMPrometheusNotificationsFailing','rate(prometheus_notifications_errors_total[5m]) > 0','5m','Prometheus ne transmet pas certaines alertes'),
+        ('AUTOKOMCadvisorDown','up{job="cadvisor"} == 0','5m','Collecteur Docker indisponible'),
+        ('AUTOKOMContainerMemoryHigh','(container_memory_working_set_bytes{job="cadvisor",image!=""} / container_spec_memory_limit_bytes{job="cadvisor",image!=""} > 0.9) and (container_spec_memory_limit_bytes{job="cadvisor",image!=""} > 0)','10m','Conteneur proche de sa limite mémoire'),
+    ]
+    rules=[{'alert':name,'expr':expr,'for':duration,'labels':{'severity':'warning'},
+            'annotations':{'summary':summary}} for name,expr,duration,summary in specs]
+    return '# AUTOKOM MANAGED — availability and resources\n'+yaml.safe_dump(
+        {'groups':[{'name':'autokom-availability','rules':rules}]},sort_keys=False,allow_unicode=True)
 
 
 def ensure_alertmanager(o,args):
@@ -258,9 +289,8 @@ def ensure_alertmanager(o,args):
     if exists and ALERT_CONFIG.exists() and 'AUTOKOM MANAGED' not in ALERT_CONFIG.read_text(encoding='utf-8'):
         o.out('!', 'Alertmanager existant non géré : conservé, configuration SMTP non remplacée')
         return
-    if not exists or ALERT_CONFIG.exists():
-        _new_override(o,ALERT_OVERRIDE,alert_override())
-        o.run(['systemctl','daemon-reload'])
+    _new_override(o,ALERT_OVERRIDE,alert_override())
+    o.run(['systemctl','daemon-reload'])
     if not exists:
         o.run(['apt-get','update','-qq'],timeout=240)
         o.run(['apt-get','install','-y','--no-install-recommends','prometheus-alertmanager'],timeout=420)
@@ -284,12 +314,44 @@ def ensure_alertmanager(o,args):
     o.run(['amtool','check-config',str(ALERT_CONFIG)],timeout=30)
     if RULES.exists() and not RULES.read_text(encoding='utf-8').startswith('# AUTOKOM MANAGED'):
         raise o.SetupError('Règles Prometheus existantes non gérées : refus de remplacement')
-    o.owned_write(RULES,alert_rules(),mode=0o644)
-    o.run(['promtool','check','rules',str(RULES)],timeout=30)
+    # Reject an invalid candidate before replacing the active rules.
+    import tempfile
+    content_rules=alert_rules(o.cfg().jenkins_job)
+    RULES.parent.mkdir(parents=True,exist_ok=True)
+    with tempfile.NamedTemporaryFile('w',suffix='.yml',dir=str(RULES.parent),delete=False) as f:
+        f.write(content_rules)
+        candidate=Path(f.name)
+    try:
+        o.run(['promtool','check','rules',str(candidate)],timeout=30)
+        o.owned_write(RULES,content_rules,mode=0o644)
+    finally:
+        candidate.unlink(missing_ok=True)
     o.run(['systemctl','enable','--now',ALERT_UNIT],timeout=120)
     o.run(['systemctl','restart',ALERT_UNIT],timeout=120)
     wait_private_http(o,ALERT_UNIT,ALERT_PORT,'/-/ready')
-    update_prom_config(o,alerts=True)
-    o.out('✓','Alertmanager actif sur loopback:9093 ; règles intégrées à Prometheus')
-    if args.smtp:
-        o.out('›','SMTP configuré ; remise effective des e-mails non vérifiée. Tester une alerte contrôlée.')
+    if not update_prom_config(o,alerts=True):
+        o.run(['systemctl','reload-or-restart','prometheus'],timeout=120)
+        o.wait_service_ready('prometheus',o.cfg().prometheus_port,o.cfg().prometheus_base+'/-/ready')
+    verify_loaded_rules(o)
+    o.out('✓','Alertmanager actif sur loopback:9093 ; règles AUTOKOM chargées par Prometheus')
+    o.out('›','Routage conservé/configuré ; remise effective des e-mails non vérifiée. Tester une alerte contrôlée.')
+
+
+def verify_loaded_rules(o):
+    import json
+    import yaml
+    expected={r['alert'] for g in yaml.safe_load(alert_rules(o.cfg().jenkins_job))['groups'] for r in g['rules']}
+    for attempt in range(10):
+        code,raw=o.get_local(o.cfg().prometheus_base+'/api/v1/rules?type=alert')
+        try:
+            obj=json.loads(raw)
+            loaded=[r for g in obj['data']['groups'] for r in g['rules'] if r.get('name') in expected]
+            if code==200 and obj.get('status')=='success' and expected=={r['name'] for r in loaded}:
+                if any(r.get('health')=='err' or r.get('lastError') for r in loaded):
+                    raise o.SetupError('Règles AUTOKOM chargées mais erreur d’évaluation : consulter /api/v1/rules')
+                return
+        except (ValueError,KeyError,TypeError):
+            pass
+        if attempt<9:
+            time.sleep(1)
+    raise o.SetupError('Règles AUTOKOM non retrouvées dans Prometheus après rechargement ; consulter journalctl -u prometheus')

@@ -174,6 +174,8 @@ def prometheus_grafana(r, cfg):
               cfg.prometheus_base if cfg.prometheus_base in urls else 'URL non conforme')
     else:
         r.missing('Grafana datasource','provisionnement AUTOKOM absent')
+    from observability_audit import audit
+    audit(r,cfg,local_http)
     for kind, domain in (('Prometheus',cfg.prometheus_domain),('Grafana',cfg.grafana_domain)):
         if not domain:
             r.add('OK',f'{kind} domaine','local uniquement')

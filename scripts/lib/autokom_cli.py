@@ -105,6 +105,7 @@ class Snapshot:
     domains_ready: bool = True
     node_ready: bool = True
     alertmanager_ready: bool = True
+    dashboards_ready: bool = True
 
 
 def domains_ok(cfg):
@@ -143,6 +144,8 @@ def snapshot(cfg):
                          cfg.prometheus_base in datasource_path.read_text(encoding='utf-8'))
     except (OSError, UnicodeError):
         datasource_ok = False
+    from observability_dashboards import needs_update
+    dashboards_ready = not needs_update(cfg.datasource_uid,cfg.jenkins_job)
     ufw = command(['ufw', 'status'])
     return Snapshot(
         foundation_ok=bool(foundation_ok),
@@ -157,6 +160,7 @@ def snapshot(cfg):
         grafana_private=private_listener(g_listener),
         metrics_up=prometheus_target_up(cfg.prometheus_port, cfg.jenkins_job) if p_ready else False,
         datasource_ok=datasource_ok,
+        dashboards_ready=dashboards_ready,
         ufw_active=bool(ufw and 'Status: active' in ufw.stdout),
         domains_ready=domains_ok(cfg),
         node_ready=(works(['systemctl','is-active','--quiet','prometheus-node-exporter']) and
@@ -174,7 +178,7 @@ def actions(state: Snapshot):
         'plugins': not state.jenkins_installed or not state.jenkins_active or bool(state.jenkins_plugins_missing),
         'observability': (not state.prometheus_active or not state.grafana_active or
                           not state.metrics_up or not state.datasource_ok or not state.domains_ready or
-                          not state.node_ready or not state.alertmanager_ready),
+                          not state.node_ready or not state.alertmanager_ready or not state.dashboards_ready),
     }
 
 

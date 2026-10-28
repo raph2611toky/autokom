@@ -54,3 +54,7 @@ Les scripts spécialisés restent disponibles dans `scripts/install/` et `script
 - Une vérification via fichier de provisioning Grafana ne prouve pas à elle seule l'authentification et l'accès réel à la source : utiliser aussi l'API Grafana pendant la configuration et la validation fonctionnelle.
 
 Voir [documentation détaillée](docs/AUTOKOM-CLI.md).
+
+## Observabilité v17
+
+Les dashboards Serveur/Jenkins/Docker/Collecte sont provisionnés pendant `autokom configure observability`. cAdvisor est proposé pour les métriques Docker. La fusion des règles vides, leur rechargement et leur contrôle via API sont corrigés. Voir [diagnostic, mise à jour et test SMTP de bout en bout](docs/OBSERVABILITY-v17.md).

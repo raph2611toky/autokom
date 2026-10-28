@@ -867,6 +867,7 @@ def verify_grafana_datasource(username: str, password: str, attempts: int = 5):
 
 
 def ensure_grafana(args):
+    import observability_dashboards as dashboards
     prev = previous_state()
     if (prev.get('grafana_datasource_uid') and
             prev['grafana_datasource_uid'] != cfg().datasource_uid):
@@ -883,7 +884,7 @@ def ensure_grafana(args):
     if exists and active('grafana-server'):
         override_changed = not GRAFANA_DROPIN.exists() or GRAFANA_DROPIN.read_text() != unit_override_grafana(args.grafana_domain)
         ds_changed = not GRAFANA_DS.exists() or GRAFANA_DS.read_text() != datasource_yaml()
-        if (override_changed or ds_changed) and not yesno('Grafana existant : confirmer mise à jour, source et redémarrage ?', False, noninteractive=args.non_interactive):
+        if (override_changed or ds_changed or dashboards.needs_update(cfg().datasource_uid,cfg().jenkins_job)) and not yesno('Grafana existant : confirmer mise à jour, source et redémarrage ?', False, noninteractive=args.non_interactive):
             raise SetupError('Grafana existant conservé : modification non autorisée')
     changed_override = owned_write(GRAFANA_DROPIN, unit_override_grafana(args.grafana_domain))
     run(['systemctl', 'daemon-reload'])
@@ -907,6 +908,7 @@ def ensure_grafana(args):
         run(['apt-get', 'install', '-y', '--no-install-recommends', 'grafana'], timeout=420)
     # Do not modify any non-AUTOKOM managed provisioning file.
     changed = owned_write(GRAFANA_DS, datasource_yaml())
+    changed = dashboards.provision(sys.modules[__name__]) or changed
     if changed or changed_override or not active('grafana-server') or not exists:
         run(['systemctl', 'restart', 'grafana-server'], timeout=140)
     else:
@@ -922,6 +924,7 @@ def ensure_grafana(args):
     auth = grafana_credentials(fresh, args)
     if auth:
         verify_grafana_datasource(*auth)
+        dashboards.verify(sys.modules[__name__],auth)
     else:
         out('!', 'Grafana existant : source présente sur disque ; API non vérifiée sans identifiants')
     out('✓', 'Grafana opérationnel ; provisionnement de la source Prometheus contrôlé')
@@ -1469,6 +1472,8 @@ def main(argv=None):
     # Additional services are strictly opt-in and do not alter existing accounts.
     from observability_extras import ensure_node, ensure_alertmanager
     ensure_node(sys.modules[__name__], args)
+    from observability_docker import ensure_cadvisor
+    ensure_cadvisor(sys.modules[__name__], args)
     ensure_alertmanager(sys.modules[__name__], args)
     # Final functional check: Prometheus must actually scrape the Jenkins job.
     seen = False
