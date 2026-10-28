@@ -28,7 +28,9 @@ from contextlib import contextmanager
 from dataclasses import replace
 from urllib.parse import urlsplit
 from observability_config import Settings, ConfigError, load as load_settings, validate as validate_settings
-from tool_banner import render as autokom_banner, first_install, section
+from tool_banner import render as autokom_banner, first_install, section, Activity
+from jenkins_network import private_listener
+from domain_validation import DomainRoutingError, check_direct_ec2_domain, check_http01_local
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -270,9 +272,8 @@ def assert_private(port):
     addresses = listener(port)
     if not addresses:
         raise SetupError(f'Aucun service sur le port {port}')
-    for value in addresses:
-        if not (value.startswith('127.0.0.1:') or value.startswith('[::1]:')):
-            raise SetupError(f'Port {port} NON PRIVÉ : {value}; installation interrompue')
+    if not private_listener(addresses):
+        raise SetupError(f'Port {port} NON PRIVÉ : {", ".join(addresses)}; installation interrompue')
     out('✓', f'TCP/{port} limité à loopback : {", ".join(addresses)}')
 
 
@@ -727,23 +728,25 @@ def grafana_credentials(is_fresh, args):
 
 
 def verify_grafana_datasource(username: str, password: str, attempts: int = 5):
-    """Confirme par API la datasource reelle (type et URL), sans imprimer de secret."""
-    for attempt in range(attempts):
-        status, raw = grafana_api(username, password,
-                                  '/api/datasources/uid/' + cfg().datasource_uid)
-        if status == 200:
-            try:
-                ds = json.loads(raw)
-            except (ValueError, TypeError) as error:
-                raise SetupError('Grafana API : réponse datasource invalide') from error
-            if (not isinstance(ds, dict) or ds.get('type') != 'prometheus'
-                    or ds.get('url') != cfg().prometheus_base):
-                raise SetupError('Grafana API : type ou URL de la source non conforme')
-            out('✓', f'Grafana API : source Prometheus vérifiée ({cfg().prometheus_base})')
-            return
-        if attempt < attempts - 1:
-            time.sleep(2)
-    raise SetupError('Grafana API : datasource AUTOKOM introuvable après provisionnement')
+    """Confirme la datasource par API après le provisioning, sans afficher de secret."""
+    with Activity('Vérification de la datasource Grafana', delay=0.4):
+        for attempt in range(attempts):
+            status, raw = grafana_api(username, password,
+                                      '/api/datasources/uid/' + cfg().datasource_uid)
+            if status == 200:
+                try:
+                    ds = json.loads(raw)
+                except (ValueError, TypeError) as error:
+                    raise SetupError('Grafana API : réponse datasource invalide') from error
+                if (not isinstance(ds, dict) or ds.get('type') != 'prometheus'
+                        or ds.get('url') != cfg().prometheus_base):
+                    raise SetupError('Grafana API : type ou URL de la source non conforme')
+                break
+            if attempt < attempts - 1:
+                time.sleep(2)
+        else:
+            raise SetupError('Grafana API : datasource AUTOKOM introuvable après provisionnement')
+    out('✓', f'Grafana API : source Prometheus vérifiée ({cfg().prometheus_base})')
 
 
 def ensure_grafana(args):
@@ -775,8 +778,9 @@ def ensure_grafana(args):
         key.parent.mkdir(parents=True, exist_ok=True)
         if not key.exists():
             # Download via HTTPS and verify content is a public OpenPGP key.
-            p = urllib.request.urlopen('https://apt.grafana.com/gpg-full.key', timeout=30)
-            key_data = p.read(120000)
+            with Activity('Téléchargement de la clé officielle Grafana', delay=0.4):
+                with urllib.request.urlopen('https://apt.grafana.com/gpg-full.key', timeout=30) as p:
+                    key_data = p.read(120000)
             if b'BEGIN PGP PUBLIC KEY BLOCK' not in key_data:
                 raise SetupError('Clé Grafana téléchargée invalide')
             owned_write(key, key_data.decode('ascii'))
@@ -790,12 +794,13 @@ def ensure_grafana(args):
         run(['systemctl', 'restart', 'grafana-server'], timeout=140)
     else:
         run(['systemctl', 'start', 'grafana-server'])
-    for _ in range(30):
-        if get_local(cfg().grafana_base + '/api/health')[0] == 200:
-            break
-        time.sleep(1)
-    else:
-        raise SetupError(f'Grafana ne répond pas sur {cfg().grafana_base}')
+    with Activity('Attente du démarrage de Grafana', delay=0.4):
+        for _ in range(30):
+            if get_local(cfg().grafana_base + '/api/health')[0] == 200:
+                break
+            time.sleep(1)
+        else:
+            raise SetupError(f'Grafana ne répond pas sur {cfg().grafana_base}')
     assert_private(cfg().grafana_port)
     auth = grafana_credentials(fresh, args)
     if auth:
@@ -868,7 +873,7 @@ def ensure_private_jenkins(args):
             return
         raise SetupError(f'Jenkins déjà actif, mais aucun écouteur TCP/{cfg().jenkins_port}. '
                          'Configurer son port via le module Jenkins puis relancer. Pas de migration implicite.')
-    if ports and all(x.startswith('127.0.0.1:') or x.startswith('[::1]:') for x in ports):
+    if private_listener(ports):
         out('✓', 'Jenkins direct écoute uniquement sur loopback')
         return
     if args.mode == 'check':
@@ -886,11 +891,12 @@ def ensure_private_jenkins(args):
     run(['systemctl', 'daemon-reload'])
     out('!', 'Redémarrage Jenkins explicitement autorisé (jobs actifs à vérifier)')
     run(['systemctl', 'restart', 'jenkins'], timeout=180)
-    for _ in range(30):
-        current = listener(cfg().jenkins_port)
-        if current and all(x.startswith('127.0.0.1:') or x.startswith('[::1]:') for x in current):
-            break
-        time.sleep(2)
+    with Activity('Vérification de l’écoute Jenkins après redémarrage', delay=0.4):
+        for _ in range(30):
+            current = listener(cfg().jenkins_port)
+            if private_listener(current):
+                break
+            time.sleep(2)
     assert_private(cfg().jenkins_port)
 
 
@@ -960,7 +966,8 @@ def harden_public_jenkins(args):
 def ensure_jenkins_exporter(args):
     if not active('jenkins'):
         raise SetupError('Jenkins doit être actif avant Prometheus/Grafana')
-    code, sample = get_local(cfg().jenkins_metrics_url)
+    with Activity('Contrôle de l’exporter Jenkins', delay=0.4):
+        code, sample = get_local(cfg().jenkins_metrics_url)
     if code == 200 and ('# HELP ' in sample or '# TYPE ' in sample):
         out('✓', 'Jenkins exporte déjà /prometheus/')
         return None
@@ -988,11 +995,12 @@ def ensure_jenkins_exporter(args):
                 cli(auth_file, ['safe-restart'], timeout=50, status='Redémarrage sécurisé Jenkins')
             else:
                 raise SetupError('Plugin installé mais redémarrage non autorisé : relancer après redémarrage Jenkins')
-        for _ in range(60):
-            if get_local(cfg().jenkins_metrics_url)[0] in (200, 401, 403):
-                break
-            time.sleep(2)
-        code, sample = get_local(cfg().jenkins_metrics_url)
+        with Activity('Attente du redémarrage de l’exporter Jenkins', delay=0.4):
+            for _ in range(60):
+                if get_local(cfg().jenkins_metrics_url)[0] in (200, 401, 403):
+                    break
+                time.sleep(2)
+            code, sample = get_local(cfg().jenkins_metrics_url)
     if code == 200 and ('# HELP ' in sample or '# TYPE ' in sample):
         out('✓', 'Jenkins exporter opérationnel')
         return None
@@ -1043,6 +1051,23 @@ def check_only(args):
     out('✓', 'Simulation terminée : lancer --apply seulement après vérification')
 
 
+def prompt_domain(label, *, max_attempts=3):
+    """Un choix « Oui, domaine » ne doit jamais accepter un champ vide."""
+    for number in range(1, max_attempts + 1):
+        response = prompt_text(label, hint='Nom DNS complet, ex. metrics.exemple.com (sans https://)')
+        try:
+            domain = validate_domain(response)
+            if not domain:
+                raise SetupError('Domaine obligatoire après sélection « Oui »')
+            return domain
+        except SetupError as exc:
+            remaining = max_attempts - number
+            if not remaining:
+                raise
+            out('!', f'{exc} · {remaining} essai(s) restant(s)')
+    raise SetupError('Domaine invalide')
+
+
 def interactive_options(args):
     if args.non_interactive:
         args.prometheus_domain = validate_domain(args.prometheus_domain)
@@ -1050,19 +1075,16 @@ def interactive_options(args):
         return
     if not args.prometheus_domain:
         if yesno('Prometheus dispose-t-il d’un domaine HTTPS ?', False):
-            args.prometheus_domain = validate_domain(prompt_text('Domaine Prometheus', hint='Ex. prometheus.exemple.com. Ne pas saisir https://'))
+            args.prometheus_domain = prompt_domain('Domaine Prometheus')
     if not args.grafana_domain:
         if yesno('Grafana dispose-t-il d’un domaine HTTPS ?', False):
-            args.grafana_domain = validate_domain(prompt_text('Domaine Grafana', hint='Ex. grafana.exemple.com. Ne pas saisir https://'))
+            args.grafana_domain = prompt_domain('Domaine Grafana')
     if args.prometheus_domain == args.grafana_domain and args.prometheus_domain:
         raise SetupError('Prometheus et Grafana ne peuvent pas utiliser le même domaine')
     if (args.prometheus_domain or args.grafana_domain) and not args.email:
         # cert issuance requires email only for new domains; existing domains don't.
         if any(not existing_vhosts(d) for d in [args.prometheus_domain, args.grafana_domain] if d):
             args.email = prompt_text('E-mail Let’s Encrypt', hint='Pour certificats nouveaux et alertes de renouvellement')
-    if args.prometheus_domain and args.mode == 'apply' and not PROM_HTPASSWD.exists():
-        args.prometheus_user = prompt_text('Utilisateur Prometheus HTTPS', default='metricsadmin', hint='Authentification HTTP bcrypt gérée par Nginx')
-        args.prometheus_password = password_twice('Prometheus HTTPS')
 
 
 def preflight(args):
@@ -1085,6 +1107,44 @@ def preflight(args):
             raise SetupError(f'TCP/{port} est déjà occupé par un service inconnu : ne pas écraser')
 
 
+def preflight_domains(args):
+    """Contrôles réseau avant tout redémarrage/installation/Certbot.
+
+    Sur EC2 direct, DNS A doit pointer vers l'IP publique IMDSv2.
+    Pour les déploiements ALB/CDN, préférer un profil d'infrastructure dédié.
+    """
+    requested = [x for x in (args.prometheus_domain, args.grafana_domain) if x]
+    if not requested:
+        return
+    out('›', 'Vérification DNS des domaines et de l’IP publique AWS…')
+    for domain in requested:
+        with Activity(f'DNS / IP publique EC2 · {domain}', delay=0.4):
+            try:
+                ips = check_direct_ec2_domain(domain, expected_ipv4=args.public_ip)
+            except DomainRoutingError as exc:
+                raise SetupError(str(exc)) from exc
+        out('✓', f'{domain} → {", ".join(ips)} (DNS conforme à l’instance)')
+    with Activity('Recherche des domaines Nginx existants', delay=0.4):
+        needs_certificate = any(not existing_vhosts(domain) for domain in requested)
+    if needs_certificate:
+        with Activity('Contrôle local du port 80 pour HTTP-01', delay=0.4):
+            try:
+                check_http01_local()
+            except DomainRoutingError as exc:
+                raise SetupError(str(exc)) from exc
+        out('✓', 'Nginx/TCP 80 accessible localement')
+        out('!', 'HTTP-01 doit aussi être joignable depuis Internet (AWS SG/UFW) ; Certbot le vérifiera')
+
+
+def interactive_prometheus_password(args):
+    """Les secrets sont demandés seulement APRÈS validation des domaines."""
+    if (args.prometheus_domain and args.mode == 'apply' and
+            not PROM_HTPASSWD.exists()):
+        args.prometheus_user = prompt_text('Utilisateur Prometheus HTTPS',
+            default='metricsadmin', hint='Authentification Nginx ; identifiants locaux')
+        args.prometheus_password = password_twice('Prometheus HTTPS', args.non_interactive)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='AUTOKOM Phase 3 — Jenkins/Prometheus/Grafana')
     mode_flags = parser.add_mutually_exclusive_group()
@@ -1097,6 +1157,8 @@ def main(argv=None):
     parser.add_argument('--grafana-domain', default=None)
     parser.add_argument('--email', default=None)
     parser.add_argument('--grafana-user', default='')
+    parser.add_argument('--public-ip', default=None,
+                        help='IP publique IPv4 directe, seulement si IMDSv2 indisponible (jamais une IP privée)')
     parser.add_argument('--config', default=os.environ.get('AUTOKOM_OBSERVABILITY_CONFIG'),
                         help='Fichier INI privé de surcharges non sensibles')
     parser.add_argument('--set', action='append', default=[], metavar='SECTION.KEY=VALUE',
@@ -1136,9 +1198,11 @@ def main(argv=None):
                                           grafana_domain=args.grafana_domain, email=args.email))
     out('›', f'Ports actifs ciblés : Jenkins {cfg().jenkins_port} · Prometheus {cfg().prometheus_port} · Grafana {cfg().grafana_port}')
     preflight(args)
+    preflight_domains(args)
     if args.mode == 'check':
         check_only(args)
         return 0
+    interactive_prometheus_password(args)
     ensure_private_jenkins(args)
     harden_public_jenkins(args)
     auth = ensure_jenkins_exporter(args)
@@ -1153,20 +1217,22 @@ def main(argv=None):
     configure_nginx(args.grafana_domain, cfg().grafana_port, 'grafana', args)
     # Final functional check: Prometheus must actually scrape the Jenkins job.
     seen = False
-    for attempt in range(4):
-        status, payload = get_local(cfg().prometheus_base + '/api/v1/targets')
-        if status == 200:
-            try:
-                targets = json.loads(payload).get('data', {}).get('activeTargets', [])
-                seen = any(t.get('health') == 'up' and
-                           (t.get('labels', {}).get('job') == cfg().jenkins_job or
-                            t.get('discoveredLabels', {}).get('job') == cfg().jenkins_job)
-                           for t in targets)
-            except (ValueError, TypeError, AttributeError):
-                seen = False
-            if seen:
-                break
-        time.sleep(10)
+    with Activity('Collecte Jenkins → Prometheus (cible UP)', delay=0.4):
+        for attempt in range(4):
+            status, payload = get_local(cfg().prometheus_base + '/api/v1/targets')
+            if status == 200:
+                try:
+                    targets = json.loads(payload).get('data', {}).get('activeTargets', [])
+                    seen = any(t.get('health') == 'up' and
+                               (t.get('labels', {}).get('job') == cfg().jenkins_job or
+                                t.get('discoveredLabels', {}).get('job') == cfg().jenkins_job)
+                               for t in targets)
+                except (ValueError, TypeError, AttributeError):
+                    seen = False
+                if seen:
+                    break
+            if attempt < 3:
+                time.sleep(10)
     if not seen:
         raise SetupError('Scrape Jenkins non confirmé UP dans Prometheus : vérifier /targets, credentials et le plugin')
     else:
