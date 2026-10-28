@@ -20,6 +20,7 @@ import smtplib
 import ssl
 import tempfile
 import sys
+import termios
 from cli_colors import pretty_print as print
 import time
 from email.message import EmailMessage
@@ -67,17 +68,100 @@ def _write(path,obj):
     finally:
         if os.path.exists(tmp):os.unlink(tmp)
 
-def _tty_secret(label):
+def _tty_open():
+    """Use the same low-level /dev/tty access as AUTOKOM's working menus.
+
+    TextIOWrapper('r+') asks whether a character device is seekable on some
+    systems; it is not. Do not use open('/dev/tty', 'r+') for prompts.
+    """
     try:
-        with open('/dev/tty','r+') as tty:return getpass.getpass(label+': ',stream=tty)
-    except (OSError,EOFError) as exc:raise SecurityError('Terminal privé requis (pas de secret dans les arguments)') from exc
+        fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
+        if not os.isatty(fd):
+            os.close(fd)
+            raise SecurityError('Terminal interactif requis (TTY non détecté)')
+        return fd
+    except OSError as exc:
+        raise SecurityError('Terminal interactif requis (accès /dev/tty impossible)') from exc
+
 
 def _tty_text(label):
+    # Reuse the interactive AUTOKOM input primitive, which works after pick().
     try:
-        with open('/dev/tty','r+') as tty:
-            tty.write('  '+label+': ');tty.flush()
-            return tty.readline().strip()
-    except OSError as exc:raise SecurityError('Terminal interactif requis') from exc
+        from menu import ask
+        return ask(label, max_bytes=1024)
+    except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+        raise SecurityError('Saisie au terminal impossible : '+str(exc)) from exc
+
+
+def _tty_secret(label):
+    """Prompt using os.open, suppress TTY echo, restore settings on ALL exits."""
+    fd = _tty_open()
+    saved = None
+    try:
+        saved = termios.tcgetattr(fd)
+        attrs = termios.tcgetattr(fd)
+        attrs[3] &= ~(termios.ECHO | termios.ECHONL)
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        os.write(fd, ('  '+label+': ').encode('utf-8'))
+        result = bytearray()
+        while True:
+            chunk = os.read(fd, 1)
+            if not chunk:
+                raise SecurityError('Saisie interrompue : terminal fermé')
+            if chunk in (b'\r', b'\n'):
+                break
+            result.extend(chunk)
+            if len(result) > 4096:
+                raise SecurityError('Secret trop long')
+        try:
+            return result.decode('utf-8')
+        except UnicodeError as exc:
+            raise SecurityError('Encodage du secret non valide') from exc
+    except OSError as exc:
+        raise SecurityError('Saisie de secret impossible sur le terminal') from exc
+    finally:
+        if saved is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        try:
+            os.write(fd, b'\r\n')
+        except OSError:
+            pass
+        os.close(fd)
+
+
+def _smtp_values(conf):
+    """Canonical EMAIL_* fields and backward compatibility with v28 secrets."""
+    if not conf:
+        raise SecurityError('SMTP non configuré : sudo autokom auth smtp')
+    mapping = {
+        'host': conf.get('EMAIL_HOST', conf.get('host')),
+        'port': conf.get('EMAIL_PORT', conf.get('port', 587)),
+        'login': conf.get('EMAIL_LOGIN', conf.get('username', '')),
+        'password': conf.get('EMAIL_MDP', conf.get('password', '')),
+        'sender': conf.get('EMAIL_FROM', conf.get('sender')),
+        'admin': conf.get('EMAIL_ADMIN', conf.get('admin', '')),
+    }
+    return mapping
+
+
+def _smtp_connection(conf):
+    """Enforce verified TLS: implicit TLS 465 or mandatory STARTTLS otherwise."""
+    host = conf['host']
+    port = int(conf['port'])
+    ctx = ssl.create_default_context()
+    if port == 465:
+        return smtplib.SMTP_SSL(host, port, timeout=12, context=ctx)
+    return smtplib.SMTP(host, port, timeout=12)
+
+
+def _smtp_secure(server, conf):
+    """Establish mandatory TLS before sending credentials or email."""
+    server.ehlo()
+    if int(conf['port']) != 465:
+        server.starttls(context=ssl.create_default_context())
+        server.ehlo()
+    if conf.get('login'):
+        server.login(conf['login'], conf['password'])
 
 def _password_new():
     first=_tty_secret('Passphrase AUTOKOM (14 caractères minimum)')
@@ -134,24 +218,26 @@ def authorize(action='opération sensible', *, require_setup=True):
         return True
 
 def _mail_code(address):
-    conf=_read(SMTP)
-    if not conf:raise SecurityError('SMTP non configuré : sudo autokom auth smtp')
-    code=f'{secrets.randbelow(1_000_000):06d}'
-    salt=secrets.token_bytes(16)
-    _write(OTP,{'salt':salt.hex(),'hash':hashlib.sha256(salt+code.encode()).hexdigest(),
-                'email':address,'expires_at':time.time()+600,'attempts':0})
-    msg=EmailMessage()
-    msg['From']=conf['sender'];msg['To']=address;msg['Subject']='AUTOKOM · Code de vérification'
+    conf = _smtp_values(_read(SMTP))
+    code = f'{secrets.randbelow(1_000_000):06d}'
+    salt = secrets.token_bytes(16)
+    _write(OTP, {'salt':salt.hex(),'hash':hashlib.sha256(salt+code.encode()).hexdigest(),
+                 'email':address,'expires_at':time.time()+600,'attempts':0})
+    msg = EmailMessage()
+    msg['From'] = conf['sender']
+    msg['To'] = address
+    msg['Subject'] = 'AUTOKOM · Code de vérification'
     msg.set_content('Code AUTOKOM : '+code+'\nValable 10 minutes et une seule fois.\n')
     try:
-        with smtplib.SMTP(conf['host'],int(conf['port']),timeout=12) as server:
-            server.ehlo();server.starttls(context=ssl.create_default_context());server.ehlo()
-            if conf.get('username'):server.login(conf['username'],conf['password'])
+        with _smtp_connection(conf) as server:
+            _smtp_secure(server, conf)
             server.send_message(msg)
-    except (OSError,smtplib.SMTPException,ssl.SSLError) as exc:
-        try:OTP.unlink(missing_ok=True)
-        except OSError:pass
-        raise SecurityError('Envoi OTP SMTP TLS impossible : aucun e-mail vérifié') from exc
+    except (OSError, smtplib.SMTPException, ssl.SSLError) as exc:
+        try:
+            OTP.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise SecurityError('Envoi OTP SMTP sécurisé impossible : aucun e-mail vérifié') from exc
 
 def _check_code(address):
     with _lock():
@@ -170,9 +256,14 @@ def setup():
     require_root()
     with _lock():
         if configured():raise SecurityError('Authentification déjà configurée : utiliser change ou reset')
+    # Validate the dependency BEFORE asking the operator to type a passphrase.
+    smtp_conf = _read(SMTP)
+    smtp = _smtp_values(smtp_conf)
     email=_tty_text('Adresse e-mail de récupération')
     email2=_tty_text('Confirmer l’adresse e-mail')
     if email!=email2 or not EMAIL.fullmatch(email):raise SecurityError('Adresse e-mail incorrecte ou confirmation différente')
+    if smtp['admin'] and email.casefold() != smtp['admin'].casefold():
+        raise SecurityError('Adresse de récupération différente de EMAIL_ADMIN configuré dans SMTP')
     pwd=_password_new()
     _mail_code(email)
     print('  › Code envoyé via SMTP TLS ; vérification requise avant activation')
@@ -184,22 +275,42 @@ def setup():
 
 def smtp_setup():
     require_root()
-    if configured():authorize('modifier le serveur SMTP')
-    host=_tty_text('Serveur SMTP (DNS)')
-    port=_tty_text('Port SMTP STARTTLS [587]') or '587'
-    sender=_tty_text('Adresse expéditeur')
-    username=_tty_text('Identifiant SMTP (vide si aucun)')
-    if not re.fullmatch(r'[A-Za-z0-9.-]{1,253}',host) or not port.isdecimal() or not 1<=int(port)<=65535 or not EMAIL.fullmatch(sender):
-        raise SecurityError('Configuration SMTP invalide')
-    password=_tty_secret('Mot de passe SMTP (séparé de la passphrase AUTOKOM)') if username else ''
-    # Test STARTTLS and authentication before saving the delivery credentials.
+    if configured():
+        authorize('modifier le serveur SMTP')
+    print('  ◈ AUTOKOM / SMTP ET E-MAIL DE RÉCUPÉRATION')
+    print('  › TLS obligatoire : STARTTLS (587) ou TLS direct (465).')
+    host = _tty_text('EMAIL_HOST · Serveur SMTP (ex: smtp.example.org)')
+    port = _tty_text('EMAIL_PORT · Port SMTP [587]') or '587'
+    username = _tty_text('EMAIL_LOGIN · Identifiant SMTP (laisser vide si aucun)')
+    password = _tty_secret('EMAIL_MDP · Mot de passe SMTP (masqué)') if username else ''
+    sender = _tty_text('EMAIL_FROM · Adresse expéditeur des OTP')
+    admin = _tty_text('EMAIL_ADMIN · Adresse administrateur/récupération')
+    confirm = _tty_text('Confirmer EMAIL_ADMIN')
+    if (not re.fullmatch(r'[A-Za-z0-9.-]{1,253}',host) or
+        not port.isdecimal() or not 1 <= int(port) <= 65535 or
+        not EMAIL.fullmatch(sender) or not EMAIL.fullmatch(admin) or
+        admin != confirm or (username and not password)):
+        raise SecurityError('SMTP : hôte/port/adresse/confirmation invalide ou mot de passe vide')
+    state = _read(STATE)
+    if state and admin.casefold() != state.get('email', '').casefold():
+        raise SecurityError('EMAIL_ADMIN ne correspond pas à l’e-mail de récupération déjà vérifié : modification refusée')
+    conf = {'host': host, 'port': int(port), 'login': username, 'password': password,
+            'sender': sender, 'admin': admin}
+    from tool_banner import Activity
     try:
-        with smtplib.SMTP(host,int(port),timeout=12) as server:
-            server.ehlo();server.starttls(context=ssl.create_default_context());server.ehlo()
-            if username:server.login(username,password)
-    except (OSError,smtplib.SMTPException,ssl.SSLError) as exc:raise SecurityError('SMTP STARTTLS : test échoué ; configuration non enregistrée') from exc
-    _write(SMTP,{'host':host,'port':int(port),'sender':sender,'username':username,'password':password})
-    print('  ✓ SMTP TLS configuré ; identifiants SMTP root:0600 (nécessaires à l’envoi)')
+        with Activity('Vérification TLS et authentification du serveur SMTP'):
+            with _smtp_connection(conf) as server:
+                _smtp_secure(server, conf)
+    except (OSError, smtplib.SMTPException, ssl.SSLError) as exc:
+        raise SecurityError('SMTP : test TLS/authentification échoué ; aucune configuration enregistrée') from exc
+    # Exactly the requested keys, stored in a root-only JSON file. EMAIL_MDP
+    # is a reusable SMTP credential, so it cannot be hashed like the passphrase.
+    _write(SMTP, {
+        'EMAIL_HOST': host, 'EMAIL_PORT': int(port), 'EMAIL_LOGIN': username,
+        'EMAIL_MDP': password, 'EMAIL_FROM': sender, 'EMAIL_ADMIN': admin,
+    })
+    print('  ✓ SMTP TLS validé · paramètres enregistrés root:0600')
+    print('  ✓ EMAIL_ADMIN confirmé deux fois ; adresse non vérifiée par OTP avant « auth setup »')
 
 def recovery():
     require_root()
@@ -271,7 +382,12 @@ def main(argv=None):
         print('  ◈ AUTOKOM / AUTHENTIFICATION')
         print('  '+('✓ Configurée' if state else '! Non configurée'))
         print('  '+('✓ E-mail confirmé' if state.get('email_verified') else '! E-mail non vérifié'))
-        print('  '+('✓ SMTP prêt (configuration)' if SMTP.exists() else '! SMTP absent'))
+        conf = _smtp_values(_read(SMTP)) if SMTP.exists() else None
+        print('  '+('✓ SMTP prêt (configuration)' if conf else '! SMTP absent'))
+        if conf:
+            print('  › EMAIL_HOST: '+str(conf['host'])+' · EMAIL_PORT: '+str(conf['port']))
+            print('  › EMAIL_LOGIN: '+('configuré' if conf['login'] else 'non requis')+' · EMAIL_MDP: '+('protégé' if conf['password'] else 'non requis'))
+            print('  › EMAIL_FROM: '+str(conf['sender'])+' · EMAIL_ADMIN: '+('configuré' if conf['admin'] else 'non défini'))
         print('  '+('✓ Jeton Jenkins protégé' if JENKINS.exists() else '› Jeton Jenkins non configuré'))
         return 0
     if args.action=='smtp':smtp_setup()

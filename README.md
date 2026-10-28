@@ -101,3 +101,12 @@ Le module `logs` vérifie et crée le fournisseur partagé des dashboards, dépl
 ## Gestion des plugins Jenkins et Grafana (v27)
 
 Consulter [docs/TOOLS-PLUGINS-v27.md](docs/TOOLS-PLUGINS-v27.md) pour les menus interactifs, la recherche officielle, les opérations avec confirmation, les sauvegardes et les procédures de retour arrière.
+
+
+## AUTOKOM v29 — correction authentification SMTP/TTY
+
+Le menu `sudo autokom auth` et les commandes `smtp`/`setup` utilisent désormais
+la même ouverture de terminal que les autres menus AUTOKOM. Champs SMTP
+`EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_LOGIN`, `EMAIL_MDP`, `EMAIL_FROM`,
+`EMAIL_ADMIN` (avec double confirmation), STARTTLS 587 ou TLS direct 465.
+Documentation : `docs/AUTH-TTY-SMTP-v29.md`.

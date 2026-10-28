@@ -62,6 +62,7 @@ class AuthTests(unittest.TestCase):
         self.assertFalse(sec.OTP.exists())
         with self.assertRaisesRegex(sec.SecurityError,'absent ou expiré'):sec._check_code('test@example.org')
     def test_setup_confirms_email_twice_and_never_saves_passphrase(self):
+        sec._write(sec.SMTP, {'host':'smtp.example.org','port':587,'sender':'no-reply@example.org','username':'','password':''})
         data=iter(['user@example.org','user@example.org'])
         with mock.patch.object(sec,'_tty_text',side_effect=lambda label:next(data)), mock.patch.object(sec,'_password_new',return_value='my example passphrase is sufficiently long'), mock.patch.object(sec,'_mail_code') as send, mock.patch.object(sec,'_check_code'):
             sec.setup()
