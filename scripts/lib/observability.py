@@ -1051,21 +1051,31 @@ def check_only(args):
     out('✓', 'Simulation terminée : lancer --apply seulement après vérification')
 
 
-def prompt_domain(label, *, max_attempts=3):
-    """Un choix « Oui, domaine » ne doit jamais accepter un champ vide."""
-    for number in range(1, max_attempts + 1):
-        response = prompt_text(label, hint='Nom DNS complet, ex. metrics.exemple.com (sans https://)')
+def prompt_domain(label, *, max_attempts=3, expected_ipv4=None, unavailable=()):
+    """Valide chaque saisie AVANT de passer à la question suivante.
+
+    Refuse sans effet de bord : domaine vide, syntaxe erronée, DNS non résolu,
+    A/AAAA qui ne pointent pas vers l'EC2, domaine déjà utilisé par un autre
+    composant. Le compteur de tentatives reste volontairement invisible.
+    """
+    for _ in range(max_attempts):
+        response = prompt_text(
+            label, hint='Nom DNS complet (sans https://). Contrôle DNS/IP EC2 immédiat.')
         try:
             domain = validate_domain(response)
             if not domain:
                 raise SetupError('Domaine obligatoire après sélection « Oui »')
-            return domain
-        except SetupError as exc:
-            remaining = max_attempts - number
-            if not remaining:
-                raise
-            out('!', f'{exc} · {remaining} essai(s) restant(s)')
-    raise SetupError('Domaine invalide')
+            if domain in unavailable:
+                raise SetupError(f'{domain} est déjà réservé à un autre service AUTOKOM')
+            with Activity(f'Vérification DNS / IP publique EC2 · {domain}', delay=0.4):
+                addresses = check_direct_ec2_domain(domain, expected_ipv4=expected_ipv4)
+        except (SetupError, DomainRoutingError) as exc:
+            out('!', f'{label} : {exc}')
+            continue
+        out('✓', f'{domain} → {", ".join(addresses)} · DNS conforme à cette instance')
+        return domain
+    raise SetupError(f'{label} : domaine non validé après trois saisies ; '
+                     'corriger les enregistrements DNS A/AAAA et relancer AUTOKOM')
 
 
 def interactive_options(args):
@@ -1075,10 +1085,12 @@ def interactive_options(args):
         return
     if not args.prometheus_domain:
         if yesno('Prometheus dispose-t-il d’un domaine HTTPS ?', False):
-            args.prometheus_domain = prompt_domain('Domaine Prometheus')
+            args.prometheus_domain = prompt_domain('Domaine Prometheus', expected_ipv4=args.public_ip,
+                                                   unavailable={args.grafana_domain} if args.grafana_domain else ())
     if not args.grafana_domain:
         if yesno('Grafana dispose-t-il d’un domaine HTTPS ?', False):
-            args.grafana_domain = prompt_domain('Domaine Grafana')
+            args.grafana_domain = prompt_domain('Domaine Grafana', expected_ipv4=args.public_ip,
+                                                unavailable={args.prometheus_domain} if args.prometheus_domain else ())
     if args.prometheus_domain == args.grafana_domain and args.prometheus_domain:
         raise SetupError('Prometheus et Grafana ne peuvent pas utiliser le même domaine')
     if (args.prometheus_domain or args.grafana_domain) and not args.email:

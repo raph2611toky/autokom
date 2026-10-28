@@ -178,13 +178,14 @@ class TestPreflightFlow(unittest.TestCase):
             check.assert_not_called()
 
     def test_domain_prompt_retries_invalid_input(self):
-        with patch.object(obs, 'prompt_text', side_effect=['', 'https://invalid.test', 'metrics.example.com']) as prompt:
+        with patch.object(obs, 'prompt_text', side_effect=['', 'https://invalid.test', 'metrics.example.com']) as prompt, \
+             patch.object(obs, 'check_direct_ec2_domain', return_value=['8.8.8.8']):
             self.assertEqual(obs.prompt_domain('Domaine'), 'metrics.example.com')
             self.assertEqual(prompt.call_count, 3)
 
     def test_domain_prompt_three_errors(self):
         with patch.object(obs, 'prompt_text', side_effect=['', '', '']):
-            with self.assertRaisesRegex(obs.SetupError, 'obligatoire'):
+            with self.assertRaisesRegex(obs.SetupError, 'trois saisies'):
                 obs.prompt_domain('Domaine')
 
     def test_no_prometheus_password_prompt_in_check_mode(self):
