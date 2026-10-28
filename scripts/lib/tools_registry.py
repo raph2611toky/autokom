@@ -58,8 +58,8 @@ SPECS = (
     Tool('node-exporter','05 · Observabilité','Métriques de l’hôte',('prometheus-node-exporter',),'prometheus-node-exporter', (('/etc/default/prometheus-node-exporter','Variables service node exporter'),('/etc/systemd/system/prometheus-node-exporter.service.d/90-autokom.conf','Bind privé AUTOKOM')),docs='docs/OBSERVABILITY-OPERATIONS-v16.md'),
     Tool('alertmanager','05 · Observabilité','Routage des alertes',('prometheus-alertmanager',),'prometheus-alertmanager', (('/etc/prometheus/alertmanager.yml','Récepteurs et routage SMTP'),('/etc/prometheus/rules/autokom-alerts.yml','Règles d’alerte AUTOKOM'),('/etc/systemd/system/prometheus-alertmanager.service.d/90-autokom.conf','Bind local du service'),('/etc/prometheus/.autokom-smtp-password','Mot de passe SMTP : ne pas afficher')),docs='docs/OBSERVABILITY-OPERATIONS-v16.md'),
     # Stack de logs AUTOKOM : services Docker Compose, pas unités systemd.
-    Tool('loki','06 · Journalisation','Stockage et recherche LogQL',files=(('/etc/autokom/logs/loki.yaml','Paramètres Loki'),('/etc/autokom/logs/compose.yaml','Orchestration Docker Compose'),('/var/lib/grafana/dashboards/autokom/autokom-logs.json','Tableau de bord des logs')),docs='docs/LOGGING-DUAL-BACKEND-v18.md'),
-    Tool('alloy','06 · Journalisation','Collecteur de journaux Docker et système',files=(('/etc/autokom/logs/config.alloy','Pipeline Alloy'),('/etc/autokom/logs/compose.yaml','Orchestration Docker Compose')),docs='docs/LOGGING-DUAL-BACKEND-v18.md'),
+    Tool('loki','06 · Journalisation','Stockage et recherche LogQL',files=(('/etc/autokom/logs/loki.yaml','Paramètres Loki (Docker)'),('/etc/autokom/logs-native/loki.yaml','Paramètres Loki (systemd)'),('/var/lib/autokom/loki','Données Loki (systemd)'),('/etc/autokom/logs/compose.yaml','Orchestration Docker Compose'),('/var/lib/grafana/dashboards/autokom/autokom-logs.json','Tableau de bord des logs'),('/var/lib/grafana/dashboards/autokom/autokom-logging-health.json','Santé des logs (Grafana)'),('/etc/prometheus/rules/autokom-logging.yml','Alertes Loki/Alloy')),docs='docs/LOGGING-OBSERVABILITY-v21.md'),
+    Tool('alloy','06 · Journalisation','Collecteur de journaux Docker et système',files=(('/etc/autokom/logs/config.alloy','Pipeline Alloy (Docker)'),('/etc/autokom/logs-native/config.alloy','Pipeline Alloy (systemd)'),('/etc/systemd/system/alloy.service.d/90-autokom.conf','Override Alloy natif'),('/etc/autokom/logs/compose.yaml','Orchestration Docker Compose')),docs='docs/LOGGING-OBSERVABILITY-v21.md'),
     Tool('opensearch','06 · Journalisation','Moteur de recherche et indexation de logs',files=(('/etc/autokom/logs/compose.yaml','Orchestration Docker Compose'),('/etc/autokom/logs/.env','Secrets OpenSearch : accès restreint')),docs='docs/LOGGING-DUAL-BACKEND-v18.md'),
     Tool('data-prepper','06 · Journalisation','Pipeline OpenSearch de traitement des logs',files=(('/etc/autokom/logs/pipelines.yaml','Pipeline Data Prepper : contient des secrets'),('/etc/autokom/logs/compose.yaml','Orchestration Docker Compose')),docs='docs/LOGGING-DUAL-BACKEND-v18.md'),
     Tool('opensearch-dashboards','06 · Journalisation','Interface de recherche de logs OpenSearch',files=(('/etc/autokom/logs/compose.yaml','Orchestration Docker Compose'),),docs='docs/LOGGING-DUAL-BACKEND-v18.md'),
@@ -116,6 +116,11 @@ def logging_docker_state(name):
 
 def service_state(t):
     if t.name in LOG_DOCKER_SERVICES:
+        if t.name in ('loki','alloy'):
+            from logging_runtime import detected
+            if detected()=='systemd':
+                p=proc(['systemctl','is-active',t.name])
+                return p.stdout.strip() if p and p.stdout.strip() else 'indisponible'
         return logging_docker_state(t.name)
     if t.name == 'ufw':
         result=proc(['ufw','status'])
@@ -230,6 +235,11 @@ def show(name):
     if t.unit:
         overview.append(('Unité systemd', t.unit + '.service'))
     table(['Propriété', 'Valeur'], overview)
+
+    if name in LOG_DOCKER_SERVICES:
+        from logging_health import runtime_rows
+        print('\n  MODE · CONNECTIVITÉ · ENDPOINTS ET MÉTRIQUES (lecture seule)')
+        table(['Élément', 'Valeur'], runtime_rows(name))
 
     print('\n  CONFIGURATION ET DONNÉES')
     files=[]

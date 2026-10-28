@@ -23,6 +23,8 @@ def tty_session(keys: bytes) -> tuple[int, str]:
     """Fork with controlling TTY; children never access real infra."""
     pid, fd = pty.fork()
     if pid == 0:
+        # pytest capture redirects sys.stdout; bind the child output to its PTY.
+        sys.stdout = os.fdopen(os.dup(1), "w", buffering=1)
         try:
             with mock.patch.object(logging_stack,'platform_resources',return_value=(int(7.6*GIB),50*GIB)):
                 result=cli.choose_logs_backend('both')
@@ -56,7 +58,9 @@ def tty_session(keys: bytes) -> tuple[int, str]:
         if not sent:
             raise AssertionError('Menu not displayed: '+data.decode(errors='replace'))
     finally:
-        os.close(fd)
+        # Attendre la terminaison AVANT de fermer le PTY : la fermeture du
+        # terminal maître peut envoyer SIGHUP au processus fils, même après
+        # l'écriture de OUTCOME (course observée sous charge CI).
         if b'OUTCOME=' in data:
             # The child emits OUTCOME immediately before os._exit(0). Waiting
             # for that exit prevents a false failure caused by WNOHANG racing
@@ -67,6 +71,16 @@ def tty_session(keys: bytes) -> tuple[int, str]:
             if not ended:
                 os.kill(pid,9)
                 _,status=os.waitpid(pid,0)
+        # Le fils peut avoir écrit la dernière ligne sur le PTY pendant
+        # waitpid ; drainer les octets restants avant de fermer le maître.
+        for _ in range(20):
+            ready,_,_=select.select([fd],[],[],0.02)
+            if not ready: break
+            try: part=os.read(fd,8192)
+            except OSError: break
+            if not part: break
+            data.extend(part)
+        os.close(fd)
     return status,data.decode(errors='replace')
 
 

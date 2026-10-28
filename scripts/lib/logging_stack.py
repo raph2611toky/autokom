@@ -296,7 +296,7 @@ services:
     ports: ["127.0.0.1:3100:3100"]
     labels: {{com.autokom.logs.exclude: "true"}}
     security_opt: [no-new-privileges:true]
-    networks: [logging]
+    networks: [logging, loopback]
   alloy:
     image: {IMAGES['alloy']}
     restart: unless-stopped
@@ -312,7 +312,7 @@ services:
     ports: ["127.0.0.1:12345:12345"]
     labels: {{com.autokom.logs.exclude: "true"}}
     security_opt: [no-new-privileges:true]
-    networks: [logging]
+    networks: [logging, loopback]
   opensearch:
     profiles: [opensearch]
     image: {IMAGES['opensearch']}
@@ -330,7 +330,7 @@ services:
     ports: ["127.0.0.1:9200:9200"]
     labels: {{com.autokom.logs.exclude: "true"}}
     security_opt: [no-new-privileges:true]
-    networks: [logging]
+    networks: [logging, loopback]
   opensearch-dashboards:
     profiles: [opensearch]
     image: {IMAGES['dashboards']}
@@ -341,7 +341,7 @@ services:
     depends_on: [opensearch]
     labels: {{com.autokom.logs.exclude: "true"}}
     security_opt: [no-new-privileges:true]
-    networks: [logging]
+    networks: [logging, loopback]
   data-prepper:
     profiles: [opensearch]
     image: {IMAGES['prepper']}
@@ -362,6 +362,13 @@ volumes:
 networks:
   logging:
     internal: true
+  # Docker Engine 29.x peut ignorer ports: sur un service uniquement
+  # connecte a un bridge internal. Ce second reseau assure le NAT host.
+  # Les publications restent limitees a 127.0.0.1 (jamais WAN).
+  loopback:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"
 '''
     return content
 
@@ -578,12 +585,20 @@ def ready(backend):
     try:
         p=run(docker(*profile_args(backend),'ps','--status','running','--services'),timeout=15)
     except (OSError,subprocess.TimeoutExpired):return False
-    return p.returncode==0 and set(desired_services(backend))<=set(p.stdout.splitlines())
+    if p.returncode or not set(desired_services(backend))<=set(p.stdout.splitlines()):
+        return False
+    # Docker peut déclarer `running` sans publier ses ports (bridge internal).
+    # Les commandes install/status ne doivent donc jamais dire conforme sans HTTP.
+    from logging_health import http_status
+    if backend in ('loki','both'):
+        return http_status('loki')['ok'] and http_status('alloy')['ok']
+    return http_status('alloy')['ok']
 
 
 def installed_backend():
     """Determine installed outputs from the current managed Alloy config."""
-    path = STATE_DIR / 'config.alloy'
+    from logging_runtime import detected, NATIVE
+    path = (NATIVE / 'config.alloy') if detected()=='systemd' else (STATE_DIR / 'config.alloy')
     if not path.is_file() or path.is_symlink():
         raise LogError('Installation logs absente ; exécuter sudo autokom install logs')
     data=path.read_text()
@@ -604,7 +619,9 @@ def backend_state():
 
 def use_backend(name):
     if name not in ('loki','opensearch'): raise LogError('Backend inconnu : '+name)
-    if not ready(name): raise LogError('Backend non démarré ; lancer sudo autokom install --only logs --backend both')
+    from logging_runtime import detected, runtime_ready
+    mode = detected()
+    if not runtime_ready(name, mode): raise LogError('Backend non démarré ; vérifier sudo autokom logs doctor')
     PREFERENCE.parent.mkdir(parents=True,exist_ok=True)
     if PREFERENCE.is_symlink(): raise LogError('État symbolique non autorisé')
     atomic_write(PREFERENCE,json.dumps({'schema':1,'backend':name},indent=2)+'\n',0o644)
@@ -658,17 +675,70 @@ def provision_grafana():
     print('  › Redémarrer Grafana de façon contrôlée si la datasource Loki n’apparaît pas (provisioning datasources au démarrage).')
 
 
+
+def apply_docker(backend):
+    preflight(backend)
+    validate_alloy(backend)
+    print('  ✓ Configuration Alloy validée avec l’image conteneur épinglée')
+    secret=install_files(backend)
+    # Never print secret / JSON with credentials.
+    p=run(docker(*profile_args(backend),'config','-q'))
+    if p.returncode: raise LogError('Compose invalide (configuration sauvegardée, aucun conteneur démarré). Exécuter docker compose config -q pour le diagnostic local.')
+    p=run(docker(*profile_args(backend),'up','-d','--no-build'),timeout=600)
+    if p.returncode: raise LogError('Compose a échoué (code '+str(p.returncode)+'). Examiner docker compose logs localement sans publier de secrets.')
+    if backend in ('opensearch','both'):
+        provision_retention(secret)
+        print('  ✓ OpenSearch : politique ISM de rétention 14 jours confirmée')
+    if backend in ('loki','both'):
+        provision_grafana()
+        from logging_monitoring import apply as monitoring_apply
+        monitoring_apply()
+    else:
+        print('  › OpenSearch seul : aucun dashboard Grafana/Loki inutilisable n’est créé.')
+    # Ne jamais annoncer succes sans API joignable sur l'hote.
+    from logging_health import http_status
+    expected = ('loki','alloy') if backend in ('loki','both') else ('alloy',)
+    deadline = time.monotonic() + 45
+    broken = list(expected)
+    while time.monotonic() < deadline:
+        broken = [name for name in expected if not http_status(name)['ok']]
+        if not broken:
+            break
+        time.sleep(3)
+    if broken:
+        raise LogError('Conteneurs lancés mais endpoints locaux non joignables : '+', '.join(broken)+
+                       '. Vérifier autokom logs status et autokom tools show loki/alloy ; '
+                       'aucun service tiers n’a été redémarré.')
+    print('  ✓ Services démarrés et API locales vérifiées : '+', '.join(expected))
+    print('  › Vérifier ingestion réelle dans Grafana et OpenSearch Dashboards avant déclaration de conformité.')
+    return 0
+
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser(prog='autokom logging',description='Loki + Alloy et OpenSearch + Data Prepper + Dashboards')
-    parser.add_argument('action',nargs='?',choices=('status','use','reconcile','verify'),default='status')
-    parser.add_argument('choice',nargs='?',choices=('loki','opensearch'))
+    parser.add_argument('action',nargs='?',choices=('status','use','reconcile','verify','doctor','runtime'),default='status')
+    parser.add_argument('choice',nargs='?',choices=('loki','opensearch','docker','systemd'))
     parser.add_argument('--apply',action='store_true')
     parser.add_argument('--check',action='store_true')
     parser.add_argument('--backend',choices=BACKENDS,default='both',help='Composants à installer ; both par défaut')
+    parser.add_argument('--runtime',choices=('docker','systemd'),help='Exécution de Loki/Alloy : Docker Compose ou systemd')
     a=parser.parse_args(argv)
+    from logging_runtime import detected, runtime_ready, plan as runtime_plan, apply as apply_runtime, report as runtime_report, RuntimeErrorSafe
+    if a.action == 'runtime':
+        if not a.choice:
+            runtime_report()
+            if a.apply:raise LogError('Mode requis : autokom logs runtime docker|systemd --apply')
+            return 0
+        if a.choice not in ('docker','systemd'):raise LogError('Choisir docker ou systemd')
+        runtime_plan(a.choice)
+        if a.apply:
+            try:apply_runtime(a.choice,'loki')
+            except RuntimeErrorSafe as exc:raise LogError(str(exc)) from exc
+        return 0
     if a.action=='verify':
         if os.geteuid()!=0:raise LogError('sudo requis pour émettre la sonde et écrire son état')
-        if not ready('loki'):raise LogError('Loki non actif : ne pas lancer une sonde en vain')
+        if not runtime_ready('loki', detected()):raise LogError('Loki non actif : ne pas lancer une sonde en vain')
         from logs_canary import probe
         return probe()
     if a.action=='reconcile':
@@ -676,47 +746,43 @@ def main(argv=None):
         current = installed_backend()
         if not a.apply:
             print('  AUTOKOM LOGS / RECONCILIATION — lecture seule : '+current)
+            from logging_health import detail_table
+            detail_table(current)
             print('  › Pour appliquer sans supprimer de services : sudo autokom logs reconcile --apply')
             return 0
         a.backend=current
+        a.runtime=detected() if detected() in ('docker','systemd') else 'docker'
     if a.action=='use':
         if not a.choice: parser.error('use exige loki ou opensearch')
         if os.geteuid()!=0: raise LogError('sudo requis')
         use_backend(a.choice)
         return 0
     if a.apply:
-        if os.geteuid()!=0: raise LogError('sudo requis')
-        preflight(a.backend)
-        validate_alloy(a.backend)
-        print('  ✓ Configuration Alloy validée avec l’image conteneur épinglée')
-        secret=install_files(a.backend)
-        # Never print secret / JSON with credentials.
-        p=run(docker(*profile_args(a.backend),'config','-q'))
-        if p.returncode: raise LogError('Compose invalide (configuration sauvegardée, aucun conteneur démarré). Exécuter docker compose config -q pour le diagnostic local.')
-        p=run(docker(*profile_args(a.backend),'up','-d','--no-build'),timeout=600)
-        if p.returncode: raise LogError('Compose a échoué (code '+str(p.returncode)+'). Examiner docker compose logs localement sans publier de secrets.')
-        if a.backend in ('opensearch','both'):
-            provision_retention(secret)
-            print('  ✓ OpenSearch : politique ISM de rétention 14 jours confirmée')
-        if a.backend in ('loki','both'):
-            provision_grafana()
-            from logging_monitoring import apply as monitoring_apply
-            monitoring_apply()
-        else:
-            print('  › OpenSearch seul : aucun dashboard Grafana/Loki inutilisable n’est créé.')
-        print('  ✓ Services lancés : '+', '.join(desired_services(a.backend)))
-        print('  › Vérifier ingestion réelle dans Grafana et OpenSearch Dashboards avant déclaration de conformité.')
-        return 0
-    if a.action=='status' and (STATE_DIR/'config.alloy').is_file():
+        if os.geteuid()!=0:raise LogError('sudo requis')
+        mode = a.runtime or detected()
+        if mode in ('none','mixed'): mode = a.runtime or 'docker'
+        if mode=='systemd' or (mode=='docker' and detected()=='systemd'):
+            try:apply_runtime(mode,a.backend)
+            except RuntimeErrorSafe as exc:raise LogError(str(exc)) from exc
+            return 0
+        if detected() == 'mixed':raise LogError('Modes Docker et systemd en conflit : résolution manuelle nécessaire')
+        return apply_docker(a.backend)
+    if a.action in ('status','doctor') and (detected()=='systemd' or (STATE_DIR/'config.alloy').is_file()):
         a.backend=installed_backend()
+    runtime_report()
     print('  AUTOKOM logs | installation cible : '+a.backend+' | préférence : '+backend_state())
-    print('  Services actifs : '+('oui' if ready(a.backend) else 'non / non confirmé'))
+    mode=detected()
+    print('  Services actifs : '+('oui' if runtime_ready(a.backend,mode) else 'non / non confirmé'))
     for warning in resource_warnings(a.backend): print('  ! '+warning)
-    if a.action=='status' and (STATE_DIR/'config.alloy').is_file():
-        from logging_monitoring import report
-        report()
+    if a.action in ('status','doctor'):
+        from logging_health import detail_table
+        detail_table(a.backend)
+        if (STATE_DIR/'config.alloy').is_file():
+            from logging_monitoring import report
+            report()
     print('  Endpoints prévus : Loki http://127.0.0.1:3100 ; OpenSearch https://127.0.0.1:9200 ; Dashboards http://127.0.0.1:5601')
-    print('  Simulation en lecture seule ; pour installer : sudo autokom install --only logs --backend both')
+    print('  › Changer le mode : autokom logs runtime ; sudo autokom logs runtime systemd --apply')
+    print('  État en lecture seule ; en cas de panne : sudo autokom logs reconcile --check')
     return 0
 
 if __name__=='__main__':

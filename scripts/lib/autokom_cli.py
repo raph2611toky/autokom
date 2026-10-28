@@ -283,6 +283,28 @@ def choose_logs_backend(requested):
     return chosen
 
 
+def choose_logs_runtime(requested):
+    """Reuse the common AUTOKOM selector (arrows, number keys, Enter, q/0)."""
+    if requested in ('docker','systemd'):return requested
+    from logging_runtime import detected
+    current=detected()
+    if current=='mixed':raise CLIError('Loki/Alloy actifs en Docker et systemd : corriger ce conflit avant migration')
+    from menu import pick
+    choices=[('docker','Docker Compose — conteneurs gérés par AUTOKOM'),
+             ('systemd','Services Linux natifs — commandes loki/alloy + systemctl')]
+    default=2 if current=='systemd' else 1
+    try:
+        index=pick('AUTOKOM · Choisir le mode Loki + Alloy',
+                   [label + (' [actuel]' if mode==current else '') for mode,label in choices],
+                   default=default,cancel_label='Annuler sans modifier l’infrastructure')
+    except RuntimeError as exc:
+        raise CLIError('Terminal interactif requis, ou préciser --runtime docker|systemd') from exc
+    if index==0:raise KeyboardInterrupt
+    result=choices[index-1][0]
+    message('  ✓ Mode explicitement choisi : '+result)
+    return result
+
+
 def call_module(path: str, *args):
     target = ROOT / path
     if not target.is_file():
@@ -293,7 +315,7 @@ def call_module(path: str, *args):
         raise CLIError(f'Phase interrompue ({p.returncode}) : {LABELS.get(Path(path).stem, path)}')
 
 
-def apply_stage(stage, state, cfg, *, logs_backend='both'):
+def apply_stage(stage, state, cfg, *, logs_backend='both', logs_runtime='docker'):
     section(LABELS[stage], 'AUTOKOM · traitement uniquement des écarts')
     if stage == 'foundation':
         call_module('scripts/bootstrap/preflight.sh')
@@ -345,20 +367,21 @@ def apply_stage(stage, state, cfg, *, logs_backend='both'):
             raise CLIError('Jenkins doit être actif et privé avant Prometheus/Grafana')
         call_module('scripts/install/observability.sh', '--apply', '--interactive')
     elif stage == 'logs':
-        call_module('scripts/install/logs.sh', '--apply', '--backend', logs_backend)
+        call_module('scripts/install/logs.sh', '--apply', '--backend', logs_backend, '--runtime', logs_runtime)
 
 
 def perform(args, cfg):
     stages = selected(args)
-    if args.backend and 'logs' not in stages:
-        raise CLIError('--backend est réservé à la phase logs')
+    if (args.backend or args.runtime) and 'logs' not in stages:
+        raise CLIError('--backend et --runtime sont réservés à la phase logs')
     with Activity('Analyse de l’infrastructure'):
         state = snapshot(cfg)
     plan = actions(state)
     # Contrôle ciblé du backend plutôt que de considérer 'both' toujours requis.
     if 'logs' in stages:
-        from logging_stack import ready
-        plan['logs'] = not ready(args.backend or 'both')
+        from logging_runtime import detected, runtime_ready
+        mode = args.runtime or detected()
+        plan['logs'] = not runtime_ready(args.backend or ('loki' if mode=='systemd' else 'both'),mode)
     print_plan(state, plan, stages)
     if args.check:
         if 'logs' in stages:
@@ -374,25 +397,32 @@ def perform(args, cfg):
     if os.geteuid() != 0:
         raise CLIError('Utiliser sudo autokom install')
     logs_backend = args.backend or 'both'
-    if 'logs' in stages and plan['logs']:
-        logs_backend = choose_logs_backend(logs_backend)
+    logs_runtime = 'docker'
+    if 'logs' in stages:
+        logs_runtime = choose_logs_runtime(args.runtime)
+        if logs_runtime=='systemd' and args.backend is None:
+            logs_backend = 'loki'
+        else:
+            logs_backend = choose_logs_backend(logs_backend)
+        if logs_runtime=='systemd' and logs_backend!='loki':
+            raise CLIError('Mode systemd Loki+Alloy seulement ; OpenSearch/dual reste Docker')
     for index, stage in enumerate(stages, 1):
         with Activity(f'Contrôle {LABELS[stage]}'):
             state = snapshot(cfg)
-        should = (not __import__('logging_stack').ready(logs_backend)
+        should = (not __import__('logging_runtime').runtime_ready(logs_backend,logs_runtime)
                   if stage == 'logs' else actions(state)[stage])
         if not should:
             message(f'  - {LABELS[stage]} : déjà conforme, ignoré')
             phase_progress(index, len(stages), LABELS[stage], skipped=True)
             continue
-        apply_stage(stage, state, cfg, logs_backend=logs_backend)
+        apply_stage(stage, state, cfg, logs_backend=logs_backend,logs_runtime=logs_runtime)
         # Avancement par phases TERMINEES (pas un pourcentage temporel).
         # La conformité réelle de tous les services est revérifiée ensuite.
         message(f'  ✓ {LABELS[stage]} : module exécuté, vérification finale à venir')
         phase_progress(index, len(stages), LABELS[stage])
     with Activity('Contrôle final des services'):
         state = snapshot(cfg)
-    remaining = [LABELS[s] for s in stages if (not __import__('logging_stack').ready(logs_backend)
+    remaining = [LABELS[s] for s in stages if (not __import__('logging_runtime').runtime_ready(logs_backend,logs_runtime)
                  if s == 'logs' else actions(state)[s])]
     if remaining:
         message('  ! À revoir : ' + ', '.join(remaining))
@@ -419,8 +449,10 @@ def brief(cfg):
         message('  ! UFW inactif / inconnu, vérifier les règles du cloud')
     message('  › Source Grafana : provisioning vérifié, authentification API non vérifiée ici.')
     message('  › sudo autokom install  (reprend seulement les écarts)')
-    from logging_stack import ready, backend_state
-    message(f'  {"✓ opérationnel" if ready("both") else "+ à configurer"}  Logs (Loki + OpenSearch) · préférence {backend_state()}')
+    from logging_stack import backend_state
+    from logging_runtime import detected, runtime_ready
+    runtime=detected()
+    message(f'  {"✓ opérationnel" if runtime_ready("loki",runtime) else "+ à configurer"}  Logs Loki/Alloy ({runtime}) · préférence {backend_state()}')
     return 0
 
 
@@ -542,13 +574,16 @@ def make_parser():
   logs | logging             Loki + Alloy, OpenSearch + Data Prepper + Dashboards
 
 Exemples :
-  sudo autokom install logs             # choix adapté à la RAM
+  sudo autokom install logs             # choix RAM, puis Docker ou systemd
+  sudo autokom install logs --backend loki --runtime systemd
   sudo autokom install --only logs --backend both
   sudo autokom install --only observability
   sudo autokom install --only pipeline
   autokom install --only logs --check
   sudo autokom logs use opensearch
   sudo autokom logs use loki
+  autokom logs runtime                  # mode actif
+  sudo autokom logs runtime systemd --apply  # migration contrôlée
 
 Sans --only, le parcours historique (foundation/services/plugins/observability)
 est conservé. Les logs sont installés séparément pour éviter une charge imprévue.''')
@@ -558,18 +593,19 @@ est conservé. Les logs sont installés séparément pour éviter une charge imp
     i.add_argument('--from', dest='start_at', choices=STAGES+OPTIONAL_STAGES, help='Reprendre à partir de cette phase')
     i.add_argument('--only', choices=STAGES+OPTIONAL_STAGES+tuple(INSTALL_ALIASES), help='Installer uniquement le module ou alias indiqué')
     i.add_argument('--backend', choices=('loki','opensearch','both'), help='Pour logs : installer un backend ou les deux (défaut : both)')
+    i.add_argument('--runtime',choices=('docker','systemd'), help='Pour Loki/Alloy : Docker Compose ou services systemd')
     subcommand('status', help='État synthétique des composants', epilog='Exemple : autokom status')
     subcommand('check', help='Audit complet (équivalent script verify/stack.py)', epilog='Exemple : sudo autokom check')
     subcommand('config', help='Voir les ports, URLs et domaines, sans secrets', epilog='Exemple : autokom config')
     c = subcommand('configure', help='Configuration interactive ciblée (expert)',
                    epilog='Exemple : sudo autokom configure observability')
     c.add_argument('service', choices=('services', 'plugins', 'observability','logs'))
-    lg = subcommand('logs', help='Consulter / choisir le backend de logs (sans désinstaller l’autre)',
+    lg = subcommand('logs', help='Superviser les logs et choisir le mode Docker ou systemd',
                     epilog='Exemples : autokom logs status | sudo autokom logs use opensearch')
-    lg.add_argument('action', nargs='?', choices=('status','use','reconcile','verify'), default='status')
+    lg.add_argument('action', nargs='?', choices=('status','use','reconcile','verify','doctor','runtime'), default='status')
     lg.add_argument('--apply', action='store_true', help='Appliquer la réconciliation du backend déjà installé')
     lg.add_argument('--check', action='store_true', help='Prévisualiser la réconciliation')
-    lg.add_argument('backend', nargs='?', choices=('loki','opensearch'))
+    lg.add_argument('backend', nargs='?', choices=('loki','opensearch','docker','systemd'))
     for alias in ('tools','services'):
         tp=subcommand(alias, help='Catalogue, configuration et exploitation des outils DevSecOps',
                       epilog='Exemples : autokom tools list --all | autokom services --all | autokom tools show loki')

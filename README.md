@@ -65,3 +65,23 @@ Voir [`docs/LOGGING-OBSERVABILITY-v21.md`](docs/LOGGING-OBSERVABILITY-v21.md) po
 l'intégration Alloy/Loki dans Prometheus, Grafana, Alertmanager et la sonde
 end-to-end systemd. Mise à jour non destructive d'une installation existante :
 `sudo autokom logs reconcile --check` puis `sudo autokom logs reconcile --apply`.
+
+### Journalisation v22 — diagnostic réseau et endpoints réels
+
+Le correctif v22 traite les ports Docker non publiés sous certains Docker Engine
+avec réseau `internal: true`. Le réseau isolé de collecte reste présent,
+mais un bridge additionnel permet aux seules API locales de Loki, Alloy et
+OpenSearch de publier leurs ports sur `127.0.0.1`. Les commandes
+`autokom tools show loki`, `autokom tools show alloy` et
+`autokom logs doctor` vérifient endpoints, ports réellement publiés,
+métriques et erreurs. Procédure : [`docs/LOGGING-NETWORK-v22.md`](docs/LOGGING-NETWORK-v22.md).
+
+### Choix Docker Compose / services systemd pour Loki + Alloy (v23)
+
+Le choix d'exécution appartient à l'administrateur. `sudo autokom install logs`
+affiche le menu commun AUTOKOM (navigation ↑/↓, raccourcis numériques, annulation).
+Pour consulter le mode actif : `autokom logs runtime`. Pour une migration planifiée :
+`sudo autokom logs runtime systemd --check`, puis
+`sudo autokom logs runtime systemd --apply` avec confirmation TTY, sauvegarde,
+validation d'ingestion et retrait contrôlé du mode Docker précédent.
+Voir [guide de migration v23](docs/LOGGING-RUNTIME-v23.md).
