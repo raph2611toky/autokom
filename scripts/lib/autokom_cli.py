@@ -602,10 +602,14 @@ est conservé. Les logs sont installés séparément pour éviter une charge imp
     c.add_argument('service', choices=('services', 'plugins', 'observability','logs'))
     lg = subcommand('logs', help='Superviser les logs et choisir le mode Docker ou systemd',
                     epilog='Exemples : autokom logs status | sudo autokom logs use opensearch')
-    lg.add_argument('action', nargs='?', choices=('status','use','reconcile','verify','doctor','runtime','audit'), default='status')
+    lg.add_argument('action', nargs='?', choices=('status','use','reconcile','verify','doctor','runtime','audit','grafana'), default='status')
     lg.add_argument('--apply', action='store_true', help='Appliquer la réconciliation du backend déjà installé')
     lg.add_argument('--check', action='store_true', help='Prévisualiser la réconciliation')
     lg.add_argument('backend', nargs='?', choices=('loki','opensearch','docker','systemd'))
+    # Grafana plugin management remains independent from Jenkins 'plugins' phase.
+    gp=subcommand('grafana',help='Gestion avancée de Grafana (plugins officiels)')
+    gp.add_argument('section', nargs='?', choices=('plugins',), help='Catalogue de plugins officiel')
+    gp.add_argument('grafana_args',nargs=argparse.REMAINDER)
     for alias in ('tools','services'):
         tp=subcommand(alias, help='Catalogue, configuration et exploitation des outils DevSecOps',
                       epilog='Exemples : autokom tools list --all | autokom services --all | autokom tools show loki')
@@ -654,6 +658,27 @@ def main(argv=None):
     if len(arguments) >= 2 and arguments[0] in ('tools', 'services'):
         if arguments[1] == '--all':
             arguments = arguments[:1] + ['list', '--all'] + arguments[2:]
+    # Consistent local help, including legacy compound actions without changing
+    # the historic positional command grammar.
+    if '-h' in arguments or '--help' in arguments:
+        if len(arguments)>1 and arguments[0]=='logs' and arguments[1] in ('status','use','reconcile','verify','doctor','runtime','audit','grafana'):
+            action=arguments[1]
+            specific=argparse.ArgumentParser(prog='autokom logs '+action,
+                 description='Action journaux AUTOKOM : '+action)
+            if action=='runtime':specific.add_argument('mode',nargs='?',choices=('docker','systemd'))
+            if action=='use':specific.add_argument('backend',nargs='?',choices=('loki','opensearch'))
+            if action in ('runtime','reconcile','grafana'):
+                specific.add_argument('--check',action='store_true',help='Vérifier sans modifier')
+                specific.add_argument('--apply',action='store_true',help='Appliquer après garde-fous et confirmation')
+            specific.print_help();return 0
+        if len(arguments)>3 and arguments[0] in ('tools','services') and arguments[2] in ('files','cat','head','tail','nano','nano-end','env','auth'):
+            specific=argparse.ArgumentParser(prog='autokom '+arguments[0]+' '+arguments[1]+' '+arguments[2],
+                description='Inspection et configuration de '+arguments[1]+' ; action '+arguments[2])
+            specific.add_argument('alias',nargs='?',help='Alias du fichier / variable ; autokom tools '+arguments[1]+' files')
+            specific.print_help();return 0
+    # Preserve existing tools grafana files / cat ... commands.
+    if len(arguments)>=3 and arguments[:3] in (['tools','grafana','plugins'],['services','grafana','plugins']):
+        arguments=['grafana','plugins']+arguments[3:]
     a = parser.parse_args(arguments)
     if not a.cmd:
         parser.print_help()
@@ -696,6 +721,12 @@ def main(argv=None):
             if stat and stat.returncode == 0 and stat.stdout:
                 print(color_git_diffstat(stat.stdout, enabled=use_color), end='' if stat.stdout.endswith('\n') else '\n')
         return 0
+    if a.cmd=='grafana':
+        if a.section!='plugins':
+            parser.print_help();return 0
+        from grafana_plugins import main as grafana_plugins_main, PluginsError
+        try:return grafana_plugins_main(a.grafana_args)
+        except PluginsError as exc:raise CLIError(str(exc)) from exc
     if a.cmd == 'logs':
         from logging_stack import main as logs_main, LogError
         try:

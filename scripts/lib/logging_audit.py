@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from cli_colors import pretty_print as print
 
 LOKI = 'http://127.0.0.1:3100'
 PROM = 'http://127.0.0.1:9090'
@@ -186,7 +187,29 @@ def run_audit():
                 print('  ✓ Dashboard Grafana '+uid+': présent ('+str(len(content.get('panels',[])))+' panneaux)')
     print('  '+('✓' if LDS.is_file() else '!')+' Provisioning Loki : '+str(LDS))
     print('  '+('✓' if PDS.is_file() else '!')+' Provisioning Prometheus : '+str(PDS))
-    print('  › Panneaux rouges : menu du panneau → Inspect → Query / Error, pour voir la réponse Grafana réelle.')
+    # Do not confuse direct Loki query success with the effective Grafana
+    # datasource (a common cause of red panel warnings).
+    from grafana_bridge import local_state, drift, api_probe
+    state=local_state()
+    if state.get('available'):
+        ds=state.get('datasource')
+        if ds and ds.get('uid')=='autokom-loki' and ds.get('type')=='loki' and ds.get('url')==LOKI:
+            print('  ✓ Grafana SQLite : datasource Loki chargée en base')
+        else:
+            print('  ✗ Grafana SQLite : datasource Loki absente ou incorrecte dans la base effective')
+            failures+=1
+        for issue in drift(state):
+            print('  ✗ Grafana : '+issue)
+            failures+=1
+    else:
+        print('  ! Grafana SQLite : '+state.get('reason','non vérifié'))
+    if token:
+        test=api_probe(token)
+        if not test.get('ok'):
+            print('  ✗ Grafana → Loki : '+test.get('error','inconnu'));failures+=1
+        else:
+            print(f"  ✓ Grafana → Loki : {test['frames']} frames, {test['samples']} échantillons (1 h)")
+    print('  › Panneaux rouges : menu du panneau → Inspect → Query / Error ; vérifier le flux navigateur/Grafana.')
     print('  › Audit sans mutation ni exposition des lignes de journaux.')
     return 1 if failures else 0
 

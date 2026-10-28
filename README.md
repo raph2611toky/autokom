@@ -85,3 +85,11 @@ Pour consulter le mode actif : `autokom logs runtime`. Pour une migration planif
 `sudo autokom logs runtime systemd --apply` avec confirmation TTY, sauvegarde,
 validation d'ingestion et retrait contrôlé du mode Docker précédent.
 Voir [guide de migration v23](docs/LOGGING-RUNTIME-v23.md).
+
+## v25 — Audit du chemin Grafana → Loki et plugins dynamiques
+
+- `autokom logs grafana --check` : configuration Grafana chargée (SQLite si disponible) et requête Grafana API (si jeton volontaire).
+- `sudo autokom logs grafana --apply` : recharger **uniquement** Grafana lorsqu'un décalage de provisioning est prouvé, après confirmation.
+- `autokom grafana plugins search "logs drilldown" --type app --select` : catalogue en direct avec recherche et filtres.
+- `sudo autokom grafana plugins install PLUGIN_ID --check|--apply` : fiche officielle et installation contrôlée.
+- Détails : `docs/GRAFANA-LOGS-PLUGINS-v25.md`.

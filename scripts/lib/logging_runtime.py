@@ -8,6 +8,7 @@ backup before removing the former installation. The previous mode is restored
 when a pre-cleanup health or canary check fails.
 """
 from __future__ import annotations
+from cli_colors import pretty_print as print
 import json
 import os
 from pathlib import Path

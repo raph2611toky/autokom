@@ -6,6 +6,7 @@ namespaced scrape jobs, one rule file, and private canary units are managed.
 Unknown or user-modified configuration causes an explicit error.
 """
 from __future__ import annotations
+from cli_colors import pretty_print as print
 import json
 from pathlib import Path
 import shutil

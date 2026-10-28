@@ -5,6 +5,7 @@ Never prints container environment, mounts with secrets, credentials, or tokens.
 Containers being `running` is not proof of a host-port binding or readiness.
 """
 from __future__ import annotations
+from cli_colors import pretty_print as print
 import json
 import shutil
 import subprocess

@@ -22,6 +22,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from cli_colors import pretty_print as print
 from hashlib import sha256
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -722,7 +723,7 @@ def apply_docker(backend):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(prog='autokom logging',description='Loki + Alloy et OpenSearch + Data Prepper + Dashboards')
-    parser.add_argument('action',nargs='?',choices=('status','use','reconcile','verify','doctor','runtime','audit'),default='status')
+    parser.add_argument('action',nargs='?',choices=('status','use','reconcile','verify','doctor','runtime','audit','grafana'),default='status')
     parser.add_argument('choice',nargs='?',choices=('loki','opensearch','docker','systemd'))
     parser.add_argument('--apply',action='store_true')
     parser.add_argument('--check',action='store_true')
@@ -730,6 +731,9 @@ def main(argv=None):
     parser.add_argument('--runtime',choices=('docker','systemd'),help='Exécution de Loki/Alloy : Docker Compose ou systemd')
     a=parser.parse_args(argv)
     from logging_runtime import detected, runtime_ready, plan as runtime_plan, apply as apply_runtime, report as runtime_report, RuntimeErrorSafe
+    if a.action=='grafana':
+        from grafana_bridge import reconcile
+        return reconcile(apply=a.apply)
     if a.action == 'audit':
         from logging_audit import run_audit
         return run_audit()

@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / 'scripts/lib'))
 from observability_config import load as load_observability, ConfigError, ALLOWED
 from tool_banner import colored_marker, section as ui_section
 from terminal_table import Cell, table
+from cli_colors import pretty_print as print
 
 
 class ToolError(RuntimeError):
@@ -281,6 +282,11 @@ def show(name):
     refs.append(('Lire un fichier',f'autokom tools {name} cat ALIAS'))
     refs.append(('Éditer un fichier',f'sudo autokom tools {name} nano ALIAS'))
     refs.append(('Modifier environnement',f'sudo autokom tools {name} env set VARIABLE'))
+    if name=='grafana':
+        refs.append(('Catalogue plugins','autokom grafana plugins search MOTS --type all'))
+        refs.append(('Plugins installés','autokom grafana plugins list'))
+        refs.append(('Installer plugin','sudo autokom grafana plugins install ID --apply'))
+        refs.append(('Loki réel','autokom logs grafana --check'))
     table(['Action', 'Chemin ou commande'], refs)
 
 
