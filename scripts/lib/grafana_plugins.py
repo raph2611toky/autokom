@@ -151,6 +151,8 @@ def install(plugin_id,apply=False,version=None):
         print('  › Simulation : sudo autokom grafana plugins install '+plugin_id+' --apply')
         return 0
     if os.geteuid()!=0:raise PluginsError('Installation exige sudo')
+    from autokom_security import authorize
+    authorize('installer le plugin Grafana '+plugin_id)
     from menu import pick
     choice=pick('AUTOKOM · Installer ce plugin Grafana ?',
                 ['Installer le plugin vérifié, puis redémarrer Grafana'],
@@ -233,6 +235,8 @@ def manage_plugin(action, plugin_id='', apply=False):
         print('  › Simulation ; relancer avec --apply après analyse des impacts.')
         return 0
     if os.geteuid()!=0:raise PluginsError('Opération exige sudo')
+    from autokom_security import authorize
+    authorize('modifier les plugins Grafana')
     from menu import pick
     yes=pick('AUTOKOM · Confirmer '+action+' ?',
              ['Sauvegarder les plugins puis appliquer'],cancel_label='Annuler sans modification',
@@ -329,15 +333,20 @@ def main(args=None):
         print('  ! Aucun plugin correspondant trouvé dans le catalogue officiel (aucun résultat inventé).')
         return 0
     from terminal_table import render_table
-    print(render_table(['ID officiel','Nom','Type','Signature'],
-       [(x['id'],x['name'],x['type'] or '—',x['signature'] or 'non indiquée') for x in items]))
+    if not a.select:
+        print(render_table(['ID officiel','Nom','Type','Signature'],
+           [(x['id'],x['name'],x['type'] or '—',x['signature'] or 'non indiquée') for x in items]))
+    else:print(f'  ✓ {len(items)} plugins officiels trouvés · ←/→ pour changer de page')
     if a.select:
-        from menu import pick
-        if len(items)>8:items=items[:8]
-        selection=pick('AUTOKOM · Choisir un plugin (aucune installation)',
-            [(x['name']+' / '+x['id'])[:68] for x in items],cancel_label='Annuler')
+        from menu import pick_paginated, pick
+        selection=pick_paginated('AUTOKOM · Choisir un plugin Grafana',[(x['name']+' / '+x['id'])[:68] for x in items])
         if selection:
-            print('  › Vérifier puis installer : sudo autokom grafana plugins install '+items[selection-1]['id']+' --apply')
+            plugin_id=items[selection-1]['id']
+            # Selection directly launches the guarded official installer.
+            if os.geteuid()!=0:
+                print('  › Plugin sélectionné : passage à sudo avec confirmation finale')
+                return subprocess.call(['sudo','autokom','tools','grafana','plugins','install',plugin_id,'--apply'])
+            return install(plugin_id,apply=True)
     return 0
 
 if __name__=='__main__':

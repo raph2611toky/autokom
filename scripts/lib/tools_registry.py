@@ -204,7 +204,12 @@ def discovered_service_files(name):
                          'jenkins':('jenkins','127.0.0.1:8080'),
                          'alertmanager':('alertmanager','127.0.0.1:9093'),
                          'node-exporter':('node-exporter','127.0.0.1:9100')}
-                if not any(m in str(candidate).lower() or m in content.lower() for m in markers[name]):
+                if name == 'jenkins':
+                    # Do not show unrelated application upstreams simply because
+                    # their config references Jenkins in a comment or variable.
+                    if 'jenkins' not in candidate.name.lower() and not re.search(r'(?im)^\s*proxy_pass\s+https?://(?:127\.0\.0\.1|localhost):8080[/;]',content):
+                        continue
+                elif not any(m in str(candidate).lower() or m in content.lower() for m in markers[name]):
                     continue
             out.append((str(candidate), 'Virtual host / upstream Nginx' + (' (actif)' if 'sites-enabled' in candidate.parts else '')))
         except (OSError,UnicodeError):
@@ -282,6 +287,13 @@ def show(name):
     refs.append(('Lire un fichier',f'autokom tools {name} cat ALIAS'))
     refs.append(('Éditer un fichier',f'sudo autokom tools {name} nano ALIAS'))
     refs.append(('Modifier environnement',f'sudo autokom tools {name} env set VARIABLE'))
+    if name in ('jenkins','grafana'):
+        refs.append(('Plugins · menu',f'autokom tools {name} plugins'))
+        refs.append(('Plugins · installer',f'sudo autokom tools {name} plugins install ID --apply'))
+        refs.append(('Authentification AUTOKOM','sudo autokom auth setup / verify / status'))
+    if name=='jenkins':
+        refs.append(('Jeton API Jenkins','sudo autokom auth jenkins-token · enregistré une seule fois'))
+        refs.append(('Accès API Jenkins','Jeton distinct et autorisations Jenkins nécessaires'))
     if name=='grafana':
         refs.append(('Catalogue plugins','autokom grafana plugins search MOTS --type all'))
         refs.append(('Plugins installés','autokom grafana plugins list'))

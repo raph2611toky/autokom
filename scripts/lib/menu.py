@@ -142,3 +142,78 @@ def ask(prompt: str, default: str = '', max_bytes: int = 4096, *, hint: str = ''
 
 if __name__ == '__main__':
     print(pick(sys.argv[1], sys.argv[2:]))
+
+
+def pick_paginated(title: str, choices: list[str], *, page_size: int = 9,
+                   hint: str = '') -> int:
+    """Global 1-based selection with 1..9 per page, ←/→ pagination and 0 cancel.
+
+    Does not change existing pick() behavior for historical menus. Uses /dev/tty.
+    """
+    if not choices:return 0
+    if not 1 <= page_size <= 9:raise ValueError('Page : entre 1 et 9 choix')
+    fd=_tty();initial=termios.tcgetattr(fd)
+    page=0;cursor=0;pages=(len(choices)+page_size-1)//page_size
+    slots=page_size+1
+    def send(s):_send(fd,s)
+    def draw():
+        nonlocal cursor
+        start=page*page_size
+        visible=choices[start:start+page_size]
+        cursor=min(cursor,len(visible))
+        width=max(50,shutil.get_terminal_size((100,24)).columns-12)
+        for i in range(page_size):
+            if i<len(visible):
+                marker='\033[32m❯\033[0m' if cursor==i else ' '
+                label=visible[i].replace('\n',' ')[:max(10,width-10)]
+                line=f'  {marker} {i+1}. {label}'
+            else:line=''
+            send('\r\033[2K'+line+'\r\n')
+        marker='\033[32m❯\033[0m' if cursor==len(visible) else ' '
+        send(f'\r\033[2K  {marker} 0. Annuler\r\n')
+        label=hint or '↑/↓ choix · ←/→ pages · 1-9 sélectionner · 0/q annuler'
+        send('\r\033[2K\033[33m  ℹ '+label[:width]+f' · Page {page+1}/{pages}\033[0m')
+    def up():send(f'\033[{slots}A')
+    try:
+        tty.setraw(fd);send('\033[?25l')
+        send('\r\n\033[1;36m'+title+'\033[0m\r\n')
+        while True:
+            draw()
+            key=os.read(fd,1)
+            if not key:raise RuntimeError('Terminal fermé')
+            if key in (b'q',b'Q',b'\x03',b'0'):
+                result=0;break
+            if key in (b'\r',b'\n'):
+                result=0 if cursor==len(choices[page*page_size:page*page_size+page_size]) else page*page_size+cursor+1
+                break
+            previous=page
+            visible=choices[page*page_size:(page+1)*page_size]
+            if key==b'\x1b':
+                ready,_,_=select.select([fd],[],[],0.15)
+                if ready and os.read(fd,1)==b'[':
+                    ready,_,_=select.select([fd],[],[],0.15)
+                    if ready:
+                        arrow=os.read(fd,1)
+                        if arrow==b'A':cursor=(cursor-1)%(len(visible)+1)
+                        elif arrow==b'B':cursor=(cursor+1)%(len(visible)+1)
+                        elif arrow==b'C':page=min(page+1,pages-1);cursor=0
+                        elif arrow==b'D':page=max(0,page-1);cursor=0
+            elif key in (b'>',b'n',b'N',b'l',b'L'):
+                page=min(page+1,pages-1);cursor=0
+            elif key in (b'<',b'p',b'P',b'h',b'H'):
+                page=max(0,page-1);cursor=0
+            elif b'1'<=key<=b'9':
+                i=int(key)-1
+                if i<len(visible):result=page*page_size+i+1;break
+            up()
+        # Erase the same number of rows every time, including the last page.
+        send('\r\033[2K');up()
+        for _ in range(slots):send('\r\033[2K\r\n')
+        if result:
+            send('\r\033[1;32m  ✓ '+choices[result-1].replace('\n',' ')[:72]+'\033[0m\r\n')
+        else:send('\r\033[2m  - Annulé\033[0m\r\n')
+        return result
+    finally:
+        termios.tcsetattr(fd,termios.TCSADRAIN,initial)
+        try:send('\033[?25h')
+        finally:os.close(fd)

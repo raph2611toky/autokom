@@ -621,6 +621,7 @@ est conservé. Les logs sont installés séparément pour éviter une charge imp
     gp=subcommand('grafana',help='Gestion avancée de Grafana (plugins officiels)')
     gp.add_argument('section', nargs='?', choices=('plugins',), help='Catalogue de plugins officiel')
     gp.add_argument('grafana_args',nargs=argparse.REMAINDER)
+    subcommand('auth',help='Passphrase AUTOKOM, OTP e-mail et jetons de service')
     for alias in ('tools','services'):
         tp=subcommand(alias, help='Catalogue, configuration et exploitation des outils DevSecOps',
                       epilog='Exemples : autokom tools list --all | autokom services --all | autokom tools show loki')
@@ -651,7 +652,7 @@ est conservé. Les logs sont installés séparément pour éviter une charge imp
                               formatter_class=argparse.RawDescriptionHelpFormatter,
                               description=f'Fichiers et configuration de {tool.name}',
                               epilog='Exemples : autokom tools '+tool.name+' files ; autokom tools '+tool.name+' cat ALIAS'+plugin_help)
-            fp.add_argument('file_action',choices=('files','cat','head','tail','nano','nano-end','env','auth'),nargs='?',
+            fp.add_argument('file_action',choices=('files','cat','head','tail','nano','nano-end','env','auth','plugins'),nargs='?',
                             help='Action. Pour les plugins Jenkins/Grafana : « plugins » (menu séparé)')
             fp.add_argument('file_target',nargs='?',default='')
             fp.add_argument('file_extra',nargs='?',default='')
@@ -670,6 +671,24 @@ def main(argv=None):
     if '-b' in option_tokens or '--with-banner' in option_tokens:
         show_brand()
     # Plugin managers are service-specific but share AUTOKOM keyboard menus.
+    # The authenticator is an isolated command tree with full contextual help.
+    if arguments and arguments[0]=='auth':
+        from autokom_security import main as security_main, SecurityError
+        try:return security_main(arguments[1:])
+        except SecurityError as exc:raise CLIError(str(exc)) from exc
+    # Apply the global passphrase to sensitive existing operations once enabled;
+    # plugin managers call authorize themselves for their mutating actions.
+    if arguments:
+        from autokom_security import configured, authorize, SecurityError
+        cmd=arguments[0]
+        mutating=(cmd in ('update','configure') or
+            (cmd=='install' and '--check' not in arguments) or
+            (cmd=='logs' and ('--apply' in arguments or (len(arguments)>1 and arguments[1]=='use'))) or
+            (cmd in ('tools','services') and len(arguments)>2 and
+              (arguments[2] in ('configure','restart','stop','change','nano','nano-end','env','auth') or (arguments[2]=='show' and '-E' in arguments))))
+        if mutating and configured() and '-h' not in arguments and '--help' not in arguments:
+            try:authorize('commande '+cmd)
+            except SecurityError as exc:raise CLIError(str(exc)) from exc
     # Delegate BEFORE argparse's generic tools/files grammar; all nested -h
     # actions belong to their dedicated parser. Preserve legacy file actions.
     if len(arguments)>=3 and arguments[0] in ('tools','services') and arguments[1] in ('jenkins','grafana') and arguments[2] in ('plugins','pluggins'):

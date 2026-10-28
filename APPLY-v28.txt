@@ -1,0 +1,21 @@
+AUTOKOM v28 — Auth + plugin UX.
+
+1) Vérifier une copie et les changements locaux :
+   cd /opt/autokom/source && git status --short
+2) Appliquer uniquement si le patch correspond à votre branche :
+   git apply --check /tmp/AUTOKOM-v28-Auth-Plugin-UX.patch
+   git apply /tmp/AUTOKOM-v28-Auth-Plugin-UX.patch
+3) Tester les commandes :
+   autokom auth -h
+   autokom tools jenkins plugins -h
+   autokom tools grafana plugins -h
+4) Configuration initiale :
+   sudo autokom auth
+   # SMTP valide, puis setup OTP, puis jenkins-token.
+5) Tester :
+   autokom tools jenkins plugins search pipeline --select
+   autokom tools show jenkins
+
+AUCUN SERVICE N'EST REDEMARRÉ PAR LE PATCH.
+AUCUN JETON N'EST DEMANDÉ EN ARGUMENT DE COMMANDE.
+L'AUTHENTIFICATION NE SUPPRIME PAS LES PERMISSIONS NATIVES.

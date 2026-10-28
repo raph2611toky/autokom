@@ -20,7 +20,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timezone
 from cli_colors import pretty_print as print
-from menu import pick, ask
+from menu import pick, ask, pick_paginated
 from tool_banner import section, Activity
 from terminal_table import Cell, render_table
 
@@ -197,9 +197,39 @@ def remove_archive(plugin_id):
         if path.is_file():path.unlink();found=True
     if not found:raise PluginError('Archive non trouvée ; aucun fichier de configuration supprimé')
 
+def _jenkins_credential(args):
+    from autokom_security import JENKINS
+    if args.auth_file:return args.auth_file
+    # A stored credential is read only for root-managed actions; never copied to argv.
+    return str(JENKINS) if os.geteuid()==0 and JENKINS.is_file() else None
+
+
+def _execute_selection(plugin_id, args):
+    """Selection starts the real installation workflow, not a printed recipe.
+
+    Actual modification still requires sudo, the AUTOKOM passphrase, backend
+    API rights and the final confirmation inside require_apply().
+    """
+    if os.geteuid()!=0:
+        print('  › Plugin sélectionné : demande de privilèges sudo pour continuer')
+        cmd=['sudo','autokom','tools','jenkins','plugins','install',plugin_id,'--apply']
+        if args.auth_file:cmd.extend(['--auth-file',args.auth_file])
+        return subprocess.call(cmd)
+    return run(argparse.Namespace(action='install',plugin_id=plugin_id,auth_file=_jenkins_credential(args),apply=True))
+
+
 def run(args):
     if args.action=='list':
-        show_installed(installed(args.auth_file),args.filter,args.updates);return 0
+        plugins=installed(_jenkins_credential(args))
+        if not getattr(args,'select',False):
+            show_installed(plugins,args.filter,args.updates)
+        if getattr(args,'select',False):
+            relevant=[p for p in plugins if not args.filter or args.filter.casefold() in p['shortName'].casefold()]
+            if relevant:
+                print(f'  ◈ Plugins installés : {len(relevant)} correspondances · 9 résultats/page')
+                selected=pick_paginated('AUTOKOM · Plugins Jenkins installés', [p['shortName']+' · '+p.get('version','?') for p in relevant])
+                if selected:print('  › Plugin : '+relevant[selected-1]['shortName']+' · '+relevant[selected-1].get('version','?'))
+        return 0
     if args.action in ('search','info'):
         with Activity('Catalogue officiel Jenkins'):
             items=catalogue()
@@ -212,15 +242,16 @@ def run(args):
         q=' '.join(args.query)
         hits=search(items,q,args.limit,getattr(args,'category',''))
         if not hits:print('  › Aucun résultat dans le catalogue officiel');return 0
-        print(render_table(['ID officiel','Nom','Version','Jenkins minimum'],[(i,str(p.get('name',i)),str(p.get('version','?')),str(p.get('requiredCore','?'))) for _,i,p in hits]))
+        if not args.select:
+            print(render_table(['ID officiel','Nom','Version','Jenkins minimum'],[(i,str(p.get('name',i)),str(p.get('version','?')),str(p.get('requiredCore','?'))) for _,i,p in hits]))
+        else:print(f'  ✓ {len(hits)} plugins officiels trouvés · ←/→ pour changer de page')
         if args.select:
-            hits=hits[:8]
-            selected=pick('AUTOKOM · Plugins Jenkins',[(x[1]+' · '+str(x[2].get('name','')))[:68] for x in hits],cancel_label='Annuler')
-            if selected:print('  › sudo autokom tools jenkins plugins install '+hits[selected-1][1]+' --apply --auth-file /chemin/protege')
+            selected=pick_paginated('AUTOKOM · Plugins Jenkins',[(x[1]+' · '+str(x[2].get('name','')))[:68] for x in hits])
+            if selected:return _execute_selection(hits[selected-1][1],args)
         return 0
     if args.action not in ('install','upgrade','remove'):
         raise PluginError('Action inconnue')
-    auth=args.auth_file
+    auth=_jenkins_credential(args)
     if args.action=='install':
         if not ID.fullmatch(args.plugin_id):raise PluginError('Identifiant Jenkins invalide')
         with Activity('Vérification du catalogue officiel Jenkins'): items=catalogue()
@@ -234,6 +265,8 @@ def run(args):
         print('  ◈ '+args.plugin_id+' · version catalogue '+str(p.get('version','?')))
         if not require_apply(args,'AUTOKOM · Installer '+args.plugin_id+' ?', 'Les dépendances seront résolues par Jenkins.'):
             return 0
+        from autokom_security import authorize
+        authorize('installer le plugin Jenkins '+args.plugin_id)
         ensure_admin(auth)
         with Activity('Sauvegarde plugin Jenkins'):
             backup=backup_plugin_archives([args.plugin_id])
@@ -249,6 +282,8 @@ def run(args):
         print(render_table(['Plugins à mettre à jour'],[(p,) for p in updates]))
         if not require_apply(args,'AUTOKOM · Mettre à jour '+str(len(updates))+' plugins ?', 'Mises à jour selon Update Center configuré dans Jenkins.'):
             return 0
+        from autokom_security import authorize
+        authorize('mettre à jour les plugins Jenkins')
         ensure_admin(auth)
         with Activity('Sauvegarde des plugins Jenkins'):
             backup=backup_plugin_archives(updates)
@@ -269,6 +304,8 @@ def run(args):
         if not require_apply(args,'AUTOKOM · Retirer '+args.plugin_id+' ?',
                              'Seule archive .jpi/.hpi sera retirée ; configurations conservées.'):
             return 0
+        from autokom_security import authorize
+        authorize('supprimer le plugin Jenkins '+args.plugin_id)
         ensure_admin(auth)
         with Activity('Sauvegarde avant suppression'):
             backup=backup_plugin_archives([args.plugin_id])
@@ -291,19 +328,15 @@ def interactive(args):
         try:
             if choice==1:
                 q=ask('Recherche Jenkins')
-                if q:run(argparse.Namespace(action='search',query=[q],limit=12,category='',select=True,auth_file=args.auth_file))
+                if q:run(argparse.Namespace(action='search',query=[q],limit=36,category='',select=True,auth_file=args.auth_file))
             elif choice==2:
                 q=ask('Filtre (vide = tous)')
-                run(argparse.Namespace(action='list',filter=q,updates=False,auth_file=args.auth_file))
+                run(argparse.Namespace(action='list',filter=q,updates=False,select=True,auth_file=args.auth_file))
             else:
                 name=ask('ID officiel du plugin') if choice in (3,5) else None
-                if not args.auth_file:
-                    path=ask('Chemin du jeton API Jenkins (root:0600)',default='/root/jenkins-api.auth')
-                    if path:args.auth_file=path
                 a=argparse.Namespace(action={3:'install',4:'upgrade',5:'remove'}[choice],plugin_id=name,auth_file=args.auth_file,apply=False)
+                a.apply=True
                 run(a)
-                if pick('AUTOKOM · Appliquer maintenant ?', ['Exécuter avec confirmation'],cancel_label='Conserver en simulation'):
-                    a.apply=True;run(a)
         except (PluginError,OSError,ValueError,RuntimeError) as exc:
             print('  ✗ '+str(exc))
             print('  › Retour au menu : aucune opération supplémentaire effectuée.')
@@ -321,10 +354,10 @@ def parser():
     p.add_argument('--auth-file',default=os.environ.get('AUTOKOM_JENKINS_AUTH_FILE'),help='Fichier root:0600 identifiant:API-token, jamais affiché')
     sub=p.add_subparsers(dest='action')
     s=sub.add_parser('search',help='Rechercher les vrais plugins du Update Center')
-    s.add_argument('query',nargs='+');s.add_argument('--limit',type=int,default=12);s.add_argument('--select',action='store_true')
+    s.add_argument('query',nargs='+');s.add_argument('--limit',type=int,default=36);s.add_argument('--select',action='store_true')
     s.add_argument('--category',default='',help='Filtrer par étiquette officielle du catalogue, si renseignée')
     s=sub.add_parser('list',help='Plugins installés (API si jeton, sinon archives locales)')
-    s.add_argument('--filter',default='');s.add_argument('--updates',action='store_true',help='Nécessite accès API pour détecter les mises à jour')
+    s.add_argument('--filter',default='');s.add_argument('--select',action='store_true',help='Pagination interactive');s.add_argument('--updates',action='store_true',help='Nécessite accès API pour détecter les mises à jour')
     s=sub.add_parser('info',help='Détails du plugin officiel');s.add_argument('plugin_id')
     s=sub.add_parser('install',help='Installer depuis Update Center');s.add_argument('plugin_id')
     s=sub.add_parser('upgrade',help='Mettre à jour tous les plugins signalés par Jenkins')
@@ -340,8 +373,8 @@ def main(argv=None):
     if not a.action:
         if not sys.stdin.isatty():p.print_help();return 0
         return interactive(a)
-    if a.action=='search' and not (1<=a.limit<=40):raise PluginError('Limite attendue : 1..40')
-    if a.action=='list' and a.updates and not a.auth_file:
+    if a.action=='search' and not (1<=a.limit<=90):raise PluginError('Limite attendue : 1..40')
+    if a.action=='list' and a.updates and not _jenkins_credential(a):
         raise PluginError('Seule API Jenkins permet de confirmer les mises à jour : --auth-file requis')
     return run(a)
 
