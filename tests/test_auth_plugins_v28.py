@@ -22,7 +22,7 @@ class AuthTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.base=Path(self.tmp.name)
         patches=[]
-        for name,value in [('BASE',self.base),('STATE',self.base/'auth.json'),('SMTP',self.base/'smtp.json'),('OTP',self.base/'recovery.json'),('ATTEMPTS',self.base/'attempts.json'),('JENKINS',self.base/'jenkins-api.auth')]:
+        for name,value in [('BASE',self.base),('STATE',self.base/'auth.json'),('SMTP',self.base/'smtp.json'),('OTP',self.base/'recovery.json'),('ATTEMPTS',self.base/'attempts.json'),('JENKINS',self.base/'jenkins-api.auth'),('RECOVERY_CODES',self.base/'recovery-codes.json'),('VAULT_KEY',self.base/'vault.key')]:
             p=mock.patch.object(sec,name,value);p.start();self.addCleanup(p.stop)
     def test_password_salted_and_not_plaintext(self):
         val=sec._hash('long-password-not-shared')
@@ -61,10 +61,9 @@ class AuthTests(unittest.TestCase):
             sec._check_code('test@example.org')
         self.assertFalse(sec.OTP.exists())
         with self.assertRaisesRegex(sec.SecurityError,'absent ou expiré'):sec._check_code('test@example.org')
-    def test_setup_confirms_email_twice_and_never_saves_passphrase(self):
-        sec._write(sec.SMTP, {'host':'smtp.example.org','port':587,'sender':'no-reply@example.org','username':'','password':''})
-        data=iter(['user@example.org','user@example.org'])
-        with mock.patch.object(sec,'_tty_text',side_effect=lambda label:next(data)), mock.patch.object(sec,'_password_new',return_value='my example passphrase is sufficiently long'), mock.patch.object(sec,'_mail_code') as send, mock.patch.object(sec,'_check_code'):
+    def test_setup_uses_verified_smtp_admin_and_never_saves_passphrase(self):
+        sec._write(sec.SMTP, {'host':'smtp.example.org','port':587,'sender':'no-reply@example.org','admin':'user@example.org','username':'','password':''})
+        with mock.patch.object(sec,'_tty_text',side_effect=AssertionError('repeated email')), mock.patch.object(sec,'_create_recovery_codes',return_value=[]), mock.patch.object(sec,'_password_new',return_value='my example passphrase is sufficiently long'), mock.patch.object(sec,'_mail_code') as send, mock.patch.object(sec,'_check_code'):
             sec.setup()
         send.assert_called_once_with('user@example.org')
         record=sec._read(sec.STATE)
@@ -75,7 +74,8 @@ class AuthTests(unittest.TestCase):
         with mock.patch.object(sec,'authorize'),mock.patch.object(sec,'_tty_text',return_value='admin'),mock.patch.object(sec,'_tty_secret',return_value='example-api-token'):
             sec.set_jenkins_credential()
         self.assertEqual(sec.JENKINS.stat().st_mode & 0o777,0o600)
-        self.assertEqual(sec.JENKINS.read_text(),'admin:example-api-token\n')
+        self.assertNotIn('example-api-token',sec.JENKINS.read_text())
+        self.assertEqual(sec._fernet(create=False).decrypt(sec._read(sec.JENKINS)['token_encrypted'].encode()).decode(), 'admin:example-api-token')
     def test_dangerous_commands_gated_after_configuration(self):
         sec._write(sec.STATE,{'passphrase':sec._hash('my-very-long-passphrase')})
         with mock.patch.object(sec,'authorize',side_effect=sec.SecurityError('pass required')):

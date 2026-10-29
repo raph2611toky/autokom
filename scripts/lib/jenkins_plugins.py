@@ -46,6 +46,16 @@ def auth_header(auth_file):
     from jenkins_postinstall import secure_file
     path=secure_file(auth_file)
     raw=path.read_text(encoding='utf-8').strip()
+    if raw.startswith('{'):
+        try:
+            stored=json.loads(raw)
+            if stored.get('format') != 'autokom-jenkins-token-v1':
+                raise ValueError('format unexpected')
+            from autokom_security import _fernet
+            raw=_fernet(create=False).decrypt(stored['token_encrypted'].encode('ascii')).decode('utf-8')
+        except Exception as exc:  # cryptography.InvalidToken is not RuntimeError
+
+            raise PluginError('Secret API Jenkins chiffré invalide ou clé absente') from exc
     if not raw or ':' not in raw:raise PluginError('Fichier API Jenkins : attendu identifiant:jeton')
     return 'Basic '+base64.b64encode(raw.encode('utf-8')).decode('ascii')
 

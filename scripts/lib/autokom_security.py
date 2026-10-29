@@ -31,6 +31,8 @@ SMTP = BASE / 'smtp.json'
 OTP = BASE / 'recovery.json'
 ATTEMPTS = BASE / 'attempts.json'
 JENKINS = BASE / 'jenkins-api.auth'
+RECOVERY_CODES = BASE / 'recovery-codes.json'
+VAULT_KEY = BASE / 'vault.key'
 ROUNDS = 600_000
 EMAIL = re.compile(r'^[A-Za-z0-9.!#$%&\'*+/?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\.[A-Za-z]{2,63}$')
 
@@ -129,6 +131,80 @@ def _tty_secret(label):
         os.close(fd)
 
 
+def _fernet(*, create=True):
+    """Root-only envelope encryption for reusable SMTP credential.
+
+    This is at-rest protection, not protection from compromised root.
+    Keep vault.key in secured backup separately from smtp.json.
+    """
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError as exc:
+        raise SecurityError('Chiffrement SMTP requis : installer python3-cryptography') from exc
+    require_root()
+    _dir()
+    if VAULT_KEY.is_symlink():
+        raise SecurityError('Clé du coffre symbolique refusée')
+    try:
+        fd = os.open(VAULT_KEY, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        if not create:
+            raise SecurityError('Clé du coffre absente : restaurer vault.key depuis la sauvegarde')
+        fd = os.open(VAULT_KEY, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        try:
+            key = Fernet.generate_key()
+            os.write(fd, key)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        fd = os.open(VAULT_KEY, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != 0 or info.st_mode & 0o077:
+            raise SecurityError('Permissions de la clé du coffre non conformes')
+        key = os.read(fd, 256).strip()
+    finally:
+        os.close(fd)
+    try:
+        return Fernet(key)
+    except (ValueError, TypeError) as exc:
+        raise SecurityError('Clé du coffre invalide') from exc
+
+
+def _protect_smtp(password):
+    return _fernet().encrypt(password.encode('utf-8')).decode('ascii') if password else ''
+
+
+def _smtp_password(conf):
+    if 'EMAIL_MDP_ENCRYPTED' in conf:
+        try:
+            from cryptography.fernet import InvalidToken
+            return _fernet(create=False).decrypt(conf['EMAIL_MDP_ENCRYPTED'].encode('ascii')).decode('utf-8')
+        except (InvalidToken, UnicodeError, ValueError, TypeError) as exc:
+            raise SecurityError('Secret SMTP chiffré invalide : clé manquante ou incorrecte') from exc
+    return conf.get('EMAIL_MDP', conf.get('password', ''))
+
+
+def _smtp_migrate_legacy():
+    """Upgrade v28/v29 root-only SMTP secret to encrypted storage on first use.
+
+    Caller must have root. Existing backups may still carry plaintext.
+    """
+    require_root()
+    with _lock():
+        conf = _read(SMTP)
+        if not conf or 'EMAIL_MDP_ENCRYPTED' in conf:
+            return conf
+        legacy = conf.get('EMAIL_MDP', conf.get('password', ''))
+        if legacy:
+            encrypted = _protect_smtp(legacy)
+            conf.pop('EMAIL_MDP', None)
+            conf.pop('password', None)
+            conf['EMAIL_MDP_ENCRYPTED'] = encrypted
+            _write(SMTP, conf)
+        return conf
+
+
 def _smtp_values(conf):
     """Canonical EMAIL_* fields and backward compatibility with v28 secrets."""
     if not conf:
@@ -137,7 +213,7 @@ def _smtp_values(conf):
         'host': conf.get('EMAIL_HOST', conf.get('host')),
         'port': conf.get('EMAIL_PORT', conf.get('port', 587)),
         'login': conf.get('EMAIL_LOGIN', conf.get('username', '')),
-        'password': conf.get('EMAIL_MDP', conf.get('password', '')),
+        'password': _smtp_password(conf),
         'sender': conf.get('EMAIL_FROM', conf.get('sender')),
         'admin': conf.get('EMAIL_ADMIN', conf.get('admin', '')),
     }
@@ -218,11 +294,14 @@ def authorize(action='opération sensible', *, require_setup=True):
         return True
 
 def _mail_code(address):
-    conf = _smtp_values(_read(SMTP))
+    conf = _smtp_values(_smtp_migrate_legacy())
     code = f'{secrets.randbelow(1_000_000):06d}'
-    salt = secrets.token_bytes(16)
-    _write(OTP, {'salt':salt.hex(),'hash':hashlib.sha256(salt+code.encode()).hexdigest(),
-                 'email':address,'expires_at':time.time()+600,'attempts':0})
+    with _lock():
+        prev = _read(OTP, {})
+        if prev.get('email') == address and time.time() < prev.get('expires_at', 0):
+            raise SecurityError('OTP encore valide : utiliser le code reçu ou attendre son expiration (10 min)')
+        _write(OTP, {'digest':_hash(code), 'email':address,
+                     'created_at':time.time(), 'expires_at':time.time()+600,'attempts':0})
     msg = EmailMessage()
     msg['From'] = conf['sender']
     msg['To'] = address
@@ -246,32 +325,85 @@ def _check_code(address):
             raise SecurityError('Code absent ou expiré')
         if record.get('attempts',0)>=5:raise SecurityError('Trop de tentatives OTP')
         code=_tty_secret('Code reçu par e-mail')
-        actual=hashlib.sha256(bytes.fromhex(record['salt'])+code.encode()).hexdigest()
-        if not hmac.compare_digest(actual,record['hash']):
+        if not (re.fullmatch(r'\d{6}', code) and
+                (_verify(code, record['digest']) if 'digest' in record else
+                 hmac.compare_digest(hashlib.sha256(bytes.fromhex(record['salt'])+code.encode()).hexdigest(), record['hash']))):
             record['attempts']+=1;_write(OTP,record)
             raise SecurityError('Code incorrect')
         OTP.unlink()
 
+def _create_recovery_codes(count=10):
+    """Generate high-entropy, one-use recovery secrets. No plaintext at rest."""
+    require_root()
+    codes = [secrets.token_hex(16).upper() for _ in range(count)]
+    salt = secrets.token_bytes(16)
+    hashes = [hashlib.sha256(salt + bytes.fromhex(code)).hexdigest() for code in codes]
+    _write(RECOVERY_CODES, {'version':1,'salt':salt.hex(), 'hashes':hashes, 'created_at':time.time()})
+    return codes
+
+
+def _show_codes(codes):
+    print('  ◈ CODES DE SECOURS AUTOKOM (affichés une seule fois)')
+    print('  ! Enregistrer hors du serveur dans un coffre-fort ou support hors ligne.')
+    print('  ! Toute personne possédant un code peut réinitialiser la passphrase AUTOKOM.')
+    for i, code in enumerate(codes, 1):
+        print(f'  {i:02d}. {code[:8]}-{code[8:16]}-{code[16:24]}-{code[24:]}')
+    print('  › AUTOKOM stocke uniquement les empreintes ; aucune commande ne réaffiche ces codes.')
+
+
+def _consume_recovery_code(code):
+    require_root()
+    normalized = code.replace('-', '').strip().upper()
+    if not re.fullmatch(r'[A-F0-9]{32}', normalized):
+        raise SecurityError('Code de secours invalide')
+    with _lock():
+        record = _read(RECOVERY_CODES)
+        if not record:
+            raise SecurityError('Aucun code de secours enregistré')
+        value = hashlib.sha256(bytes.fromhex(record['salt']) + bytes.fromhex(normalized)).hexdigest()
+        idx = next((i for i,h in enumerate(record['hashes']) if hmac.compare_digest(h, value)), None)
+        if idx is None:
+            raise SecurityError('Code de secours invalide ou déjà utilisé')
+        record['hashes'].pop(idx)
+        _write(RECOVERY_CODES, record)
+        return len(record['hashes'])
+
+
+def renew_codes():
+    authorize('renouveler tous les codes de secours')
+    codes = _create_recovery_codes()
+    _show_codes(codes)
+
+
 def setup():
     require_root()
     with _lock():
-        if configured():raise SecurityError('Authentification déjà configurée : utiliser change ou reset')
-    # Validate the dependency BEFORE asking the operator to type a passphrase.
-    smtp_conf = _read(SMTP)
-    smtp = _smtp_values(smtp_conf)
-    email=_tty_text('Adresse e-mail de récupération')
-    email2=_tty_text('Confirmer l’adresse e-mail')
-    if email!=email2 or not EMAIL.fullmatch(email):raise SecurityError('Adresse e-mail incorrecte ou confirmation différente')
-    if smtp['admin'] and email.casefold() != smtp['admin'].casefold():
-        raise SecurityError('Adresse de récupération différente de EMAIL_ADMIN configuré dans SMTP')
-    pwd=_password_new()
-    _mail_code(email)
-    print('  › Code envoyé via SMTP TLS ; vérification requise avant activation')
+        if configured():
+            raise SecurityError('Authentification déjà configurée : utiliser change ou reset')
+    # EMAIL_ADMIN was entered and confirmed during smtp setup; never ask twice.
+    smtp = _smtp_values(_smtp_migrate_legacy())
+    email = smtp.get('admin', '').strip()
+    if not EMAIL.fullmatch(email):
+        raise SecurityError('EMAIL_ADMIN manquant/invalide : sudo autokom auth smtp')
+    print('  › Vérification OTP envoyée à EMAIL_ADMIN configuré : ' + email[:1]+'***@'+email.split('@')[-1])
+    pending = _read(OTP, {})
+    if pending.get('email') == email and pending.get('expires_at', 0) > time.time():
+        print('  › OTP encore valide : reprendre le code déjà envoyé, aucun nouvel envoi')
+    else:
+        _mail_code(email)
+        print('  › OTP envoyé via SMTP sécurisé ; compte NON activé avant validation')
     _check_code(email)
+    print('  ✓ Adresse de récupération vérifiée par OTP')
+    pwd = _password_new()
     with _lock():
-        if configured():raise SecurityError('Configuration concurrente : refus')
-        _write(STATE,{'version':1,'email':email,'email_verified':True,'passphrase':_hash(pwd)})
+        if configured():
+            raise SecurityError('Configuration concurrente : refus')
+        _write(STATE, {'version':2,'email':email,'email_verified':True,'passphrase':_hash(pwd)})
+        _write(ATTEMPTS, {'failures':0,'blocked_until':0})
+    codes = _create_recovery_codes()
     print('  ✓ AUTOKOM auth activée · passphrase hachée · e-mail vérifié')
+    _show_codes(codes)
+
 
 def smtp_setup():
     require_root()
@@ -307,33 +439,44 @@ def smtp_setup():
     # is a reusable SMTP credential, so it cannot be hashed like the passphrase.
     _write(SMTP, {
         'EMAIL_HOST': host, 'EMAIL_PORT': int(port), 'EMAIL_LOGIN': username,
-        'EMAIL_MDP': password, 'EMAIL_FROM': sender, 'EMAIL_ADMIN': admin,
+        'EMAIL_MDP_ENCRYPTED': _protect_smtp(password), 'EMAIL_FROM': sender, 'EMAIL_ADMIN': admin,
     })
-    print('  ✓ SMTP TLS validé · paramètres enregistrés root:0600')
+    print('  ✓ SMTP TLS validé · secret chiffré au repos (clé root:0600)')
     print('  ✓ EMAIL_ADMIN confirmé deux fois ; adresse non vérifiée par OTP avant « auth setup »')
 
-def recovery():
+def recovery(method='email'):
     require_root()
-    with _lock():
-        state=_read(STATE)
-        if not state or not state.get('email_verified'):raise SecurityError('E-mail de récupération non vérifié')
-        record=_read(OTP,{})
-        addr=state['email']
-        needs_send=not (record and time.time()<record.get('expires_at',0) and record.get('email')==addr)
-        if not needs_send and record.get('attempts',0)>=5:raise SecurityError('Trop de tentatives OTP : attendre expiration')
-    if needs_send:
-        _mail_code(addr)
-        print('  › Code envoyé à l’adresse configurée (adresse non affichée)')
+    state = _read(STATE)
+    if not state or not state.get('email_verified'):
+        raise SecurityError('Aucun compte AUTOKOM vérifié')
+    if method == 'code':
+        code = _tty_secret('Code de secours AUTOKOM (usage unique)')
+        remaining = _consume_recovery_code(code)
+        print(f'  ✓ Code accepté et consommé ; {remaining} code(s) encore utilisable(s)')
+    elif method == 'email':
+        with _lock():
+            record = _read(OTP,{})
+            addr = state['email']
+            needs_send = not (record and time.time()<record.get('expires_at',0) and record.get('email')==addr)
+            if not needs_send and record.get('attempts',0)>=5:
+                raise SecurityError('Trop de tentatives OTP : attendre expiration')
+        if needs_send:
+            _mail_code(addr)
+            print('  › Code OTP envoyé à l’adresse vérifiée (adresse non réaffichée)')
+        else:
+            print('  › Utiliser le code OTP précédemment envoyé (10 min)')
+        _check_code(addr)
     else:
-        print('  › Utiliser le code envoyé précédemment (valable 10 minutes)')
-    _check_code(addr)
-    pwd=_password_new()
+        raise SecurityError('Méthode attendue : email ou code')
+    pwd = _password_new()
     with _lock():
-        state=_read(STATE)
-        state['passphrase']=_hash(pwd)
+        state = _read(STATE)
+        state['passphrase'] = _hash(pwd)
         _write(STATE,state)
         _write(ATTEMPTS,{'failures':0,'blocked_until':0})
-    print('  ✓ Passphrase renouvelée · code OTP consommé')
+        if OTP.exists(): OTP.unlink()
+    print('  ✓ Passphrase renouvelée · vérification de récupération consommée')
+
 
 def set_jenkins_credential():
     authorize('enregistrer le jeton API Jenkins')
@@ -341,22 +484,39 @@ def set_jenkins_credential():
     token=_tty_secret('Jeton API Jenkins (jamais la passphrase AUTOKOM)')
     if not re.fullmatch(r'[A-Za-z0-9_.@-]{1,150}',username) or not token or '\n' in token or ':' in username:
         raise SecurityError('Identifiant ou jeton Jenkins invalide')
-    _dir()
-    fd,temp=tempfile.mkstemp(dir=BASE,prefix='.jenkins-')
-    try:
-        os.fchmod(fd,0o600)
-        with os.fdopen(fd,'w') as f:
-            f.write(username+':'+token+'\n');f.flush();os.fsync(f.fileno())
-        os.replace(temp,JENKINS)
-    finally:
-        if os.path.exists(temp):os.unlink(temp)
-    print('  ✓ Jeton API Jenkins mémorisé dans un coffre local root:0600 (non haché : Jenkins nécessite son secret)')
+    _write(JENKINS, {'format':'autokom-jenkins-token-v1',
+                    'token_encrypted':_fernet().encrypt((username+':'+token).encode()).decode('ascii')})
+    print('  ✓ Jeton API Jenkins chiffré au repos dans le coffre local root:0600')
+
+def _migrate_jenkins_legacy():
+    """One-time migration for v29 Jenkins API token file; never print its contents."""
+    require_root()
+    if not JENKINS.exists(): return False
+    if JENKINS.is_symlink():raise SecurityError('Secret Jenkins symbolique refusé')
+    st=JENKINS.stat()
+    if st.st_uid != 0 or st.st_mode & 0o077:
+        raise SecurityError('Permissions du jeton Jenkins non conformes')
+    raw=JENKINS.read_text(encoding='utf-8').strip()
+    if raw.startswith('{'):
+        try:
+            obj=json.loads(raw)
+            if obj.get('format')!='autokom-jenkins-token-v1':raise SecurityError('Format Jenkins secret inattendu')
+        except json.JSONDecodeError as exc:
+            raise SecurityError('Secret Jenkins JSON invalide') from exc
+        return False
+    if ':' not in raw or '\n' in raw:
+        raise SecurityError('Format de jeton Jenkins historique invalide')
+    _write(JENKINS, {'format':'autokom-jenkins-token-v1',
+                   'token_encrypted':_fernet().encrypt(raw.encode()).decode('ascii')})
+    return True
+
 
 def main(argv=None):
     p=argparse.ArgumentParser(prog='autokom auth',description='Passphrase locale + e-mail OTP de récupération (SMTP TLS requis)')
     sub=p.add_subparsers(dest='action')
-    for action,helptext in [('status','État sans secrets'),('smtp','Configurer le transport SMTP STARTTLS'),('setup','Créer passphrase et vérifier e-mail par OTP'),('verify','Vérifier la passphrase'),('change','Changer la passphrase'),('reset','Récupération par OTP e-mail'),('jenkins-token','Mémoriser une fois le jeton API Jenkins')]:
+    for action,helptext in [('status','État sans secrets'),('smtp','Configurer le transport SMTP STARTTLS'),('setup','Créer passphrase et vérifier e-mail par OTP'),('verify','Vérifier la passphrase'),('change','Changer la passphrase'),('reset','Récupération par OTP e-mail ou code de secours'),('recovery-codes','Régénérer les codes de secours'),('migrate','Chiffrer les anciens secrets SMTP et Jenkins'),('jenkins-token','Mémoriser une fois le jeton API Jenkins')]:
         sub.add_parser(action,help=helptext)
+    sub.choices['reset'].add_argument('--method',choices=['email','code'],help='Canal de récupération ; en menu interactif un choix est proposé')
     args=p.parse_args(argv)
     if args.action is None:
         if not sys.stdin.isatty():p.print_help();return 0
@@ -365,7 +525,8 @@ def main(argv=None):
         while True:
             if configured():
                 choices=[('status','Afficher l’état de sécurité'),('verify','Vérifier la passphrase'),
-                         ('change','Changer la passphrase'),('reset','Passphrase oubliée : OTP e-mail'),
+                         ('change','Changer la passphrase'),('reset','Passphrase oubliée : OTP ou code de secours'),
+                         ('recovery-codes','Renouveler les codes de secours'),('migrate','Chiffrer les anciens secrets SMTP'),
                          ('jenkins-token','Enregistrer le jeton Jenkins une fois'),('smtp','Configurer le transport SMTP')]
             else:
                 choices=[('smtp','Configurer SMTP TLS (requis pour OTP)'),
@@ -386,15 +547,37 @@ def main(argv=None):
         print('  '+('✓ SMTP prêt (configuration)' if conf else '! SMTP absent'))
         if conf:
             print('  › EMAIL_HOST: '+str(conf['host'])+' · EMAIL_PORT: '+str(conf['port']))
-            print('  › EMAIL_LOGIN: '+('configuré' if conf['login'] else 'non requis')+' · EMAIL_MDP: '+('protégé' if conf['password'] else 'non requis'))
+            stored = _read(SMTP, {})
+            secret_status = 'chiffré' if 'EMAIL_MDP_ENCRYPTED' in stored else ('historique à migrer' if conf['password'] else 'non requis')
+            print('  › EMAIL_LOGIN: '+('configuré' if conf['login'] else 'non requis')+' · EMAIL_MDP: '+secret_status)
             print('  › EMAIL_FROM: '+str(conf['sender'])+' · EMAIL_ADMIN: '+('configuré' if conf['admin'] else 'non défini'))
-        print('  '+('✓ Jeton Jenkins protégé' if JENKINS.exists() else '› Jeton Jenkins non configuré'))
+        codes = _read(RECOVERY_CODES, {})
+        print('  › Codes de secours encore disponibles : ' + str(len(codes.get('hashes', []))))
+        if JENKINS.exists():
+            encrypted=JENKINS.read_text(encoding='utf-8').lstrip().startswith('{')
+            print('  '+('✓ Jeton Jenkins chiffré' if encrypted else '! Jeton Jenkins historique : sudo autokom auth migrate'))
+        else:
+            print('  › Jeton Jenkins non configuré')
         return 0
     if args.action=='smtp':smtp_setup()
     elif args.action=='setup':setup()
     elif args.action=='verify':authorize('vérification manuelle')
     elif args.action=='change':
         authorize('changer la passphrase');state=_read(STATE);state['passphrase']=_hash(_password_new());_write(STATE,state);print('  ✓ Passphrase renouvelée')
-    elif args.action=='reset':recovery()
+    elif args.action=='reset':
+        method = args.method
+        if method is None:
+            from menu import pick
+            choice = pick('AUTOKOM · RÉCUPÉRATION', ['OTP envoyé à EMAIL_ADMIN', 'Code de secours hors ligne'],cancel_label='Annuler')
+            if not choice:return 0
+            method = 'email' if choice == 1 else 'code'
+        recovery(method)
+    elif args.action=='recovery-codes':renew_codes()
+    elif args.action=='migrate':
+        if configured():authorize('chiffrer les anciens secrets')
+        _smtp_migrate_legacy()
+        migrated = _migrate_jenkins_legacy()
+        print('  ✓ Configuration SMTP : secret chiffré au repos si présent')
+        print('  ✓ Jeton Jenkins : '+('ancien format migré vers le coffre chiffré' if migrated else 'déjà chiffré ou non configuré'))
     elif args.action=='jenkins-token':set_jenkins_credential()
     return 0

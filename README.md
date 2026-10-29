@@ -110,3 +110,13 @@ la même ouverture de terminal que les autres menus AUTOKOM. Champs SMTP
 `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_LOGIN`, `EMAIL_MDP`, `EMAIL_FROM`,
 `EMAIL_ADMIN` (avec double confirmation), STARTTLS 587 ou TLS direct 465.
 Documentation : `docs/AUTH-TTY-SMTP-v29.md`.
+
+### v30 — Authentification, OTP et récupération hors ligne
+
+La configuration SMTP confirme `EMAIL_ADMIN` une seule fois. `sudo autokom auth setup`
+réutilise cette adresse, valide obligatoirement le code OTP reçu **avant**
+d'enregistrer la passphrase, puis affiche 10 codes de secours à usage unique.
+Les mots de passe SMTP et jetons Jenkins sont chiffrés au repos (clé `vault.key`
+root-only) ; les passphrases, OTP et codes sont stockés sous forme d'empreintes.
+Documentation : `docs/AUTH-OTP-RECOVERY-v30.md`. Anciennes configurations :
+`sudo autokom auth migrate` après application du correctif.
