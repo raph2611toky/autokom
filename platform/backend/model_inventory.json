@@ -1,0 +1,337 @@
+[
+  {
+    "app": "administrators",
+    "module": "apps.accounts.admin.models",
+    "model": "Administrator"
+  },
+  {
+    "app": "accounts",
+    "module": "apps.accounts.user.models",
+    "model": "User"
+  },
+  {
+    "app": "accounts",
+    "module": "apps.accounts.user.models",
+    "model": "EmailVerification"
+  },
+  {
+    "app": "accounts",
+    "module": "apps.accounts.user.models",
+    "model": "PasswordResetRequest"
+  },
+  {
+    "app": "accounts",
+    "module": "apps.accounts.user.models",
+    "model": "UserSession"
+  },
+  {
+    "app": "accounts",
+    "module": "apps.accounts.user.models",
+    "model": "MFADevice"
+  },
+  {
+    "app": "accounts",
+    "module": "apps.accounts.user.models",
+    "model": "UserPreference"
+  },
+  {
+    "app": "organizations",
+    "module": "apps.organizations.models",
+    "model": "Organization"
+  },
+  {
+    "app": "organizations",
+    "module": "apps.organizations.models",
+    "model": "OrganizationMembership"
+  },
+  {
+    "app": "organizations",
+    "module": "apps.organizations.models",
+    "model": "OrganizationInvitation"
+  },
+  {
+    "app": "integrations",
+    "module": "apps.projects.integrations.models",
+    "model": "GitConnection"
+  },
+  {
+    "app": "integrations",
+    "module": "apps.projects.integrations.models",
+    "model": "GitRepository"
+  },
+  {
+    "app": "integrations",
+    "module": "apps.projects.integrations.models",
+    "model": "WebhookEndpoint"
+  },
+  {
+    "app": "integrations",
+    "module": "apps.projects.integrations.models",
+    "model": "WebhookDelivery"
+  },
+  {
+    "app": "projects",
+    "module": "apps.projects.project.models",
+    "model": "Project"
+  },
+  {
+    "app": "projects",
+    "module": "apps.projects.project.models",
+    "model": "ProjectMember"
+  },
+  {
+    "app": "projects",
+    "module": "apps.projects.project.models",
+    "model": "ProjectTag"
+  },
+  {
+    "app": "environments",
+    "module": "apps.projects.environments.models",
+    "model": "Environment"
+  },
+  {
+    "app": "environments",
+    "module": "apps.projects.environments.models",
+    "model": "EnvironmentVariable"
+  },
+  {
+    "app": "environments",
+    "module": "apps.projects.environments.models",
+    "model": "EnvironmentBranchRule"
+  },
+  {
+    "app": "configurations",
+    "module": "apps.projects.configurations.models",
+    "model": "DeploymentConfig"
+  },
+  {
+    "app": "configurations",
+    "module": "apps.projects.configurations.models",
+    "model": "ConfigValidationReport"
+  },
+  {
+    "app": "configurations",
+    "module": "apps.projects.configurations.models",
+    "model": "DeploymentTriggerRule"
+  },
+  {
+    "app": "secrets",
+    "module": "apps.projects.secrets.models",
+    "model": "SecretReference"
+  },
+  {
+    "app": "secrets",
+    "module": "apps.projects.secrets.models",
+    "model": "SecretVersion"
+  },
+  {
+    "app": "deployments",
+    "module": "apps.deployments.deployment.models",
+    "model": "DeploymentRun"
+  },
+  {
+    "app": "deployments",
+    "module": "apps.deployments.deployment.models",
+    "model": "DeploymentApproval"
+  },
+  {
+    "app": "deployments",
+    "module": "apps.deployments.deployment.models",
+    "model": "DeploymentTriggerEvent"
+  },
+  {
+    "app": "pipelines",
+    "module": "apps.deployments.pipelines.models",
+    "model": "PipelineStageRun"
+  },
+  {
+    "app": "pipelines",
+    "module": "apps.deployments.pipelines.models",
+    "model": "PipelineStageEvent"
+  },
+  {
+    "app": "pipelines",
+    "module": "apps.deployments.pipelines.models",
+    "model": "PipelineLogChunk"
+  },
+  {
+    "app": "pipelines",
+    "module": "apps.deployments.pipelines.models",
+    "model": "PipelineExternalExecution"
+  },
+  {
+    "app": "pipelines",
+    "module": "apps.deployments.pipelines.models",
+    "model": "PipelineFinding"
+  },
+  {
+    "app": "releases",
+    "module": "apps.deployments.releases.models",
+    "model": "BuildArtifact"
+  },
+  {
+    "app": "releases",
+    "module": "apps.deployments.releases.models",
+    "model": "Release"
+  },
+  {
+    "app": "sites",
+    "module": "apps.deployments.sites.models",
+    "model": "HostedApplication"
+  },
+  {
+    "app": "sites",
+    "module": "apps.deployments.sites.models",
+    "model": "SiteHealthCheck"
+  },
+  {
+    "app": "sites",
+    "module": "apps.deployments.sites.models",
+    "model": "SiteAction"
+  },
+  {
+    "app": "domains",
+    "module": "apps.deployments.domains.models",
+    "model": "Domain"
+  },
+  {
+    "app": "domains",
+    "module": "apps.deployments.domains.models",
+    "model": "DomainVerification"
+  },
+  {
+    "app": "domains",
+    "module": "apps.deployments.domains.models",
+    "model": "DomainBinding"
+  },
+  {
+    "app": "domains",
+    "module": "apps.deployments.domains.models",
+    "model": "TLSCertificate"
+  },
+  {
+    "app": "infrastructure",
+    "module": "apps.infrastructure.tools.models",
+    "model": "IntegrationAdapter"
+  },
+  {
+    "app": "infrastructure",
+    "module": "apps.infrastructure.tools.models",
+    "model": "ToolCapability"
+  },
+  {
+    "app": "infrastructure",
+    "module": "apps.infrastructure.tools.models",
+    "model": "IntegrationHealthCheck"
+  },
+  {
+    "app": "infrastructure",
+    "module": "apps.infrastructure.tools.models",
+    "model": "DeploymentPool"
+  },
+  {
+    "app": "resources",
+    "module": "apps.infrastructure.resources.models",
+    "model": "ResourcePlan"
+  },
+  {
+    "app": "resources",
+    "module": "apps.infrastructure.resources.models",
+    "model": "QuotaAssignment"
+  },
+  {
+    "app": "resources",
+    "module": "apps.infrastructure.resources.models",
+    "model": "ResourceAllocation"
+  },
+  {
+    "app": "resources",
+    "module": "apps.infrastructure.resources.models",
+    "model": "ResourceReservation"
+  },
+  {
+    "app": "resources",
+    "module": "apps.infrastructure.resources.models",
+    "model": "ResourceUsageRollup"
+  },
+  {
+    "app": "policies",
+    "module": "apps.infrastructure.policies.models",
+    "model": "PipelinePolicy"
+  },
+  {
+    "app": "policies",
+    "module": "apps.infrastructure.policies.models",
+    "model": "PipelinePolicyVersion"
+  },
+  {
+    "app": "policies",
+    "module": "apps.infrastructure.policies.models",
+    "model": "PipelineStageRule"
+  },
+  {
+    "app": "operations",
+    "module": "apps.infrastructure.operations.models",
+    "model": "AsyncOperation"
+  },
+  {
+    "app": "operations",
+    "module": "apps.infrastructure.operations.models",
+    "model": "OperationAttempt"
+  },
+  {
+    "app": "operations",
+    "module": "apps.infrastructure.operations.models",
+    "model": "OutboxEvent"
+  },
+  {
+    "app": "monitoring",
+    "module": "apps.infrastructure.monitoring.models",
+    "model": "MonitoringRule"
+  },
+  {
+    "app": "monitoring",
+    "module": "apps.infrastructure.monitoring.models",
+    "model": "MonitoringAlert"
+  },
+  {
+    "app": "monitoring",
+    "module": "apps.infrastructure.monitoring.models",
+    "model": "HealthSnapshot"
+  },
+  {
+    "app": "assistant",
+    "module": "apps.assistance.ai.models",
+    "model": "AIProviderConfig"
+  },
+  {
+    "app": "assistant",
+    "module": "apps.assistance.ai.models",
+    "model": "AIInteraction"
+  },
+  {
+    "app": "assistant",
+    "module": "apps.assistance.ai.models",
+    "model": "AISuggestion"
+  },
+  {
+    "app": "notifications",
+    "module": "apps.assistance.notifications.models",
+    "model": "Notification"
+  },
+  {
+    "app": "notifications",
+    "module": "apps.assistance.notifications.models",
+    "model": "NotificationPreference"
+  },
+  {
+    "app": "notifications",
+    "module": "apps.assistance.notifications.models",
+    "model": "NotificationDelivery"
+  },
+  {
+    "app": "auditing",
+    "module": "apps.assistance.auditing.models",
+    "model": "AuditEvent"
+  }
+]
