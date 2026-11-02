@@ -1,60 +1,45 @@
-import { useCallback, useState } from 'react'
-import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom'
-import { Info, X } from 'lucide-react'
-import Sidebar from './components/Sidebar.jsx'
-import Navbar from './components/Navbar.jsx'
-import Dashboard from './pages/Dashboard.jsx'
-import Infrastructure from './pages/Infrastructure.jsx'
-import Installation from './pages/Installation.jsx'
-import Pipelines from './pages/Pipelines.jsx'
-import Deployments from './pages/Deployments.jsx'
-import Observability from './pages/Observability.jsx'
-import Logs from './pages/Logs.jsx'
-import CyberResilience from './pages/CyberResilience.jsx'
-import Settings from './pages/Settings.jsx'
+import { useEffect, useState } from 'react'
+import Header from './components/Header.jsx'
+import Login from './pages/Login.jsx'
+import Deploy from './pages/Deploy.jsx'
+import Sites from './pages/Sites.jsx'
 
-function AppShell() {
-  const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [notice, setNotice] = useState('')
-  const location = useLocation()
-  const notify = useCallback((message) => setNotice(message), [])
-
-  return (
-    <div className="app-shell">
-      <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
-      <div className="app-body">
-        <Navbar onOpenSidebar={() => setSidebarOpen(true)} />
-        <main className="main-content" id="main-content" key={location.pathname}>
-          <Outlet context={{ notify }} />
-        </main>
-      </div>
-      {notice && (
-        <div className="toast" role="status" aria-live="polite">
-          <Info size={19} aria-hidden="true" />
-          <span>{notice}</span>
-          <button className="icon-button" type="button" aria-label="Fermer le message" onClick={() => setNotice('')}><X size={18}/></button>
-        </div>
-      )}
-    </div>
-  )
+function locationRoute() {
+  return ['/deploy', '/sites'].includes(window.location.pathname)
+    ? window.location.pathname
+    : '/login'
 }
 
 export default function App() {
+  const [route, setRoute] = useState(locationRoute)
+
+  useEffect(() => {
+    const onPopState = () => setRoute(locationRoute())
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+
+  function navigate(path) {
+    if (!['/login', '/deploy', '/sites'].includes(path)) return
+    window.history.pushState(null, '', path)
+    setRoute(path)
+    window.scrollTo(0, 0)
+  }
+
+  // Frontend seul : la navigation ne constitue PAS une authentification.
+  // Le contrôle d'accès réel sera implémenté plus tard côté serveur.
+  if (route === '/login') return <Login />
+
   return (
-    <Routes>
-      <Route element={<AppShell />}>
-        <Route index element={<Navigate to="/dashboard" replace />} />
-        <Route path="dashboard" element={<Dashboard />} />
-        <Route path="infrastructure" element={<Infrastructure />} />
-        <Route path="installation" element={<Installation />} />
-        <Route path="pipelines" element={<Pipelines />} />
-        <Route path="deployments" element={<Deployments />} />
-        <Route path="observability" element={<Observability />} />
-        <Route path="logs" element={<Logs />} />
-        <Route path="cyber-resilience" element={<CyberResilience />} />
-        <Route path="settings" element={<Settings />} />
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
-      </Route>
-    </Routes>
+    <div className="app-shell">
+      <Header route={route} navigate={navigate} />
+      <main className="container workspace" id="main-content">
+        {route === '/sites' ? <Sites /> : <Deploy />}
+      </main>
+      <footer className="container footer">
+        <span>AUTOKOM / Configuration des déploiements</span>
+        <span>Frontend uniquement</span>
+      </footer>
+    </div>
   )
 }
