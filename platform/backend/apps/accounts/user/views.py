@@ -11,7 +11,7 @@ from helpers.errors import handle_error
 from helpers.security import token_digest
 from apps.organizations.models import OrganizationMembership
 from apps.projects.project.models import ProjectMember
-from apps.accounts.user.models import User, EmailVerification, PasswordResetRequest, UserSession
+from apps.accounts.user.models import User, UserActionToken, UserSession
 from apps.accounts.user.permissions import IsClientUser
 from apps.accounts.user.serializers import (UserSerializer, RegisterSerializer, TokenSerializer, EmailSerializer,
     LoginSerializer, RefreshSerializer, LogoutSerializer, ResetPasswordSerializer,
@@ -65,8 +65,8 @@ class VerifyEmailAPIView(APIView):
             serializer = TokenSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
             with transaction.atomic():
-                verification = EmailVerification.objects.select_for_update().select_related('user').filter(
-                    token_hash=token_digest(serializer.validated_data['token'])).first()
+                verification = UserActionToken.objects.select_for_update().select_related('user').filter(
+                    purpose=UserActionToken.Purpose.VERIFY_EMAIL, token_hash=token_digest(serializer.validated_data['token'])).first()
                 if not verification or verification.consumed_at or verification.expires_at <= timezone.now():
                     return api_error('Lien de vérification invalide ou expiré.', status_code=400)
                 user = verification.user
@@ -198,8 +198,8 @@ class ResetPasswordAPIView(APIView):
             serializer = ResetPasswordSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
             with transaction.atomic():
-                record = PasswordResetRequest.objects.select_for_update().select_related('user').filter(
-                    token_hash=token_digest(serializer.validated_data['token'])).first()
+                record = UserActionToken.objects.select_for_update().select_related('user').filter(
+                    purpose=UserActionToken.Purpose.RESET_PASSWORD, token_hash=token_digest(serializer.validated_data['token'])).first()
                 if not record or record.consumed_at or record.expires_at <= timezone.now():
                     return api_error('Lien de réinitialisation invalide ou expiré.', status_code=400)
                 user = User.objects.select_for_update().get(pk=record.user_id)

@@ -5,4 +5,4 @@ class ClientsConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'apps.accounts.user'
     label = 'accounts'
-    verbose_name = 'Comptes clients'
+    verbose_name = 'Comptes utilisateurs'

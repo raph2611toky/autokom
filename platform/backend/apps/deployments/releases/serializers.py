@@ -1,1 +1,1 @@
-"""Réservé aux futurs serializers DRF de cette application."""
+"""Serializers à implémenter lors de la phase API métier."""

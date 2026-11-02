@@ -1,1 +1,1 @@
-"""Réservé aux futures APIView métier (une méthode HTTP par classe)."""
+"""Vues métier : à implémenter avec APIView uniquement (une méthode HTTP par classe)."""

@@ -1,1 +1,1 @@
-"""Un module drf-yasg par APIView métier, avec réponses JSON exactes."""
+"""Schémas drf-yasg par vue ; imports absolus depuis apps.*."""

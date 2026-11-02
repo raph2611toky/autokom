@@ -1,1 +1,1 @@
-"""Réservé aux tests de l’application."""
+"""Tests métier à ajouter avec les futures API."""

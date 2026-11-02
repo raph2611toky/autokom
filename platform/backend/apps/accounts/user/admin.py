@@ -1,5 +1,5 @@
 from django.contrib import admin
-from apps.accounts.user.models import User, EmailVerification, PasswordResetRequest, UserSession, MFADevice, UserPreference
+from apps.accounts.user.models import User, UserActionToken, UserSession
 
 
 @admin.register(User)
@@ -11,7 +11,16 @@ class ClientUserAdmin(admin.ModelAdmin):
     exclude = ('avatar',)
 
     def has_add_permission(self, request):
-        return False  # Les clients s'inscrivent exclusivement via le service métier.
+        return False
 
 
-admin.site.register([EmailVerification, PasswordResetRequest, UserSession, MFADevice, UserPreference])
+@admin.register(UserActionToken)
+class UserActionTokenAdmin(admin.ModelAdmin):
+    list_display = ('user', 'purpose', 'created_at', 'expires_at', 'consumed_at')
+    readonly_fields = ('token_hash',)
+
+
+@admin.register(UserSession)
+class UserSessionAdmin(admin.ModelAdmin):
+    list_display = ('user', 'created_at', 'expires_at', 'revoked_at')
+    readonly_fields = ('jti_hash',)

@@ -1,1 +1,1 @@
-"""Réservé aux permissions métier propres à cette app."""
+"""Permissions métiers à implémenter avec validation des droits côté serveur."""

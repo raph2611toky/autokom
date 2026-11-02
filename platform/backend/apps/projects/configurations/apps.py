@@ -5,4 +5,4 @@ class ConfigurationsConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'apps.projects.configurations'
     label = 'configurations'
-    verbose_name = 'Configurations de déploiement'
+    verbose_name = 'Configurations des déploiements'

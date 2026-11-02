@@ -1,5 +1,3 @@
-"""Les routes seront ajoutées avec les APIView métier."""
-
-from django.urls import path
+"""Routes métiers non exposées tant que les vues ne sont pas implémentées."""
 
 urlpatterns = []

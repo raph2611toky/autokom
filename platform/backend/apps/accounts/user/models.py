@@ -1,17 +1,15 @@
 import uuid
-from django.contrib.auth.hashers import make_password, check_password
+
 from django.db import models
+from django.contrib.auth.hashers import make_password, check_password
 from django.db.models.functions import Lower
 from django.utils import timezone
 from apps.accounts.user.managers import ClientUserManager
 
+
 class User(models.Model):
-    """Client applicatif; distinct du compte Django administrateur."""
-
+    """Identité cliente distincte du compte système de Django."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
     email = models.EmailField(max_length=254, unique=True)
     full_name = models.CharField(max_length=180)
     password = models.CharField(max_length=128)
@@ -22,13 +20,15 @@ class User(models.Model):
     last_login_at = models.DateTimeField(null=True, blank=True)
     password_changed_at = models.DateTimeField(null=True, blank=True)
     token_version = models.PositiveBigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
     objects = ClientUserManager()
 
-    def set_password(self, value):
-        self.password = make_password(value)
+    def set_password(self, password):
+        self.password = make_password(password)
 
-    def check_password(self, value):
-        return check_password(value, self.password)
+    def check_password(self, password):
+        return check_password(password, self.password)
 
     @property
     def is_authenticated(self):
@@ -45,45 +45,33 @@ class User(models.Model):
         db_table = 'accounts_user'
         constraints = [models.UniqueConstraint(Lower('email'), name='unique_lower_client_email')]
 
-class EmailVerification(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
-    user = models.ForeignKey('accounts.User', on_delete=models.CASCADE, related_name='email_verifications')
+class UserActionToken(models.Model):
+    """Un jeton à usage unique : activation d'email OU réinitialisation."""
+    class Purpose(models.TextChoices):
+        VERIFY_EMAIL = 'VERIFY_EMAIL', 'Vérifier l’email'
+        RESET_PASSWORD = 'RESET_PASSWORD', 'Réinitialiser le mot de passe'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey('accounts.User', on_delete=models.CASCADE, related_name='action_tokens')
+    purpose = models.CharField(max_length=24, choices=Purpose.choices)
     token_hash = models.CharField(max_length=64, unique=True)
     expires_at = models.DateTimeField()
     consumed_at = models.DateTimeField(null=True, blank=True)
-
-    def __str__(self):
-        return f'EmailVerification : {self.pk}'
-
-    class Meta:
-        db_table = 'accounts_emailverification'
-
-class PasswordResetRequest(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    user = models.ForeignKey('accounts.User', on_delete=models.CASCADE, related_name='password_resets')
-    token_hash = models.CharField(max_length=64, unique=True)
-    expires_at = models.DateTimeField()
-    consumed_at = models.DateTimeField(null=True, blank=True)
-
     def __str__(self):
-        return f'PasswordResetRequest : {self.pk}'
+        return f'{self.user.email} — {self.get_purpose_display()}'
 
     class Meta:
-        db_table = 'accounts_passwordresetrequest'
+        db_table = 'accounts_useractiontoken'
+        indexes = [models.Index(fields=['user', 'purpose', 'consumed_at'])]
+
 
 class UserSession(models.Model):
-    """Session de renouvellement JWT client, révoquée à chaque rotation."""
-
+    """Session renouvelable du client; jeton JWT représenté par une empreinte."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
     user = models.ForeignKey('accounts.User', on_delete=models.CASCADE, related_name='sessions')
     jti_hash = models.CharField(max_length=64, unique=True)
     token_family = models.UUIDField(default=uuid.uuid4, db_index=True)
@@ -93,49 +81,16 @@ class UserSession(models.Model):
     last_seen_at = models.DateTimeField(null=True, blank=True)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     user_agent = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     @property
     def is_valid(self):
         return self.revoked_at is None and self.expires_at > timezone.now()
 
+    def __str__(self):
+        return f'{self.user.email} — session {self.id}'
+
     class Meta:
         db_table = 'accounts_usersession'
         indexes = [models.Index(fields=['user', 'revoked_at', 'expires_at'])]
-
-    def __str__(self):
-        return f'UserSession : {self.pk}'
-
-class MFADevice(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    user = models.ForeignKey('accounts.User', on_delete=models.CASCADE, related_name='mfa_devices')
-    method = models.CharField(max_length=25, default='TOTP')
-    name = models.CharField(max_length=150)
-    secret_ref = models.CharField(max_length=255, blank=True)
-    is_confirmed = models.BooleanField(default=False)
-    last_used_at = models.DateTimeField(null=True, blank=True)
-
-    def __str__(self):
-        return f'MFADevice : {self.name}'
-
-    class Meta:
-        db_table = 'accounts_mfadevice'
-
-class UserPreference(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    user = models.OneToOneField('accounts.User', on_delete=models.CASCADE, related_name='preferences')
-    language = models.CharField(max_length=12, default='fr')
-    timezone = models.CharField(max_length=64, default='Indian/Antananarivo')
-    theme = models.CharField(max_length=12, default='system')
-    settings = models.JSONField(default=dict, blank=True)
-
-    def __str__(self):
-        return f'UserPreference : {self.pk}'
-
-    class Meta:
-        db_table = 'accounts_userpreference'

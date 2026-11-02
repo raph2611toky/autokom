@@ -4,7 +4,7 @@ from django.test import override_settings
 from django.urls import reverse
 from rest_framework.test import APITestCase
 from helpers.security import token_digest
-from apps.accounts.user.models import User, EmailVerification, PasswordResetRequest, UserSession
+from apps.accounts.user.models import User, UserActionToken, UserSession
 
 @override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
 class AccountsLifecycleTests(APITestCase):
