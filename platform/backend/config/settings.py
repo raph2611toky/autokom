@@ -122,7 +122,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_CLASSES': ['rest_framework.throttling.AnonRateThrottle'],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '60/hour', 'login': '10/hour', 'registration': '5/hour',
-        'reset': '6/hour', 'refresh': '60/hour',
+        'reset': '6/hour', 'refresh': '60/hour', 'github_oauth': '20/hour',
     },
 }
 SWAGGER_SETTINGS = {
@@ -188,3 +188,13 @@ SECURE_REFERRER_POLICY = 'strict-origin-when-cross-origin'
 SECURE_SSL_REDIRECT = env_bool('SECURE_SSL_REDIRECT', not DEBUG)
 if env_bool('TRUST_PROXY_SSL_HEADER', False):
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# GitHub App user authorization. Configurer les valeurs réelles dans .env.
+GITHUB_APP_CLIENT_ID = os.getenv('GITHUB_APP_CLIENT_ID', '').strip()
+GITHUB_APP_CLIENT_SECRET = os.getenv('GITHUB_APP_CLIENT_SECRET', '').strip()
+GITHUB_APP_SLUG = os.getenv('GITHUB_APP_SLUG', '').strip()
+GITHUB_APP_CALLBACK_URL = os.getenv('GITHUB_APP_CALLBACK_URL', '').strip()
+GITHUB_WEBHOOK_SECRET = os.getenv('GITHUB_WEBHOOK_SECRET', '').strip()
+AUTOKOM_FIELD_ENCRYPTION_KEY = os.getenv('AUTOKOM_FIELD_ENCRYPTION_KEY', '').strip()
+AUTOKOM_BASE_DOMAIN = os.getenv('AUTOKOM_BASE_DOMAIN', 'apps.autokom.example').lower().strip('.')
+GITHUB_API_VERSION = os.getenv('GITHUB_API_VERSION', '2026-03-10')

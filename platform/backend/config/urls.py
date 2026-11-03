@@ -12,7 +12,14 @@ from rest_framework.permissions import IsAdminUser
 from config.views import SwaggerLoginPageAPIView, SwaggerLoginSubmitAPIView, SwaggerLogoutAPIView
 
 # Only client APIs enter the generated schema; no internal/admin endpoints.
-client_api_patterns = [path('api/auth/', include('apps.accounts.user.urls'))]
+client_api_patterns = [
+    path('api/auth/', include('apps.accounts.user.urls')),
+    path('api/projects/git/', include('apps.projects.git.urls')),
+    path('api/projects/', include('apps.projects.environments.urls')),
+    path('api/projects/', include('apps.projects.configurations.urls')),
+    path('api/projects/', include('apps.projects.secrets.urls')),
+    path('api/projects/', include('apps.projects.project.urls')),
+]
 schema_view = get_schema_view(
     openapi.Info(
         title='AUTOKOM Platform — API clients',
