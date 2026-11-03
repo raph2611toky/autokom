@@ -88,6 +88,10 @@ def secure_env_write(values):
     # accidental EnvironmentFile injection and stale/wrong runtime settings.
     allowed = {
         'DEBUG', 'DJANGO_SECRET_KEY', 'CLIENT_JWT_SIGNING_KEY',
+        'CLIENT_JWT_ISSUER', 'CLIENT_JWT_AUDIENCE',
+        'CLIENT_ACCESS_MINUTES', 'CLIENT_REFRESH_DAYS',
+        'DB_TEST_NAME', 'EMAIL_USE_SSL',
+        'AES_KEY', 'AES_IV',
         'DB_ENGINE', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD',
         'ALLOWED_HOSTS', 'FRONTEND_URL', 'CSRF_TRUSTED_ORIGINS', 'CORS_ALLOWED_ORIGINS',
         'EMAIL_BACKEND', 'EMAIL_HOST', 'EMAIL_PORT', 'EMAIL_USE_TLS', 'EMAIL_HOST_USER',
