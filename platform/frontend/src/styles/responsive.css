@@ -1,0 +1,99 @@
+/* Correctifs transversaux — adaptabilité de toutes les pages actuelles. */
+#root { min-width: 0; }
+.app-shell, .workspace, .deploy-column, .deploy-aside, .main-panel, .inventory-panel, .lp { min-width: 0; }
+.app-shell img, .lp img { max-width: 100%; }
+.app-shell input, .app-shell textarea, .app-shell select, .auth-ui input { max-width: 100%; }
+.app-shell :is(.field, .select-wrap, .service-option, .gh-connect, .service-catalog) { min-width: 0; }
+.app-shell :is(.field input, .field select, .field textarea, .gh-search input) { width: 100%; min-width: 0; }
+.modal-backdrop { background: rgba(0, 0, 0, .58); }
+.auth-ui-panel { animation: auth-panel-arrive .22s ease-out both; }
+.auth-ui-intro { animation: auth-panel-arrive .27s ease-out both; }
+@keyframes auth-panel-arrive { from { opacity: .55; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+@media (max-width: 950px) {
+  .app-shell .container { width: min(100% - 36px, 100%); }
+  .app-shell .nav-inner { gap: 13px; }
+  .app-shell .top-tabs { min-width: 0; }
+  .app-shell .tab-button { padding: 11px 12px; }
+  .app-shell .page-hero { gap: 20px; }
+  .app-shell .deploy-layout { grid-template-columns: 1fr; }
+  .app-shell .deploy-aside { min-width: 0; }
+  .app-shell .summary-panel .cut-body { display: block; }
+  .app-shell .summary-panel .summary-list { margin-top: 18px; }
+}
+
+@media (max-width: 650px) {
+  .app-shell .container { width: calc(100% - 28px); }
+  .app-shell .nav-inner { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding-block: 12px; }
+  .app-shell .top-tabs { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; width: 100%; }
+  .app-shell .ak-header-actions { grid-column: 2; grid-row: 1; }
+  .app-shell .brand-wrap { grid-column: 1; grid-row: 1; min-width: 0; }
+  .app-shell .tab-button { justify-content: center; font-size: 12px; min-height: 45px; padding: 10px 7px; white-space: normal; line-height: 1.2; text-align: center; }
+  .app-shell .page-hero { padding-block: 25px 26px; flex-wrap: wrap; }
+  .app-shell .page-hero h1 { font-size: clamp(30px, 7vw, 40px); line-height: 1.12; }
+  .app-shell .page-hero p { font-size: 13px; }
+  .app-shell .step-navigation { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+  .app-shell .step-tab { min-width: 0; min-height: 52px; padding: 8px; font-size: 11px; white-space: normal; }
+  .app-shell .main-panel .cut-body { min-height: 0; padding: 23px 18px; }
+  .app-shell .form-grid, .app-shell .security-grid { grid-template-columns: 1fr; }
+  .app-shell .form-actions { flex-wrap: wrap; align-items: stretch; }
+  .app-shell .form-actions > button { width: 100%; }
+  .app-shell .actions-right { width: 100%; flex-wrap: wrap; }
+  .app-shell .actions-right > button { flex: 1 1 140px; white-space: normal; }
+  .app-shell .gh-connect { padding: 18px 15px; }
+  .app-shell .gh-connect-head { flex-wrap: wrap; }
+  .app-shell .gh-connect-title { flex-basis: calc(100% - 60px); }
+  .app-shell .gh-state { margin: 0; }
+  .app-shell .pipeline-mode { display: grid; grid-template-columns: 1fr; }
+  .app-shell .pipeline-mode > div:last-child { width: max-content; max-width: 100%; }
+  .app-shell .service-filter { gap: 7px; }
+  .app-shell .service-filter button { flex: 1 1 auto; }
+  .app-shell .service-options { grid-template-columns: 1fr; }
+  .app-shell .inventory-tools { align-items: stretch; }
+  .app-shell .filter-bar { width: 100%; overflow-x: auto; justify-content: flex-start; overscroll-behavior-inline: contain; }
+  .app-shell .filter-bar button { flex: 1 0 auto; white-space: normal; line-height: 1.25; }
+  .app-shell .site-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .app-shell .site-info { min-width: 0; flex: 1 1 150px; }
+  .app-shell .site-row { flex-wrap: wrap; }
+  .app-shell .modal-head, .app-shell .modal-content { padding-inline: 20px; }
+  .app-shell .footer { align-items: flex-start; line-height: 1.6; }
+}
+
+@media (max-width: 390px) {
+  .app-shell .container { width: calc(100% - 22px); }
+  .app-shell .ak-header-actions { gap: 4px; }
+  .app-shell .top-tabs .tab-button { font-size: 11px; }
+  .app-shell .brand-name { font-size: 18px; }
+  .app-shell .step-tab { font-size: 10px; }
+  .app-shell .main-panel .cut-body { padding: 18px 13px; }
+  .app-shell .site-stats .stat .cut-body { padding: 11px 9px; }
+  .app-shell .site-stats .stat-icon { width: 30px; height: 30px; }
+  .app-shell .site-stats .stat strong { font-size: 20px; }
+  .app-shell .gh-connect { padding: 16px 12px; }
+  .app-shell .service-option { padding: 12px; }
+  .app-shell .service-filter button { font-size: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-ui-intro, .auth-ui-panel { animation: none !important; }
+}
+
+/* Barre de navigation avec Mes projets, Déployer, Sites & Domaines. */
+@media (max-width: 650px) {
+  .app-shell .top-tabs { grid-template-columns: repeat(3, minmax(0,1fr)); gap: 5px; }
+  .app-shell .top-tabs .tab-button { gap: 5px; border-radius: var(--ak-control-radius); font-size: 11px; padding: 10px 4px; }
+  .app-shell .top-tabs .tab-button svg { width: 14px; height: 14px; }
+}
+@media (max-width: 390px) {
+  .app-shell .top-tabs .tab-button { font-size: 10px; }
+  .app-shell .top-tabs .tab-button svg { display:none; }
+}
+
+/* Quatrième onglet : Tarifs. */
+@media(max-width:650px) {
+  .app-shell .top-tabs { grid-template-columns:repeat(4,minmax(0,1fr)); gap:4px; }
+  .app-shell .top-tabs .tab-button { font-size:10px; padding:9px 4px; min-height:46px; gap:5px; overflow-wrap:anywhere; }
+}
+@media(max-width:390px) {
+  .app-shell .top-tabs .tab-button { font-size:10px; }
+}

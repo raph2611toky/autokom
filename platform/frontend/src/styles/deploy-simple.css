@@ -1,0 +1,112 @@
+/* AUTOKOM — configuration guidée (V9).
+   Les couleurs proviennent exclusivement des tokens du design system. */
+.ak-deploy-hero { padding-bottom: 27px; }
+.ak-deploy-hero p { max-width: 620px; }
+.ak-quick-deploy .ak-simple-steps { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
+.ak-quick-deploy .ak-simple-steps .step-tab { border-radius: 0; justify-content: flex-start; min-height: 58px; padding: 12px 15px; font-size: 12px; background: var(--ak-surface); }
+.ak-quick-deploy .ak-simple-steps .step-tab.current { border-color: var(--ak-accent-border); color: var(--ak-text-strong); background: var(--ak-accent-soft); }
+.ak-quick-deploy .ak-simple-steps .step-number { background: var(--ak-surface-2); color: var(--ak-muted); }
+.ak-quick-deploy .ak-simple-steps .current .step-number { background: var(--ak-accent); color: var(--ak-accent-contrast); }
+.ak-quick-deploy .main-panel .cut-body { min-height: 440px; }
+.ak-quick-deploy .panel-heading { margin-bottom: 23px; }
+.ak-quick-deploy .panel-heading h2 { margin: 0 0 10px; font-size: clamp(25px, 3vw, 31px); line-height: 1.2; }
+.ak-quick-deploy .panel-heading p { font-size: 13px; max-width: 630px; }
+.ak-quick-deploy .gh-simplified { margin: 0; }
+.ak-quick-deploy .gh-simplified .gh-manual-trigger, .ak-quick-deploy .gh-manual-fields { display: none; }
+.ak-compact-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 22px; }
+.ak-compact-fields input, .ak-quick-deploy .field :is(input,select,textarea) { border-radius: 0; }
+.ak-analysis-state { padding: 18px; display: flex; gap: 13px; align-items: flex-start; background: var(--ak-surface-2); border-left: 3px solid var(--ak-border-strong); }
+.ak-analysis-state > svg { color: var(--ak-muted); margin-top: 1px; }
+.ak-analysis-state strong { display: block; font-size: 13px; line-height: 1.45; }
+.ak-analysis-state small { display: block; margin-top: 5px; font-size: 12px; line-height: 1.65; color: var(--ak-muted); }
+.ak-analysis-state.state-ready { border-left-color: var(--ak-success); }
+.ak-analysis-state.state-ready > svg { color: var(--ak-success); }
+.ak-analysis-state.state-loading { border-left-color: var(--ak-accent); }
+.ak-analysis-state .gh-subtle-button { margin-left: auto; }
+.ak-spin { animation: ak-rotate 1s linear infinite; }
+@keyframes ak-rotate { to { transform: rotate(360deg); } }
+.ak-app-selector { margin-top: 20px; max-width: 510px; }
+.ak-analysis-warnings { margin-top: 14px; }
+.ak-analysis-warnings p { color: var(--ak-warning); font-size: 12px; display: flex; gap: 9px; margin: 7px 0; align-items: flex-start; }
+.ak-analysis-warnings svg { flex-shrink: 0; }
+.ak-offer-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 9px; margin: 30px 0 14px; }
+.ak-offer-header h3 { font-size: 22px; margin: 0; }
+.ak-offer-header small { color: var(--ak-muted); line-height: 1.5; }
+.ak-offers { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.ak-offer-card { min-width: 0; position: relative; background: var(--ak-surface); color: var(--ak-text); text-align: left; padding: 21px 19px 18px; border: 1px solid var(--ak-border-strong); display: flex; flex-direction: column; gap: 10px; transition: border-color .18s, background .18s; }
+.ak-offer-card:hover:not(:disabled) { border-color: var(--ak-accent); }
+.ak-offer-card.selected { background: var(--ak-accent-soft); border-color: var(--ak-accent); }
+.ak-offer-card.selected::before { content: ''; position: absolute; height: 2px; width: 38px; top: -1px; left: 0; background: var(--ak-accent); }
+.ak-offer-top { display: flex; gap: 9px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+.ak-offer-name { font-size: 16px; color: var(--ak-text-strong); font-weight: 800; }
+.ak-offer-tag { font-size: 10px; color: var(--ak-accent); padding: 5px 8px; background: var(--ak-surface-2); font-weight: 700; }
+.ak-offer-card > strong { font-size: 13px; }
+.ak-offer-card p { color: var(--ak-muted); margin: 0; line-height: 1.65; font-size: 12px; flex: 1; }
+.ak-offer-card > small { font-size: 12px; font-weight: 800; color: var(--ak-text-strong); }
+.ak-offer-note { font-size: 10px; color: var(--ak-muted); line-height: 1.5; }
+.ak-offer-card:disabled { opacity: .65; }
+.ak-offer-card:disabled:hover { border-color: var(--ak-border-strong); }
+.ak-ha-choice { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 24px; justify-content: space-between; border: 1px solid var(--ak-border); background: var(--ak-surface-2); margin: 17px 0 0; padding: 18px; }
+.ak-ha-choice > div { flex: 1 1 250px; }
+.ak-ha-choice strong { font-size: 13px; }
+.ak-ha-choice p { font-size: 12px; margin: 5px 0 0; line-height: 1.6; color: var(--ak-muted); }
+.ak-ha-choice > small { flex-basis: 100%; color: var(--ak-muted); font-size: 11px; }
+.ak-ha-switch { display: inline-flex; gap: 9px; align-items: center; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.ak-ha-switch input, .ak-simple-checkbox input { accent-color: var(--ak-accent); width: 16px; height: 16px; }
+.ak-essentials { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; margin: 25px 0 6px; }
+.ak-essentials .field { min-width: 0; }
+.ak-advanced-settings { margin-top: 26px; border-top: 1px solid var(--ak-border); }
+.ak-advanced-settings summary { padding: 20px 2px; color: var(--ak-text); list-style: none; cursor: pointer; display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 13px; }
+.ak-advanced-settings summary::-webkit-details-marker { display: none; }
+.ak-advanced-settings summary::after { content:'+'; font-size: 19px; font-weight: 400; margin-left: auto; color: var(--ak-muted); }
+.ak-advanced-settings[open] summary::after { content:'−'; }
+.ak-advanced-settings summary span { color: var(--ak-muted); font-weight: 400; margin-left: 5px; }
+.ak-advanced-settings > p { color: var(--ak-muted); font-size: 12px; line-height: 1.7; }
+.ak-advanced-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; margin: 20px 0; }
+.ak-simple-checkbox { display: inline-flex; align-items: center; gap: 9px; font-size: 12px; line-height: 1.5; }
+.ak-advanced-settings .pipeline-mode { margin: 25px 0 20px; }
+.ak-advanced-settings .service-catalog { margin: 0; }
+.ak-advanced-note { margin: 20px 0 0; }
+.ak-review-list { border-top: 1px solid var(--ak-border); }
+.ak-review-list > div { display: grid; grid-template-columns: 22px minmax(90px, .55fr) minmax(0, 1.5fr); gap: 15px; padding: 17px 6px; border-bottom: 1px solid var(--ak-border); align-items: center; }
+.ak-review-list svg { color: var(--ak-accent); }
+.ak-review-list span { color: var(--ak-muted); font-size: 12px; }
+.ak-review-list strong { font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+.ak-need-analysis { display: flex; gap: 10px; font-size: 12px; line-height: 1.6; color: var(--ak-muted); background: var(--ak-surface-2); padding: 16px; margin: 20px 0 0; }
+.ak-need-analysis svg { color: var(--ak-warning); flex-shrink: 0; }
+.ak-review-legal { color: var(--ak-muted); font-size: 12px; line-height: 1.6; margin: 20px 0 0; }
+.ak-form-actions { gap: 16px; }
+.ak-form-actions .actions-right { justify-content: flex-end; flex-wrap: wrap; }
+@media(max-width:1090px){.ak-quick-deploy .deploy-layout{grid-template-columns:1fr;}}
+@media(max-width:680px){
+  .ak-quick-deploy .ak-simple-steps { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .ak-quick-deploy .ak-simple-steps .step-tab { flex-direction:column; justify-content:center; text-align:center; gap:7px; min-height:70px; padding:9px 5px; font-size:11px; }
+  .ak-offers,.ak-essentials,.ak-advanced-grid { grid-template-columns:1fr; }
+  .ak-compact-fields { grid-template-columns:1fr; }
+  .ak-review-list > div { grid-template-columns:20px 1fr; gap:5px 12px; }
+  .ak-review-list > div strong { grid-column:2; }
+  .ak-ha-switch { white-space:normal; }
+  .ak-quick-deploy .gh-connect-actions { justify-content:flex-start; }
+  .ak-quick-deploy .gh-simplified { padding:18px 14px; }
+}
+@media(max-width:390px){
+  .ak-quick-deploy .ak-simple-steps .step-tab { font-size:10px; }
+  .ak-offer-card { padding:16px 13px; }
+  .ak-quick-deploy .main-panel .cut-body { padding:20px 14px; }
+}
+@media(prefers-reduced-motion:reduce){.ak-spin{animation:none}.ak-offer-card{transition:none}}
+
+/* Sélection des tarifs — trois formules, sans configuration technique supplémentaire. */
+.ak-offers-three { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+.ak-offers-three .ak-offer-card { min-width:0; padding:17px 14px; gap:9px; }
+.ak-offers-three .ak-offer-card strong { font-size:12px; line-height:1.45; }
+.ak-offers-three .ak-offer-card .ak-offer-price { color:var(--ak-accent); font-weight:800; font-size:13px; margin-top:auto; }
+.ak-see-prices { border:0; padding:5px 0; background:transparent; color:var(--ak-accent); display:inline-flex; align-items:center; gap:7px; font-size:12px; font-weight:700; }
+.ak-see-prices:hover { text-decoration:underline; }
+.ak-ha-help { font-size:12px; line-height:1.6; color:var(--ak-muted); margin:15px 0 5px; }
+@media(max-width:800px){.ak-offers-three{grid-template-columns:1fr}.ak-offers-three .ak-offer-card{padding:16px}}
+
+.ak-offers-three + .ak-ha-choice { align-items:center; }
+.ak-offers-three + .ak-ha-choice span { display:flex; flex-direction:column; gap:5px; }
+.ak-offers-three + .ak-ha-choice small { color:var(--ak-muted); font-size:11px; line-height:1.5; font-weight:450; }
+.ak-offers-three + .ak-ha-choice input { width:18px; height:18px; accent-color:var(--ak-accent); }

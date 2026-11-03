@@ -1,0 +1,82 @@
+/* AUTOKOM — palette unique, partagée par Landing, Auth, Deploy et Sites.
+   Modifier les valeurs ici pour ajuster l'ensemble de l'application. */
+:root {
+  color-scheme: light;
+  --ak-font-body: "Source Sans 3", "Segoe UI", Arial, sans-serif;
+  --ak-font-heading: "Archivo", "Arial", sans-serif;
+  --ak-control-radius: 0px;
+  --ak-font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --ak-bg: #f7f8fa;
+  --ak-surface: #ffffff;
+  --ak-surface-2: #f3f4f6;
+  --ak-surface-3: #ebedf1;
+  --ak-hero-start: #ffffff;
+  --ak-hero-end: #f6f7fa;
+  --ak-text: #181a20;
+  --ak-text-strong: #101216;
+  --ak-muted: #626a76;
+  --ak-muted-2: #7e8792;
+  --ak-border: #e1e4e9;
+  --ak-border-strong: #cbd0d8;
+  --ak-accent: #df6a30;
+  --ak-accent-hover: #c25522;
+  --ak-accent-contrast: #ffffff;
+  --ak-accent-soft: #fff3eb;
+  --ak-accent-border: #efcbb6;
+  --ak-focus: #d76a35;
+  --ak-success: #177b59;
+  --ak-success-soft: #e7f5ee;
+  --ak-danger: #bb4052;
+  --ak-danger-soft: #fff0f1;
+  --ak-warning: #9d6715;
+  --ak-warning-soft: #fff8e8;
+  --ak-shadow: 0 16px 46px rgba(20,23,31,.07);
+  --ak-inverse-bg: #11151c;
+  --ak-inverse-decoration: #151b23;
+  --ak-inverse-text: #f1f4f8;
+  --ak-inverse-muted: #aab4c1;
+  --ak-inverse-border: #303843;
+  --ak-inverse-accent: #f0a171;
+  /* Alias historiques : un point de contrôle pour les anciens composants. */
+  --violet: var(--ak-accent);
+  --violet-dark: var(--ak-accent-hover);
+  --ink: var(--ak-text);
+  --muted: var(--ak-muted);
+  --border: var(--ak-border);
+  --border-strong: var(--ak-border-strong);
+  --faint: var(--ak-surface-2);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ak-bg: #08090c;
+  --ak-surface: #111318;
+  --ak-surface-2: #171a21;
+  --ak-surface-3: #20242d;
+  --ak-hero-start: #090a0e;
+  --ak-hero-end: #101217;
+  --ak-text: #e9ebf0;
+  --ak-text-strong: #f7f8fb;
+  --ak-muted: #a9afba;
+  --ak-muted-2: #89929f;
+  --ak-border: #292e38;
+  --ak-border-strong: #3a414e;
+  --ak-accent: #ef955e;
+  --ak-accent-hover: #ffab75;
+  --ak-accent-contrast: #17100b;
+  --ak-accent-soft: #302119;
+  --ak-accent-border: #543727;
+  --ak-focus: #e7a16d;
+  --ak-success: #83d3aa;
+  --ak-success-soft: #163829;
+  --ak-danger: #ff919d;
+  --ak-danger-soft: #3b1e2a;
+  --ak-warning: #edbf70;
+  --ak-warning-soft: #392b16;
+  --ak-shadow: 0 18px 55px rgba(0,0,0,.28);
+  --ak-inverse-bg: #101319;
+  --ak-inverse-decoration: #151b23;
+  --ak-inverse-text: #f1f4f8;
+  --ak-inverse-muted: #aab4c1;
+  --ak-inverse-border: #303843;
+  --ak-inverse-accent: #f0a171;
+}

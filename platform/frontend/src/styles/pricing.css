@@ -1,0 +1,63 @@
+/* Tarifs — mêmes tokens que les autres interfaces, sans couleurs codées en dur. */
+.ak-pricing-page { width: 100%; min-width: 0; padding-bottom: 54px; }
+.ak-pricing-hero { padding: 55px 0 38px; display: flex; justify-content: space-between; align-items: flex-end; gap: 30px; }
+.ak-pricing-heading { max-width: 650px; }
+.ak-pricing-heading h1 { margin: 0 0 16px; font-family: var(--ak-font-heading); font-size: clamp(32px,4vw,50px); letter-spacing: -.055em; line-height: 1.13; color: var(--ak-text-strong); }
+.ak-pricing-heading p { margin: 0; color: var(--ak-muted); font-size: 15px; line-height: 1.7; max-width: 550px; }
+.ak-pricing-switch { border: 0; margin: 0; padding: 0; min-width: 0; }
+.ak-pricing-switch legend { font-size: 11px; font-weight: 700; color: var(--ak-muted); padding-bottom: 8px; }
+.ak-pricing-switch-inner { display: flex; background: var(--ak-surface-2); padding: 4px; border: 1px solid var(--ak-border); gap: 4px; white-space: nowrap; }
+.ak-pricing-switch button { background: transparent; border: 0; color: var(--ak-muted); padding: 11px 13px; font-size: 12px; font-weight: 750; min-height: 42px; transition: background .18s, color .18s; }
+.ak-pricing-switch button.is-current { background: var(--ak-surface); color: var(--ak-text-strong); box-shadow: 0 1px 5px var(--ak-border); }
+.ak-pricing-switch button span { font-size: 10px; color: var(--ak-success); margin-left: 4px; }
+.ak-pricing-cards { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 17px; align-items: stretch; }
+.ak-pricing-card { border: 1px solid var(--ak-border); background: var(--ak-surface); padding: clamp(21px,2.5vw,30px); display:flex; flex-direction:column; min-width:0; transition: border-color .18s, transform .18s; }
+.ak-pricing-card:hover { border-color: var(--ak-border-strong); transform:translateY(-2px); }
+.ak-pricing-card.is-highlighted { border-color: var(--ak-accent); }
+.ak-pricing-card-top { display: flex; flex-wrap: wrap; gap: 12px; align-items: start; justify-content: space-between; min-height: 96px; }
+.ak-pricing-card-top h2 { font-size: 23px; margin: 0 0 8px; color: var(--ak-text-strong); }
+.ak-pricing-card-top p { margin: 0; color: var(--ak-muted); font-size: 13px; line-height: 1.55; }
+.ak-pricing-popular { padding: 7px 9px; border: 1px solid var(--ak-accent-border); color: var(--ak-accent); background: var(--ak-accent-soft); font-size: 10px; font-weight: 800; }
+.ak-pricing-amount { display: flex; gap: 7px; flex-wrap: wrap; align-items: baseline; margin: 9px 0 2px; }
+.ak-pricing-amount strong { font: 750 clamp(25px,2.6vw,35px)/1.2 var(--ak-font-heading); letter-spacing: -.045em; white-space: nowrap; }
+.ak-pricing-amount span { font-size: 12px; color: var(--ak-muted); }
+.ak-pricing-price-caption { display: block; font-size: 11px; line-height: 1.4; color: var(--ak-muted); min-height: 35px; }
+.ak-pricing-select { width:100%; display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 15px; margin: 13px 0 23px; background: var(--ak-surface-2); color: var(--ak-text-strong); border:1px solid var(--ak-border-strong); font-weight:800; font-size:13px; min-height:49px; transition: background .18s, border-color .18s; }
+.ak-pricing-select:hover { border-color: var(--ak-accent); }
+.ak-pricing-select.is-primary { background: var(--ak-accent); border-color:var(--ak-accent); color:var(--ak-accent-contrast); }
+.ak-pricing-select.is-primary:hover { background: var(--ak-accent-hover); }
+.ak-pricing-specs { display:flex; flex-direction:column; gap:12px; padding: 18px 0; border-top:1px solid var(--ak-border); border-bottom:1px solid var(--ak-border); }
+.ak-pricing-specs div { display:flex; align-items:center; gap:10px; font-size:12px; color:var(--ak-text); }
+.ak-pricing-specs svg { color: var(--ak-accent); }
+.ak-pricing-benefits { list-style:none; padding:18px 0 0; margin:0; display:flex; flex-direction:column; gap:13px; }
+.ak-pricing-benefits li { display:flex; align-items:flex-start; gap:9px; font-size:12px; color:var(--ak-text); line-height:1.45; }
+.ak-pricing-benefits svg { color:var(--ak-success); margin-top:1px; }
+.ak-pricing-disclaimer { max-width:960px; margin:17px auto 0; color:var(--ak-muted); font-size:11px; line-height:1.6; text-align:center; }
+.ak-pricing-compare, .ak-pricing-faq { padding-top:65px; }
+.ak-pricing-section-head h2 { margin:0 0 9px; color:var(--ak-text-strong); font-size:clamp(23px,2.8vw,32px); display:flex; align-items:center; gap:10px; }
+.ak-pricing-section-head p { margin:0 0 25px; font-size:13px; line-height:1.6; color:var(--ak-muted); }
+.ak-pricing-table-scroll { overflow-x:auto; border:1px solid var(--ak-border); }
+.ak-pricing-table { width:100%; border-collapse:collapse; background: var(--ak-surface); min-width:600px; }
+.ak-pricing-table th, .ak-pricing-table td { padding:15px 18px; text-align:left; border-bottom:1px solid var(--ak-border); font-size:12px; }
+.ak-pricing-table thead th { background:var(--ak-surface-2); color:var(--ak-text-strong); font-weight:800; }
+.ak-pricing-table tbody th { font-weight:650; }
+.ak-pricing-table tbody td { color:var(--ak-muted); }
+.ak-pricing-table tbody tr:last-child :is(th,td) { border-bottom:0; }
+.ak-pricing-included { color:var(--ak-success); display:inline-flex; align-items:center; gap:6px; }
+.ak-pricing-assurances { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); margin-top:60px; padding:24px 0; border-top:1px solid var(--ak-border); border-bottom:1px solid var(--ak-border); }
+.ak-pricing-assurances > div { padding:8px 24px; border-right:1px solid var(--ak-border); }
+.ak-pricing-assurances > div:first-child { padding-left:0; }
+.ak-pricing-assurances > div:last-child { border-right:0; }
+.ak-pricing-assurances svg { color:var(--ak-accent); margin-bottom:12px; }
+.ak-pricing-assurances strong { display:block; font-size:13px; margin-bottom:8px; }
+.ak-pricing-assurances p { margin:0; color:var(--ak-muted); font-size:12px; line-height:1.7; }
+.ak-pricing-questions { display:grid; grid-template-columns:1fr 1fr; gap:10px 16px; margin-top:23px; }
+.ak-pricing-questions details { align-self:start; border:1px solid var(--ak-border); background:var(--ak-surface); padding:0 18px; }
+.ak-pricing-questions summary { font-weight:750; padding:17px 0; font-size:13px; cursor:pointer; color:var(--ak-text-strong); }
+.ak-pricing-questions details[open] summary { color:var(--ak-accent); }
+.ak-pricing-questions details p { color:var(--ak-muted); margin:0 0 18px; font-size:12px; line-height:1.75; }
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+@media(max-width:1100px) { .ak-pricing-hero { align-items:flex-start; flex-direction:column; gap:22px; } .ak-pricing-card { padding:22px; } .ak-pricing-amount strong { font-size:27px; } }
+@media(max-width:870px) { .ak-pricing-cards { grid-template-columns:1fr; max-width:610px; margin:0 auto; } .ak-pricing-card-top { min-height:0; } }
+@media(max-width:620px) { .ak-pricing-hero { padding:27px 0 27px; } .ak-pricing-switch-inner { white-space:normal; } .ak-pricing-switch button { padding:10px; } .ak-pricing-cards { grid-template-columns:1fr; } .ak-pricing-card { padding:22px 20px; } .ak-pricing-benefits { gap:11px; } .ak-pricing-compare,.ak-pricing-faq { padding-top:48px; } .ak-pricing-assurances { display:block; padding:0; margin-top:45px; } .ak-pricing-assurances > div { border-right:0; border-bottom:1px solid var(--ak-border); padding:22px 0; } .ak-pricing-assurances > div:last-child { border:0; } .ak-pricing-questions { grid-template-columns:1fr; } }
+@media(prefers-reduced-motion:reduce) { .ak-pricing-card, .ak-pricing-select, .ak-pricing-switch button { transition:none; } }
