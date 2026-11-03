@@ -10,9 +10,11 @@ from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import IsAdminUser
 
 from config.views import SwaggerLoginPageAPIView, SwaggerLoginSubmitAPIView, SwaggerLogoutAPIView
+from config.health import PlatformHealthAPIView
 
 # Only client APIs enter the generated schema; no internal/admin endpoints.
 client_api_patterns = [
+    path('api/health/', PlatformHealthAPIView.as_view(), name='platform-health'),
     path('api/auth/', include('apps.accounts.user.urls')),
     path('api/projects/git/', include('apps.projects.git.urls')),
     path('api/projects/', include('apps.projects.environments.urls')),
