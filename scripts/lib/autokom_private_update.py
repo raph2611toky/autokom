@@ -1,154 +1,212 @@
 #!/usr/bin/env python3
-"""GitHub App device authorization (one-time) + safe fast-forward private update.
+"""AUTOKOM Core: mise à jour GitHub par navigateur et code, sans clé configurée.
 
-No token is written to disk, git config or git remote. Standard library only.
+Nécessite GitHub CLI (gh). Une configuration GitHub CLI temporaire est
+utilisée pour chaque opération, puis supprimée. Aucune information
+sensibile n'est ajoutée à Git, aux remotes ou aux fichiers de projet.
+
+Fonction publique: update(ROOT, check=False), intégrée à autokom_cli.py.
+Bootstrap si la CLI est cassée:
+    sudo python3 /tmp/patch/scripts/lib/autokom_private_update.py \
+         --repo /opt/autokom/source
 """
 from __future__ import annotations
 
-import json
+import argparse
 import os
 from pathlib import Path
 import re
-import stat
+import shutil
 import subprocess
 import sys
 import tempfile
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
 
 
 class UpdateError(RuntimeError):
-    pass
+    """Erreur de vérification ou de mise à jour de code AUTOKOM."""
 
 
-def _run(*args, cwd=None, env=None, timeout=30, check=True):
+OWNER_REPO = ("raph2611toky", "autokom")
+UPDATE_BRANCH = "toky"  # Branche source des correctifs AUTOKOM (même si la branche locale s’appelle main).
+REQUIRED_CORE = (
+    "autokom",
+    "install.sh",
+    "scripts/lib/autokom_cli.py",
+    "scripts/lib/autokom_private_update.py",
+    "scripts/lib/autokom_security.py",
+    "scripts/lib/services.py",
+    "scripts/lib/tools_registry.py",
+    "scripts/bootstrap/link-cli.sh",
+    "scripts/bootstrap/preflight.sh",
+    "scripts/install/foundation.sh",
+    "scripts/install/services.sh",
+    "scripts/verify/stack.py",
+    "ansible/playbooks/foundation.yml",
+)
+PROTECTED_AREAS = ("scripts/", "ansible/", "autokom", "install.sh")
+
+
+def _run(args, root, *, env=None, timeout=120, check=True, interactive=False):
     try:
-        p = subprocess.run(list(args), cwd=cwd, env=env, text=True, stdout=subprocess.PIPE,
-                           stderr=subprocess.PIPE, timeout=timeout, check=False)
+        proc = subprocess.run(
+            list(args), cwd=str(root), env=env, check=False,
+            stdout=None if interactive else subprocess.PIPE,
+            stderr=None if interactive else subprocess.PIPE,
+            text=True, timeout=timeout,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise UpdateError('Commande Git interrompue ou indisponible.') from exc
-    if check and p.returncode:
-        raise UpdateError(f'Commande refusée : {args[0]} (code {p.returncode}). ' + p.stderr.strip()[:300])
-    return p.stdout.strip()
+        raise UpdateError(f"Commande impossible ou interrompue : {args[0]}") from exc
+    if check and proc.returncode:
+        detail = "" if interactive else (proc.stderr or "").strip()[:500]
+        raise UpdateError(f"Échec de {args[0]} (code {proc.returncode}). {detail}")
+    return proc
 
 
-def _api(url, payload=None, *, token=None, timeout=15):
-    data = urllib.parse.urlencode(payload).encode() if payload is not None else None
-    headers = {'Accept': 'application/json', 'User-Agent': 'AUTOKOM-Core-PrivateUpdate/1'}
-    if token:
-        headers['Authorization'] = f'Bearer {token}'
-        headers['X-GitHub-Api-Version'] = '2022-11-28'
-    req = urllib.request.Request(url, data=data, headers=headers,
-                                 method='POST' if data is not None else 'GET')
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as res:
-            return json.loads(res.read(2_000_000).decode('utf-8'))
-    except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
-        raise UpdateError('Impossible de communiquer avec GitHub. Vérifier la connexion et les autorisations.') from exc
+def _git(root, *args, env=None, timeout=60):
+    return _run(("git", *args), root, env=env, timeout=timeout).stdout.strip()
 
 
-def _client_id():
-    value = os.environ.get('AUTOKOM_UPDATE_GITHUB_CLIENT_ID', '')
-    config = Path('/etc/autokom/update.env')
-    if not value and config.is_file():
-        for line in config.read_text(encoding='utf-8').splitlines():
-            match = re.fullmatch(r'\s*AUTOKOM_UPDATE_GITHUB_CLIENT_ID\s*=\s*([A-Za-z0-9_]+)\s*', line)
-            if match:
-                value = match.group(1)
-    if not re.fullmatch(r'[A-Za-z0-9_]{8,128}', value):
-        raise UpdateError('Configurer AUTOKOM_UPDATE_GITHUB_CLIENT_ID dans /etc/autokom/update.env. '
-                          'Activer Device Flow sur la GitHub App et l’installer sur le dépôt privé AUTOKOM.')
-    return value
+def _repository(root):
+    if not root.is_dir() or not (root / ".git").exists():
+        raise UpdateError(f"Dépôt Git AUTOKOM introuvable : {root}")
+    origin = _git(root, "remote", "get-url", "origin")
+    match = re.fullmatch(
+        r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?",
+        origin,
+    )
+    if not match or tuple(x.lower() for x in match.groups()) != OWNER_REPO:
+        raise UpdateError("Origin doit être https://github.com/raph2611toky/autokom.git (sans identifiant).")
+    branch = _git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch) or ".." in branch or "@{" in branch:
+        raise UpdateError("Nom de branche Git invalide ou HEAD détaché.")
+    return branch
 
 
-def _device_token(client_id):
-    start = _api('https://github.com/login/device/code', {'client_id': client_id})
-    if not all(start.get(x) for x in ('device_code', 'user_code', 'verification_uri')):
-        raise UpdateError('GitHub n’a pas renvoyé de code de vérification valide.')
-    print('\n  AUTHENTIFICATION GITHUB — MISE À JOUR PRIVÉE')
-    print('  Ouvrir : ' + str(start['verification_uri']))
-    print('  Saisir le code : ' + str(start['user_code']))
-    print('  Le code est à usage unique. Il n’est pas enregistré dans AUTOKOM.\n', flush=True)
-    interval = max(5, int(start.get('interval', 5)))
-    deadline = time.monotonic() + min(900, int(start.get('expires_in', 900)))
-    while time.monotonic() < deadline:
-        time.sleep(interval)
-        result = _api('https://github.com/login/oauth/access_token', {
-            'client_id': client_id, 'device_code': start['device_code'],
-            'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
-        })
-        if result.get('access_token'):
-            return result['access_token']
-        problem = result.get('error')
-        if problem == 'authorization_pending':
-            continue
-        if problem == 'slow_down':
-            interval += 5
-            continue
-        if problem in ('expired_token', 'access_denied'):
-            raise UpdateError('Autorisation expirée ou refusée. Relancer autokom update.')
-        raise UpdateError('Autorisation GitHub impossible : ' + str(problem or 'réponse invalide'))
-    raise UpdateError('Code GitHub expiré. Relancer autokom update.')
+def _clean(root):
+    # Évite d'effacer des modifications ou d'écraser des fichiers inconnus.
+    state = _git(root, "status", "--porcelain", "--untracked-files=all")
+    if state:
+        raise UpdateError("Arbre de travail non propre : enregistrer ou retirer les modifications avant update.\n" + state[:600])
 
 
-def _repo(root):
-    if not (root / '.git').exists():
-        raise UpdateError('Répertoire AUTOKOM non initialisé avec Git.')
-    remote = _run('git', 'config', '--get', 'remote.origin.url', cwd=root)
-    match = re.fullmatch(r'https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?', remote)
-    if not match:
-        raise UpdateError('Pour la mise à jour par code, origin doit être une URL HTTPS github.com sans jeton.')
-    owner, name = match.groups()
-    if (owner.lower(), name.lower()) != ('raph2611toky', 'autokom'):
-        raise UpdateError('Dépôt origin non autorisé pour AUTOKOM Core.')
-    branch = _run('git', 'symbolic-ref', '--quiet', '--short', 'HEAD', cwd=root)
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]*', branch) or '..' in branch:
-        raise UpdateError('Nom de branche invalide ou HEAD détaché.')
-    if _run('git', 'status', '--porcelain', '--untracked-files=normal', cwd=root):
-        raise UpdateError('Le dépôt contient des modifications locales. Commit/stash avant la mise à jour.')
-    return owner, name, branch
+def _missing_in_commit(root, commit):
+    missing = []
+    for path in REQUIRED_CORE:
+        found = _run(("git", "cat-file", "-e", f"{commit}:{path}"), root, check=False)
+        if found.returncode:
+            missing.append(path)
+    return missing
+
+
+def _check_protected_deletions(root, old, new):
+    deleted = _git(root, "diff", "--name-only", "--diff-filter=D", old, new, "--", *PROTECTED_AREAS)
+    if deleted:
+        raise UpdateError(
+            "Mise à jour refusée : suppression de fichiers Core/Ansible détectée.\n"
+            + deleted[:1200]
+            + "\nExaminer ce changement dans Git avant de modifier l'infrastructure."
+        )
+
+
+def _check_target(root, old, new):
+    missing = _missing_in_commit(root, new)
+    if missing:
+        raise UpdateError(
+            "Mise à jour refusée : la branche distante ne contient pas tous les fichiers Core indispensables :\n"
+            + "\n".join("  - " + path for path in missing)
+            + "\nRestaurer ces fichiers dans le dépôt GitHub AVANT de relancer autokom update."
+        )
+    content = _git(root, "show", f"{new}:scripts/lib/autokom_private_update.py")
+    if "GH_CONFIG_DIR" not in content or "auth" not in content or "login" not in content:
+        raise UpdateError("Mise à jour refusée : le module distant n'utilise pas l'authentification GitHub CLI attendue.")
+    if old != new:
+        lineage = _run(("git", "merge-base", "--is-ancestor", old, new), root, check=False)
+        if lineage.returncode != 0:
+            raise UpdateError("Historiques divergents : ni reset, ni merge forcé.")
+        _check_protected_deletions(root, old, new)
+
+
+def _temporary_auth_environment(folder):
+    env = dict(os.environ)
+    # Les jetons préexistants ne doivent jamais supprimer l'étape de validation par code.
+    for name in (
+        "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+        "GH_HOST", "GH_ENTERPRISE_HOST", "GIT_ASKPASS", "SSH_ASKPASS",
+        "GIT_TERMINAL_PROMPT", "GH_CONFIG_DIR",
+    ):
+        env.pop(name, None)
+    env["GH_CONFIG_DIR"] = str(folder)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GH_NO_UPDATE_NOTIFIER"] = "1"
+    return env
 
 
 def update(root: Path, *, check=False):
-    root = root.resolve(strict=True)
-    owner, name, branch = _repo(root)
-    print(f'  Dépôt : {owner}/{name} · branche {branch}')
+    root = Path(root).resolve(strict=True)
+    local_branch = _repository(root)
+    branch = UPDATE_BRANCH
+    _clean(root)
+    print(f"AUTOKOM · Dépôt {OWNER_REPO[0]}/{OWNER_REPO[1]} · locale {local_branch} · source origin/{branch}", flush=True)
+    current_missing = [path for path in REQUIRED_CORE if not (root / path).is_file()]
+    if current_missing:
+        print("ATTENTION : fichiers Core manquants dans la version actuelle :", flush=True)
+        for name in current_missing:
+            print("  - " + name, flush=True)
     if check:
-        print('  Vérification locale réussie. Aucun accès GitHub ni modification.')
-        return 0
-    token = _device_token(_client_id())
-    details = _api(f'https://api.github.com/repos/{owner}/{name}', token=token)
-    if details.get('full_name', '').lower() != f'{owner}/{name}'.lower():
-        raise UpdateError('Jeton sans accès autorisé au dépôt AUTOKOM.')
-    # Git's credential prompt is handled with a disposable askpass executable.
-    # The token exists only in the child environment; it never appears in argv,
-    # remote.origin.url, Git's credential store, or the GitHub API logs.
-    env = dict(os.environ)
-    env['AUTOKOM_UPDATE_EPHEMERAL_TOKEN'] = token
-    env['GIT_TERMINAL_PROMPT'] = '0'
-    with tempfile.TemporaryDirectory(prefix='autokom-git-', dir='/tmp') as folder:
-        askpass = Path(folder) / 'askpass.sh'
-        askpass.write_text('#!/bin/sh\ncase "$1" in *Username*) printf "%s\\n" "x-access-token";; '
-                           '*) printf "%s\\n" "$AUTOKOM_UPDATE_EPHEMERAL_TOKEN";; esac\n', encoding='utf-8')
-        askpass.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-        env['GIT_ASKPASS'] = str(askpass)
-        _run('git', '-c', 'credential.helper=', 'fetch', '--no-tags', '--', 'origin', branch,
-             cwd=root, env=env, timeout=180)
-    env.pop('AUTOKOM_UPDATE_EPHEMERAL_TOKEN', None)
-    old = _run('git', 'rev-parse', 'HEAD', cwd=root)
-    new = _run('git', 'rev-parse', 'FETCH_HEAD', cwd=root)
+        print("Simulation locale terminée. Aucun accès GitHub ni changement appliqué.", flush=True)
+        return 0 if not current_missing else 2
+    if shutil.which("gh") is None:
+        raise UpdateError("GitHub CLI absent. Installer le paquet 'gh' sur le serveur, puis relancer.")
+    if shutil.which("git") is None:
+        raise UpdateError("Git est indisponible.")
+    print("\nAuthentification par navigateur/code GitHub (aucun token à copier) :", flush=True)
+    # Toujours un Device Flow frais, sans utiliser ni modifier ~/.config/gh.
+    # --insecure-storage force le stockage dans GH_CONFIG_DIR, qui est éphémère et privé.
+    with tempfile.TemporaryDirectory(prefix="autokom-gh-") as directory:
+        os.chmod(directory, 0o700)
+        env = _temporary_auth_environment(Path(directory))
+        _run(
+            ("gh", "auth", "login", "--hostname", "github.com", "--web",
+             "--git-protocol", "https", "--insecure-storage", "--skip-ssh-key"),
+            root, env=env, timeout=900, interactive=True,
+        )
+        print("\nAutorisation reçue. Vérification de la branche distante...", flush=True)
+        # Le credential helper gh lit ses identifiants uniquement depuis le dossier temporaire.
+        # Le helper global de Git est explicitement neutralisé.
+        _run(
+            ("git", "-c", "credential.helper=", "-c",
+             "credential.helper=!gh auth git-credential", "fetch", "--no-tags", "origin", branch),
+            root, env=env, timeout=180, interactive=True,
+        )
+    # En sortant du 'with', le jeton temporaire a été supprimé.
+    old = _git(root, "rev-parse", "HEAD")
+    new = _git(root, "rev-parse", "FETCH_HEAD")
+    _check_target(root, old, new)
+    _clean(root)
     if old == new:
-        print('  AUTOKOM est déjà à jour.')
+        print("AUTOKOM est déjà à jour. Aucun service système modifié.")
         return 0
-    ancestor = subprocess.run(['git', 'merge-base', '--is-ancestor', old, new], cwd=root, check=False)
-    if ancestor.returncode:
-        raise UpdateError('Divergence des historiques. Mise à jour refusée (aucun reset ni merge forcé).')
-    # Prevent a raced local worktree change between fetch and merge.
-    if _run('git', 'status', '--porcelain', cwd=root):
-        raise UpdateError('Des modifications locales sont apparues pendant la vérification : arrêt.')
-    _run('git', '-c', 'user.name=AUTOKOM Update', 'merge', '--ff-only', new, cwd=root, timeout=120)
-    print('  AUTOKOM mis à jour : ' + old[:10] + ' -> ' + new[:10])
-    print('  Pour appliquer la nouvelle version du backend : sudo autokom app deploy')
+    print(f"Mise à jour contrôlée : {old[:10]} -> {new[:10]}", flush=True)
+    _git(root, "merge", "--ff-only", new, timeout=120)
+    remaining = [path for path in REQUIRED_CORE if not (root / path).is_file()]
+    if remaining:
+        raise UpdateError("La mise à jour a été appliquée mais des fichiers indispensables manquent : " + ", ".join(remaining))
+    print("AUTOKOM Core rétabli / mis à jour. Aucun service n'a été redémarré.", flush=True)
+    print("Exécuter 'sudo autokom app deploy' séparément pour le backend, après ses vérifications.")
     return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Mise à jour AUTOKOM sécurisée avec GitHub CLI")
+    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--check", action="store_true", help="Prévalidation locale sans GitHub")
+    args = parser.parse_args(argv)
+    try:
+        return update(args.repo, check=args.check)
+    except (UpdateError, ValueError) as exc:
+        print(f"ERREUR : {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
