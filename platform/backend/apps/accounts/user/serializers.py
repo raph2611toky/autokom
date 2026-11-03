@@ -42,6 +42,7 @@ class LogoutSerializer(RefreshSerializer):
     pass
 
 class ResetPasswordSerializer(TokenSerializer):
+    token = serializers.CharField(max_length=2048, trim_whitespace=False)
     new_password = serializers.CharField(write_only=True, trim_whitespace=False)
     new_password_confirm = serializers.CharField(write_only=True, trim_whitespace=False)
     def validate(self, attrs):
@@ -72,3 +73,8 @@ class SessionSerializer(serializers.ModelSerializer):
         model = UserSession
         fields = ('id', 'created_at', 'expires_at', 'revoked_at', 'last_seen_at', 'ip_address', 'user_agent')
         read_only_fields = fields
+
+
+class GitHubExchangeSerializer(serializers.Serializer):
+    ticket = serializers.CharField(min_length=40, max_length=256, trim_whitespace=False)
+    browser_binding = serializers.CharField(min_length=40, max_length=256, trim_whitespace=False, write_only=True)

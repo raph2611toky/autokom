@@ -68,6 +68,8 @@ PROJECT_MEMBERSHIP = obj({'id': UUID, 'name': TEXT, 'role': TEXT})
 
 RESPONSE_DATA = {
     'register': obj({'user': USER, 'verification_email_sent': BOOLEAN}),
+    'github_start': obj({'authorization_url': TEXT, 'browser_binding': TEXT}),
+    'github_exchange': obj({'tokens': TOKEN_PAIR, 'user': USER}),
     'email_verify': NULL,
     'email_resend': NULL,
     'login': obj({'tokens': TOKEN_PAIR, 'user': USER}),
@@ -116,6 +118,8 @@ def response_map(key, *, success_status=200, public=False, include_not_found=Fal
     if key in ('login', 'reset_password', 'change_password', 'logout'):
         result[401] = openapi.Response('Identifiants invalides.', ERROR)
         result[403] = openapi.Response('Accès interdit.', ERROR)
+    if key == 'github_start':
+        result[503] = openapi.Response('GitHub indisponible ou non configuré.', ERROR)
     if key == 'register':
         result[409] = openapi.Response('Conflit en base.', ERROR)
     return result

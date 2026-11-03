@@ -6,6 +6,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from helpers.security import random_token, token_digest
+from helpers.secure_actions import generate_secure_action_token
 from helpers.services.emails import send_template_email
 from apps.organizations.models import Organization, OrganizationMembership
 from apps.accounts.user.models import User, UserActionToken
@@ -13,7 +14,8 @@ from apps.accounts.user.models import User, UserActionToken
 logger = logging.getLogger(__name__)
 
 def _mail_token(user, *, kind, rotate=True):
-    token = random_token()
+    token = (generate_secure_action_token(user, purpose='RESET_PASSWORD',
+             lifetime=settings.PASSWORD_RESET_LIFETIME) if kind == 'reset' else random_token())
     now = timezone.now()
     if kind == 'verify':
         purpose = UserActionToken.Purpose.VERIFY_EMAIL

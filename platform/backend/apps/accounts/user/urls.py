@@ -1,8 +1,12 @@
 from django.urls import path
-from apps.accounts.user import views
+from apps.accounts.user import views, github_views
 
 app_name = 'client_accounts'
 urlpatterns = [
+    path('github/start/', github_views.GitHubLoginStartAPIView.as_view(), name='github-login-start'),
+    path('github/link/start/', github_views.GitHubLinkStartAPIView.as_view(), name='github-link-start'),
+    path('github/callback/', github_views.GitHubLoginCallbackAPIView.as_view(), name='github-login-callback'),
+    path('github/exchange/', github_views.GitHubLoginExchangeAPIView.as_view(), name='github-login-exchange'),
     path('register/', views.RegistrationAPIView.as_view(), name='register'),
     path('email/verify/', views.VerifyEmailAPIView.as_view(), name='email-verify'),
     path('email/resend/', views.ResendEmailAPIView.as_view(), name='email-resend'),

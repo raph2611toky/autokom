@@ -94,3 +94,9 @@ class UserSession(models.Model):
     class Meta:
         db_table = 'accounts_usersession'
         indexes = [models.Index(fields=['user', 'revoked_at', 'expires_at'])]
+
+
+# Import explicite pour que Django découvre les modèles de l'auth GitHub.
+from apps.accounts.user.github_auth_models import (  # noqa: E402, F401
+    ClientGitHubIdentity, ClientGitHubOAuthState, ClientGitHubLoginTicket,
+)

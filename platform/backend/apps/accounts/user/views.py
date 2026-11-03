@@ -9,6 +9,7 @@ from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from helpers.responses import api_success, api_error
 from helpers.errors import handle_error
 from helpers.security import token_digest
+from helpers.secure_actions import validate_secure_action_token, SecureActionTokenError
 from apps.organizations.models import OrganizationMembership
 from apps.projects.project.models import ProjectMember
 from apps.accounts.user.models import User, UserActionToken, UserSession
@@ -205,6 +206,15 @@ class ResetPasswordAPIView(APIView):
                 user = User.objects.select_for_update().get(pk=record.user_id)
                 if not user.is_active:
                     return api_error('Compte désactivé.', status_code=403)
+                # Les liens ar1 (JWT signé + AES-GCM) ont une validation cryptographique
+                # supplémentaire; les anciens liens non chiffrés restent valides
+                # uniquement jusqu'à leur expiration déjà enregistrée en base.
+                if serializer.validated_data['token'].startswith('ar1.'):
+                    try:
+                        validate_secure_action_token(serializer.validated_data['token'],
+                            user=user, expected_purpose='RESET_PASSWORD')
+                    except SecureActionTokenError:
+                        return api_error('Lien de réinitialisation invalide ou expiré.', status_code=400)
                 user.set_password(serializer.validated_data['new_password'])
                 user.token_version += 1
                 user.password_changed_at = timezone.now()
