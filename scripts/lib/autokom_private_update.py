@@ -351,8 +351,7 @@ def update(root: Path, *, check=False):
     remaining = [name for name in REQUIRED_CORE if not (root / name).is_file()]
     if remaining:
         raise UpdateError("Mise à jour appliquée mais composants manquants : " + ", ".join(remaining))
-    print("AUTOKOM Core restauré / mis à jour. Aucun service redémarré.")
-    print("Backend : utiliser autokom app deploy séparément après vérification.")
+
     return 0
 
 
