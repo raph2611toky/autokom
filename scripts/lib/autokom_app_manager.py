@@ -137,7 +137,7 @@ class LiveProgress:
         frame = self.FRAMES[self._frame % len(self.FRAMES)]
         self._frame += 1
         summary = f'  {frame} {label} · {int(elapsed)}s'[:width - 1]
-        lines = self._last_lines() or ['exécution en cours…']
+        lines = self._last_lines() or ['Processus actif ; aucune sortie reçue à cet instant']
         lines = [''] * (3-len(lines)) + lines[-3:]
         if self._visible:
             sys.stdout.write('\r\x1b[3A')
@@ -178,6 +178,10 @@ def phase(label):
         if _LIVE:
             _LIVE.clear()
         print(f'  ✗ {label} ({int(time.monotonic() - start)}s)')
+        if _LIVE:
+            recent = _LIVE._last_lines()
+            for line in recent[-3:]:
+                print(f'    \x1b[32m│ {line[:170]}\x1b[0m' if sys.stdout.isatty() else f'    │ {line[:170]}')
         raise
     else:
         if _LIVE:
@@ -593,6 +597,9 @@ def run_checks():
     for scanner in ('semgrep', 'trivy'):
         if not shutil.which(scanner):
             raise AppError(f'Scanner DevSecOps obligatoire absent : {scanner}. Installer via AUTOKOM Core.')
+    # Authenticate before scanning: static Django checks do not exercise MySQL.
+    with phase('MySQL · authentification du compte applicatif'):
+        verify_mysql_service_access()
     # Never mix Semgrep --config auto with --metrics off: use versioned rules.
     with phase('SAST · Semgrep (règles locales, télémétrie désactivée)'):
         call(['semgrep', 'scan', '--config', str(SECURITY_RULES), '--error',
@@ -610,6 +617,57 @@ def run_checks():
     # Migrations MUST be committed in source control, never generated on prod.
     with phase('Django · cohérence des migrations'):
         run_as_service([str(VENV/'bin/python'), 'manage.py', 'makemigrations', '--check', '--dry-run'])
+
+
+def verify_mysql_service_access():
+    """Check actual Django credentials as the systemd user, not the Linux root user.
+
+    No credentials or SQL passwords are printed or passed through argv. The
+    Django process reads the exact environment used by the service.
+    """
+    config = load_dotenv(ENV_FILE)
+    required = ('DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD')
+    absent = [key for key in required if not str(config.get(key, '')).strip()]
+    if absent:
+        raise AppError('MySQL : variables absentes de la configuration du service : ' + ', '.join(absent))
+    script = (
+        'import django; django.setup(); '
+        'from django.db import connection; '
+        'connection.ensure_connection(); '
+        'cursor = connection.cursor(); '
+        'cursor.execute("SELECT 1"); '
+        'assert cursor.fetchone()[0] == 1; '
+        'print("Connexion MySQL du backend confirmée (SELECT 1).", flush=True)'
+    )
+    try:
+        run_as_service([str(VENV / 'bin/python'), 'manage.py', 'shell', '-c', script], timeout=45)
+    except AppError as exc:
+        raise AppError(
+            'MySQL inaccessible avec les identifiants du service Django. '
+            'Vérifier DB_USER, DB_PASSWORD et DB_HOST dans '
+            '/etc/autokom/platform-backend.env, puis les droits utilisateur@hôte MySQL. '
+            'Ne pas créer de migrations ou modifier le mot de passe sans diagnostic. '
+            f'Détails dans le journal : {_LIVE.log_path if _LIVE else "voir la sortie précédente"}'
+        ) from exc
+
+
+def doctor(args):
+    """Read-only diagnosis: configuration metadata and a real authenticated query."""
+    root_only()
+    state = load_state()
+    print('  ◈ AUTOKOM · DIAGNOSTIC BACKEND')
+    print('  Runtime :', state.get('runtime'))
+    print('  Domaine :', state.get('domain'))
+    print('  Secrets : /etc/autokom/platform-backend.env (valeurs masquées)')
+    try:
+        with operation('doctor'):
+            with phase('MySQL · authentification réelle du service'):
+                verify_mysql_service_access()
+        print('  ✓ MySQL : connexion du service autokom valide')
+    except AppError as exc:
+        print('  ✗ ' + str(exc))
+        return 1
+    return 0
 
 
 def verify_health(port=None):
@@ -1058,6 +1116,7 @@ def main(argv=None):
     setup_p.add_argument('--wizard', action='store_true', help='Forcer l’assistant interactif')
     deploy_p = sub.add_parser('deploy', help='Contrôles DevSecOps et déploiement Django')
     deploy_p.add_argument('--check', action='store_true', help='Scanner et vérifier sans déployer')
+    sub.add_parser('doctor', help='Vérifier la connexion réelle à MySQL sans modifier la base')
     sub.add_parser('status', help='État du service et health check')
     log_p = sub.add_parser('logs', help='Dernières lignes de journaux')
     log_p.add_argument('--lines', type=int, default=80)
@@ -1069,6 +1128,7 @@ def main(argv=None):
             args.wizard = True
         return setup(args)
     if args.action == 'deploy': return deploy(args)
+    if args.action == 'doctor': return doctor(args)
     if args.action == 'status': return status(args)
     if args.action == 'logs': return logs(args)
     return 1

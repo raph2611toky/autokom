@@ -278,6 +278,41 @@ def _fetch_with_memory_token(root, branch, token):
         env.pop("AUTOKOM_GIT_TOKEN", None)
 
 
+def _print_git_changes(root, old, new):
+    """Show true Git changes between commits: added/deleted lines and files.
+
+    No Git credentials are inspected, persisted or printed. Colors only on a TTY.
+    """
+    raw = _git(root, 'diff', '--numstat', '--no-renames', old, new)
+    changes = []
+    added = removed = 0
+    for row in raw.splitlines():
+        parts = row.split('\t', 2)
+        if len(parts) != 3:
+            continue
+        a, d, path = parts
+        if a.isdigit():
+            added += int(a)
+        if d.isdigit():
+            removed += int(d)
+        changes.append((path, a, d))
+
+    tty = sys.stdout.isatty()
+    def color(value, shade):
+        return f'\x1b[{shade}m{value}\x1b[0m' if tty else value
+
+    print(f'\n  MODIFICATIONS GIT · {len(changes)} fichier(s) · origin/{UPDATE_BRANCH}', flush=True)
+    shown = changes[:40]
+    for path, a, d in shown:
+        a_label = f'+{a}' if a != '-' else 'binaire'
+        d_label = f'-{d}' if d != '-' else 'binaire'
+        graph = (color('+' * min(int(a), 16), '32') if a.isdigit() else '') + (color('-' * min(int(d), 16), '31') if d.isdigit() else '')
+        print('  ' + path + '  ' + graph + '  (' + color(a_label, '32') + ' ' + color(d_label, '31') + ')', flush=True)
+    if len(changes) > len(shown):
+        print(f'  … et {len(changes) - len(shown)} autres fichiers (git diff --stat pour les détails)', flush=True)
+    print('  TOTAL : ' + color(f'+{added}', '32') + ' ' + color(f'-{removed}', '31') + ' lignes\n', flush=True)
+
+
 def update(root: Path, *, check=False):
     root = Path(root).resolve(strict=True)
     branch = _repository(root)
@@ -311,6 +346,7 @@ def update(root: Path, *, check=False):
         print("AUTOKOM est à jour. Aucun service modifié.")
         return 0
     print(f"Mise à jour contrôlée : {old[:10]} → {new[:10]}", flush=True)
+    _print_git_changes(root, old, new)
     _git(root, "merge", "--ff-only", new, timeout=120)
     remaining = [name for name in REQUIRED_CORE if not (root / name).is_file()]
     if remaining:

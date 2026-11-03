@@ -22,7 +22,8 @@ class LifecycleUITests(unittest.TestCase):
                  mock.patch.object(app,'VENV',backend), \
                  mock.patch.object(app.shutil,'which', return_value='/usr/bin/tool'), \
                  mock.patch.object(app,'call') as call, \
-                 mock.patch.object(app,'run_as_service'):
+                 mock.patch.object(app,'run_as_service'), \
+                 mock.patch.object(app,'verify_mysql_service_access'):
                 (backend/'bin').mkdir(); (backend/'bin/python').write_text('')
                 app.run_checks()
                 cmd=call.call_args_list[0].args[0]
