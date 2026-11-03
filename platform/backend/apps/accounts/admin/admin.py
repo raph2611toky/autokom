@@ -21,3 +21,12 @@ class AdministratorAdmin(UserAdmin):
     add_fieldsets = (
         (None, {'classes': ('wide',), 'fields': ('email', 'password1', 'password2')}),
     )
+
+    # Administrateurs créés uniquement via l'assistant local AUTOKOM.
+    # Le Django Admin demeure utilisable pour les consultations et modifications
+    # permises, mais ne permet pas d'ajouter/supprimer un administrateur.
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

@@ -1150,6 +1150,8 @@ def main(argv=None):
     doctor_p = sub.add_parser('doctor', help='Diagnostiquer MySQL, proposer la réparation sur confirmation')
     doctor_p.add_argument('--no-repair', action='store_true', help='Diagnostic strictement en lecture seule')
     sub.add_parser('status', help='État du service et health check')
+    admin_p = sub.add_parser('admin', help='Gérer les administrateurs Django (création, liste, accès)')
+    admin_p.add_argument('admin_args', nargs=argparse.REMAINDER, help='create | list | reset-password | disable | enable')
     log_p = sub.add_parser('logs', help='Dernières lignes de journaux')
     log_p.add_argument('--lines', type=int, default=80)
     log_p.add_argument('--source', choices=['service', 'setup', 'deploy'], default='service',
@@ -1162,6 +1164,12 @@ def main(argv=None):
     if args.action == 'deploy': return deploy(args)
     if args.action == 'doctor': return doctor(args)
     if args.action == 'status': return status(args)
+    if args.action == 'admin':
+        from autokom_admin_manager import main as admin_main, AdminError
+        try:
+            return admin_main(args.admin_args)
+        except AdminError as exc:
+            raise AppError(str(exc)) from exc
     if args.action == 'logs': return logs(args)
     return 1
 
