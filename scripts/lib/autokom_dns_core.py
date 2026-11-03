@@ -149,12 +149,15 @@ def bind_quote(value: str) -> str:
 
 def zone_text(state: dict) -> str:
     zone = validate_zone(state['zone'])
-    ns1, ns2 = destination_name(state['ns1']), destination_name(state['ns2'])
+    ns1 = destination_name(state['ns1'])
+    ns2 = destination_name(state['ns2']) if state.get('secondary_ip') else None
     serial = int(state['serial'])
     lines = [f'; AUTOKOM-DNS managed zone: {zone}. Do not edit directly.', '$ORIGIN ' + zone + '.',
              '$TTL 300',
              f'@ IN SOA {ns1} hostmaster.{zone}. ( {serial} 3600 900 1209600 300 )',
-             f'@ IN NS {ns1}', f'@ IN NS {ns2}']
+             f'@ IN NS {ns1}']
+    if ns2:
+        lines.append(f'@ IN NS {ns2}')
     for record in state.get('records', []):
         owner = record['name']
         kind = record['type']
@@ -221,6 +224,10 @@ def render_bind_zone_statement(state: dict) -> str:
     prefix = f'// AUTOKOM-DNS {zone}: managed, do not edit\n'
     prefix += f'include "{key}";\n'
     if role == 'primary':
+        if not state.get('secondary_ip'):
+            # Staged deployment: one primary only. Do not notify non-existent GCP.
+            return (prefix + f'zone "{zone}" {{\n type primary;\n file "{bind_path(zone)}";\n'
+                    ' allow-transfer { none; };\n notify no;\n};\n')
         return (prefix + f'zone "{zone}" {{\n type primary;\n file "{bind_path(zone)}";\n'
                 f' allow-transfer {{ key "autokom-{zone}"; }};\n'
                 f' also-notify {{ {validate_ip(state["secondary_ip"], 4)} key "autokom-{zone}"; }};\n'

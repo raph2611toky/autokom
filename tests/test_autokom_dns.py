@@ -50,7 +50,7 @@ class TestDomainValidation(unittest.TestCase):
 
     def test_zone_soas_serial_increments_and_ns(self):
         state = {'zone':'infra.ikom.mg', 'ns1':'ns1.ikom.mg','ns2':'ns2.ikom.mg',
-                 'serial':2026110301,'records':[]}
+                 'serial':2026110301,'secondary_ip':'203.0.113.20','records':[]}
         core.bump_serial(state)
         self.assertGreater(state['serial'], 2026110301)
         data = core.zone_text(state)

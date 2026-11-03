@@ -47,17 +47,32 @@ sudo autokom dns install --apply          # installation via playbook Ansible
 sudo autokom dns status
 ```
 
-La mise en place d'une zone attend aussi l'IP publique statique de GCP. Elle **ne peut pas être terminée tant que le second serveur n'est pas prêt** :
+**Installation progressive — GCP pas encore prêt :** le primaire AWS peut être installé et testé avec un seul NS **uniquement en local**, sans délégation publique :
+
+```bash
+sudo autokom dns install --check   # syntax-check du playbook et du rôle
+sudo autokom dns install --apply   # installer BIND9
+sudo autokom dns setup --role primary --zone infra.ikom.mg \
+  --environment production --primary-ip 56.228.86.160 --check
+sudo autokom dns setup --role primary --zone infra.ikom.mg \
+  --environment production --primary-ip 56.228.86.160 --apply
+sudo autokom dns verify --zone infra.ikom.mg
+```
+
+`setup` sur un terminal interactif propose « Configurer AWS seul pour le moment » ou « J’ai déjà un serveur GCP disponible » avec le sélecteur AUTOKOM (flèches). Avec AWS seul, la zone ne contient que `NS ns1.ikom.mg`, `notify no`, `allow-transfer { none; }` ; aucune adresse fictive GCP ni délégation Cloudflare n'est créée. **Cette phase n'offre aucune redondance.** Elle ne doit pas être publiée comme délégation publique durable.
+
+**Quand GCP sera prêt**, réserver son IP publique statique, installer BIND sur GCP, transférer sa clé TSIG hors Git, puis ajouter le secondaire sur AWS avec la même zone :
 
 ```bash
 sudo autokom dns setup --role primary --zone infra.ikom.mg \
-  --environment production \
-  --primary-ip 56.228.86.160 \
-  --secondary-ip VRAIE_IP_PUBLIQUE_GCP \
-  --check
+  --environment production --primary-ip 56.228.86.160 \
+  --secondary-ip VRAIE_IP_PUBLIQUE_GCP --check
+sudo autokom dns setup --role primary --zone infra.ikom.mg \
+  --environment production --primary-ip 56.228.86.160 \
+  --secondary-ip VRAIE_IP_PUBLIQUE_GCP --apply
 ```
 
-Puis remplacer `--check` par `--apply`. `--listen-ip` est facultatif : AUTOKOM détecte l'adresse **locale de l'interface réseau** (en AWS/GCP, généralement privée derrière NAT). Ne pas configurer l'IP publique NAT comme adresse locale d'écoute : elle peut ne pas exister sur l'interface réseau.
+Les enregistrements existants sont conservés, le serial SOA progresse, le transfert TSIG et NOTIFY sont activés. Vérifier que les deux NS répondent de manière cohérente *avant* de publier la délégation `infra.ikom.mg` dans Cloudflare. Sur GCP, utiliser ensuite `setup --role secondary` avec `--secondary-ip` obligatoire. `--listen-ip` est facultatif : AUTOKOM détecte l'adresse **locale de l'interface réseau** (en AWS/GCP, généralement privée derrière NAT). Ne pas configurer l'IP publique NAT comme adresse locale d'écoute : elle peut ne pas exister sur l'interface réseau.
 
 Le setup valide BIND (`named-checkzone`, `named-checkconf`) et refuse les résolveurs déjà personnalisés incompatibles. Il désactive la récursion publique et configure un transfert TSIG, sans toucher à Nginx, MySQL, Docker ni au résolveur système `systemd-resolved`.
 
@@ -146,6 +161,7 @@ Le mode `environments` est ici une **classification des zones** : il ne crée pa
 
 ## Sécurité et exploitation
 
+- Le rôle BIND est chargé depuis `ansible/roles/dns_server` (chemin relatif au playbook ET `ANSIBLE_ROLES_PATH` injecté par la CLI). `install --check` effectue un vrai `ansible-playbook --syntax-check` sans modifier la machine.
 - L'installation BIND est idempotente via `ansible/playbooks/dns.yml`, `policy_rc_d=101` empêche le démarrage anticipé du service par APT.
 - Les opérations `--check` ne changent pas les fichiers.
 - La CLI conserve les mécanismes AUTOKOM (`menu.pick`, passphrase et confirmations), pas de menu numéroté brut.
@@ -157,3 +173,11 @@ Le mode `environments` est ici une **classification des zones** : il ne crée pa
 - Pour publier des services clients AUTOKOM, ne confondez pas `ikom.mg` avec les anciens domaines `ik0m.tech` (chiffre zéro dans `ik0m`). Ce patch n'effectue aucune migration des URL applicatives.
 
 Références : https://developers.cloudflare.com/dns/zone-setups/zone-transfers/ , https://developers.cloudflare.com/dns/manage-dns-records/how-to/subdomains-outside-cloudflare/ , https://ubuntu.com/server/docs/how-to/networking/install-dns/ .
+
+## Incident Ansible rôle introuvable — résolu
+
+L'ancien `dns.yml` utilisait `role: dns_server` alors que le rôle se trouve dans `ansible/roles/dns_server/`, et Ansible ne recherche par défaut que `ansible/playbooks/roles/` pour ce playbook. AUTOKOM fournit maintenant le chemin relatif et l'environnement `ANSIBLE_ROLES_PATH`. Il n'est pas nécessaire de copier le rôle dans `/root/.ansible/roles`, de modifier les rôles des autres modules ou de réinstaller AUTOKOM.
+
+Le premier `dns install --apply` a échoué avant l'installation des paquets : ne pas supposer que BIND a été installé. Le prochain `dns install --check` doit indiquer `Playbook Ansible et rôle dns_server vérifiés` ; l'installation effective se fait ensuite avec `--apply`.
+
+**Ne pas communiquer `ns1.ikom.mg` à dot.mg comme unique NS.** Transmettre à dot.mg seulement les deux NS exacts du tableau Cloudflare pour la zone principale `ikom.mg`. `ns1.ikom.mg` seul reste un serveur de test de la sous-zone `infra.ikom.mg` jusqu'à la mise en service du secondaire.
