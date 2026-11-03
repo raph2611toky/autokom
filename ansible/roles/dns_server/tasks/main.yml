@@ -1,0 +1,23 @@
+---
+- name: Vérifier que le serveur est Ubuntu
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+    fail_msg: AUTOKOM DNS nécessite Ubuntu.
+
+- name: Installer BIND9 et les utilitaires de diagnostic
+  ansible.builtin.apt:
+    name:
+      - bind9
+      - bind9-utils
+      - dnsutils
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    policy_rc_d: 101
+  # policy_rc_d=101 interdit le démarrage automatique de named pendant APT.
+  # AUTOKOM démarre BIND uniquement après validation de la zone et de la politique anti-récursion.
+
+- name: Vérifier les binaires de configuration
+  ansible.builtin.command: named-checkconf -v
+  changed_when: false

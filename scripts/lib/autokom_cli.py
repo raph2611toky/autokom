@@ -656,6 +656,7 @@ est conservé. Les logs sont installés séparément pour éviter une charge imp
                             help='Action. Pour les plugins Jenkins/Grafana : « plugins » (menu séparé)')
             fp.add_argument('file_target',nargs='?',default='')
             fp.add_argument('file_extra',nargs='?',default='')
+    subcommand('dns', help='Zones BIND9, Cloudflare, environnements, vérifications DNS')
     subcommand('app', help='Service Django AUTOKOM : setup, deploy, status, logs')
     up = subcommand('update', help='Mise à jour privée via code GitHub (fast-forward uniquement)',
                     epilog='Exemple : sudo autokom update')
@@ -683,7 +684,22 @@ def main(argv=None):
     if arguments:
         from autokom_security import configured, authorize, SecurityError
         cmd=arguments[0]
-        mutating=(cmd in ('update','configure') or
+        # AUTOKOM DNS shares the existing passphrase/OTP for sensitive actions.
+        # Read-only checks and explicit --check simulations do not require it.
+        dns_sensitive = (
+            cmd == 'dns' and (
+                len(arguments) == 1 or
+                (len(arguments) > 1 and arguments[1] in ('install', 'setup')
+                 and '--check' not in arguments) or
+                (len(arguments) > 2 and arguments[1] == 'record'
+                 and arguments[2] in ('add', 'delete') and '--apply' in arguments) or
+                (len(arguments) > 2 and arguments[1] == 'tsig'
+                 and arguments[2] == 'generate') or
+                (len(arguments) > 2 and arguments[1] == 'cloudflare'
+                 and arguments[2] in ('add', 'delete') and '--apply' in arguments)
+            )
+        )
+        mutating=(dns_sensitive or cmd in ('update','configure') or
             (cmd=='app' and len(arguments)>1 and arguments[1] in ('setup','deploy') and '--check' not in arguments) or
             (cmd=='install' and '--check' not in arguments) or
             (cmd=='logs' and ('--apply' in arguments or (len(arguments)>1 and arguments[1]=='use'))) or
@@ -692,6 +708,12 @@ def main(argv=None):
         if mutating and configured() and '-h' not in arguments and '--help' not in arguments:
             try:authorize('commande '+cmd)
             except SecurityError as exc:raise CLIError(str(exc)) from exc
+    if arguments and arguments[0] == 'dns':
+        from autokom_dns import main as dns_main, DNSError
+        try:
+            return dns_main(arguments[1:])
+        except DNSError as exc:
+            raise CLIError(str(exc)) from exc
     if arguments and arguments[0] == 'app':
         from autokom_app_manager import main as app_main, AppError
         try:

@@ -1,0 +1,7 @@
+---
+- name: AUTOKOM | Installation BIND9 (sans modification des zones)
+  hosts: local
+  become: true
+  gather_facts: true
+  roles:
+    - role: dns_server
