@@ -289,33 +289,51 @@ def _lockout_message(blocked_until, now=None):
 
 
 def authorize(action='opération sensible', *, require_setup=True):
-    """Root + passphrase on every invocation; no auth session or env bypass."""
+    """Three in-process tries, bounded by the existing five-failure global lockout.
+
+    Every incorrect attempt is counted immediately in the root-only state file.
+    A successful entry resets the counter. No unattended bypass is introduced.
+    """
     require_root()
     with _lock():
-        state=_read(STATE)
+        state = _read(STATE)
         if not state:
-            if require_setup:raise SecurityError('AUTOKOM auth non configuré : sudo autokom auth setup')
+            if require_setup:
+                raise SecurityError('AUTOKOM auth non configuré : sudo autokom auth setup')
             return False
-        failed=_read(ATTEMPTS,{'failures':0,'blocked_until':0})
-        now=time.time()
-        blocked_until=float(failed.get('blocked_until',0))
-        if now < blocked_until:
-            raise SecurityError('Trop de tentatives : ' + _lockout_message(blocked_until, now))
-        if blocked_until > 0:
-            # Une période expirée doit donner de nouvelles tentatives, pas re-bloquer au 1er échec.
-            failed={'failures':0,'blocked_until':0}
+        failed = _read(ATTEMPTS, {'failures': 0, 'blocked_until': 0})
+        now = time.time()
+        until = float(failed.get('blocked_until', 0))
+        if now < until:
+            raise SecurityError('Trop de tentatives : ' + _lockout_message(until, now))
+        if until:
+            failed = {'failures': 0, 'blocked_until': 0}
             _write(ATTEMPTS, failed)
-        attempt=_tty_secret('🔑 Passphrase credential ')
-        if not _verify(attempt,state['passphrase']):
-            count=int(failed.get('failures',0))+1
-            next_block=now+900 if count>=5 else 0
-            _write(ATTEMPTS,{'failures':count,'blocked_until':next_block})
-            if next_block:
-                raise SecurityError('Passphrase incorrecte. Trop de tentatives : '
-                                    + _lockout_message(next_block, now))
-            raise SecurityError('Passphrase incorrecte')
-        _write(ATTEMPTS,{'failures':0,'blocked_until':0})
-        return True
+
+        for local_try in range(3):
+            # Global lockout takes priority over the three local attempts.
+            now = time.time()
+            if now < float(failed.get('blocked_until', 0)):
+                raise SecurityError('Trop de tentatives : '
+                                    + _lockout_message(failed['blocked_until'], now))
+            attempt = _tty_secret('🔑 Passphrase credential')
+            if _verify(attempt, state['passphrase']):
+                _write(ATTEMPTS, {'failures': 0, 'blocked_until': 0})
+                return True
+            count = int(failed.get('failures', 0)) + 1
+            until = time.time() + 900 if count >= 5 else 0
+            failed = {'failures': count, 'blocked_until': until}
+            _write(ATTEMPTS, failed)
+            if until:
+                raise SecurityError('Trop de tentatives : ' + _lockout_message(until))
+            remaining = 2 - local_try
+            if remaining:
+                print(f'  ✗ Passphrase incorrecte · {remaining} essai(s) dans cette commande')
+                continue
+            raise SecurityError('Passphrase incorrecte · 3 essais utilisés. '
+                                'Réessayer plus tard ou utiliser autokom auth reset.')
+        return False
+
 
 def _mail_code(address):
     conf = _smtp_values(_smtp_migrate_legacy())

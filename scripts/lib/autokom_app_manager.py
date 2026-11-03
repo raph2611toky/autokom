@@ -179,9 +179,14 @@ def phase(label):
             _LIVE.clear()
         print(f'  ✗ {label} ({int(time.monotonic() - start)}s)')
         if _LIVE:
-            recent = _LIVE._last_lines()
-            for line in recent[-3:]:
-                print(f'    \x1b[32m│ {line[:170]}\x1b[0m' if sys.stdout.isatty() else f'    │ {line[:170]}')
+            # Database exceptions can include sensitive stack traces; use a
+            # concise reason rather than printing arbitrary traceback lines.
+            if label.startswith('MySQL'):
+                print('    │ Authentification ou connexion refusée · assistance disponible')
+            else:
+                recent = _LIVE._last_lines()
+                for line in recent[-3:]:
+                    print(f'    \x1b[32m│ {line[:170]}\x1b[0m' if sys.stdout.isatty() else f'    │ {line[:170]}')
         raise
     else:
         if _LIVE:
@@ -589,7 +594,7 @@ def ensure_django_secrets_package_access():
           'import apps.projects.secrets'], cwd=BACKEND, env=django_env())
 
 
-def run_checks():
+def run_checks(*, allow_repair=False):
     if not (BACKEND / 'manage.py').is_file():
         raise AppError('Code Django introuvable.')
     if not SECURITY_RULES.is_file():
@@ -597,9 +602,8 @@ def run_checks():
     for scanner in ('semgrep', 'trivy'):
         if not shutil.which(scanner):
             raise AppError(f'Scanner DevSecOps obligatoire absent : {scanner}. Installer via AUTOKOM Core.')
-    # Authenticate before scanning: static Django checks do not exercise MySQL.
-    with phase('MySQL · authentification du compte applicatif'):
-        verify_mysql_service_access()
+    # Authenticate before scanning; offer interactive opt-in repair on real deploy.
+    _check_mysql_with_optional_repair(allow_repair=allow_repair)
     # Never mix Semgrep --config auto with --metrics off: use versioned rules.
     with phase('SAST · Semgrep (règles locales, télémétrie désactivée)'):
         call(['semgrep', 'scan', '--config', str(SECURITY_RULES), '--error',
@@ -651,8 +655,36 @@ def verify_mysql_service_access():
         ) from exc
 
 
+def _check_mysql_with_optional_repair(*, allow_repair):
+    """Verify the real service account; never silently change DB credentials."""
+    try:
+        with phase('MySQL · authentification du compte applicatif'):
+            verify_mysql_service_access()
+    except AppError:
+        if not allow_repair:
+            print('  › Pour une réparation guidée : sudo autokom app doctor')
+            raise
+        # No DB account may be created if the updated EnvironmentFile cannot
+        # be written with our explicit production whitelist.
+        unknown = set(load_dotenv(ENV_FILE)) - ALLOWED_ENV_KEYS
+        if unknown:
+            raise AppError('Variables du .env service non reconnues : ' + ', '.join(sorted(unknown)))
+        from autokom_mysql_repair import offer_mysql_repair
+        if not offer_mysql_repair(
+            runtime_file=ENV_FILE,
+            source_file=SOURCE_ENV_CANDIDATES[0],
+            python=VENV / 'bin/python',
+            load_config=load_dotenv,
+            save_config=secure_env_write,
+            verify=verify_mysql_service_access,
+        ):
+            raise AppError('Connexion MySQL non réparée ; aucune migration ni déploiement effectué.')
+        with phase('MySQL · vérification après réparation'):
+            verify_mysql_service_access()
+
+
 def doctor(args):
-    """Read-only diagnosis: configuration metadata and a real authenticated query."""
+    """Read-only by default noninteractive; TTY may opt into repair explicitly."""
     root_only()
     state = load_state()
     print('  ◈ AUTOKOM · DIAGNOSTIC BACKEND')
@@ -661,8 +693,7 @@ def doctor(args):
     print('  Secrets : /etc/autokom/platform-backend.env (valeurs masquées)')
     try:
         with operation('doctor'):
-            with phase('MySQL · authentification réelle du service'):
-                verify_mysql_service_access()
+            _check_mysql_with_optional_repair(allow_repair=not args.no_repair)
         print('  ✓ MySQL : connexion du service autokom valide')
     except AppError as exc:
         print('  ✗ ' + str(exc))
@@ -1005,7 +1036,7 @@ def deploy(args):
                 # A dry-run must not modify filesystem ACLs.
                 if not args.check:
                     ensure_django_secrets_package_access()
-        run_checks()
+        run_checks(allow_repair=not args.check)
         if args.check:
             print('  ✓ Contrôles DevSecOps terminés · aucun changement déployé.')
             return 0
@@ -1116,7 +1147,8 @@ def main(argv=None):
     setup_p.add_argument('--wizard', action='store_true', help='Forcer l’assistant interactif')
     deploy_p = sub.add_parser('deploy', help='Contrôles DevSecOps et déploiement Django')
     deploy_p.add_argument('--check', action='store_true', help='Scanner et vérifier sans déployer')
-    sub.add_parser('doctor', help='Vérifier la connexion réelle à MySQL sans modifier la base')
+    doctor_p = sub.add_parser('doctor', help='Diagnostiquer MySQL, proposer la réparation sur confirmation')
+    doctor_p.add_argument('--no-repair', action='store_true', help='Diagnostic strictement en lecture seule')
     sub.add_parser('status', help='État du service et health check')
     log_p = sub.add_parser('logs', help='Dernières lignes de journaux')
     log_p.add_argument('--lines', type=int, default=80)
