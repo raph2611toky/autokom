@@ -12,6 +12,7 @@ import getpass
 import hashlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -273,6 +274,20 @@ def _lock():
 
 def configured():return _read(STATE) is not None
 
+
+def _lockout_message(blocked_until, now=None):
+    """Show both remaining duration and local deadline; never expose secrets."""
+    if now is None:
+        now = time.time()
+    remaining = max(0, math.ceil(float(blocked_until) - now))
+    minutes, seconds = divmod(remaining, 60)
+    deadline = time.strftime('%d/%m/%Y %H:%M:%S %Z', time.localtime(float(blocked_until)))
+    return (f'Réessayer dans {minutes:02d} min {seconds:02d} s '
+            f'(déblocage le {deadline}). '
+            'Récupération immédiate : sudo autokom auth reset --method code '
+            'ou --method email.')
+
+
 def authorize(action='opération sensible', *, require_setup=True):
     """Root + passphrase on every invocation; no auth session or env bypass."""
     require_root()
@@ -283,12 +298,21 @@ def authorize(action='opération sensible', *, require_setup=True):
             return False
         failed=_read(ATTEMPTS,{'failures':0,'blocked_until':0})
         now=time.time()
-        if now<float(failed.get('blocked_until',0)):
-            raise SecurityError('Trop de tentatives : temporairement bloqué')
+        blocked_until=float(failed.get('blocked_until',0))
+        if now < blocked_until:
+            raise SecurityError('Trop de tentatives : ' + _lockout_message(blocked_until, now))
+        if blocked_until > 0:
+            # Une période expirée doit donner de nouvelles tentatives, pas re-bloquer au 1er échec.
+            failed={'failures':0,'blocked_until':0}
+            _write(ATTEMPTS, failed)
         attempt=_tty_secret('Autorisation AUTOKOM · '+action)
         if not _verify(attempt,state['passphrase']):
             count=int(failed.get('failures',0))+1
-            _write(ATTEMPTS,{'failures':count,'blocked_until':now+900 if count>=5 else 0})
+            next_block=now+900 if count>=5 else 0
+            _write(ATTEMPTS,{'failures':count,'blocked_until':next_block})
+            if next_block:
+                raise SecurityError('Passphrase incorrecte. Trop de tentatives : '
+                                    + _lockout_message(next_block, now))
             raise SecurityError('Passphrase incorrecte')
         _write(ATTEMPTS,{'failures':0,'blocked_until':0})
         return True
@@ -449,6 +473,11 @@ def recovery(method='email'):
     state = _read(STATE)
     if not state or not state.get('email_verified'):
         raise SecurityError('Aucun compte AUTOKOM vérifié')
+    if method not in ('code', 'email'):
+        raise SecurityError('Méthode attendue : email ou code')
+    # Valider deux fois la nouvelle passphrase avant de consommer un code unique.
+    # Une erreur de confirmation ne coûte ainsi aucun code de secours ni OTP.
+    pwd = _password_new()
     if method == 'code':
         code = _tty_secret('Code de secours AUTOKOM (usage unique)')
         remaining = _consume_recovery_code(code)
@@ -553,6 +582,12 @@ def main(argv=None):
             print('  › EMAIL_FROM: '+str(conf['sender'])+' · EMAIL_ADMIN: '+('configuré' if conf['admin'] else 'non défini'))
         codes = _read(RECOVERY_CODES, {})
         print('  › Codes de secours encore disponibles : ' + str(len(codes.get('hashes', []))))
+        attempts = _read(ATTEMPTS, {'failures': 0, 'blocked_until': 0})
+        until = float(attempts.get('blocked_until', 0))
+        if until > time.time():
+            print('  ! Authentification momentanément bloquée : ' + _lockout_message(until))
+        else:
+            print('  ✓ Passphrase AUTOKOM : nouvelle tentative autorisée')
         if JENKINS.exists():
             encrypted=JENKINS.read_text(encoding='utf-8').lstrip().startswith('{')
             print('  '+('✓ Jeton Jenkins chiffré' if encrypted else '! Jeton Jenkins historique : sudo autokom auth migrate'))
