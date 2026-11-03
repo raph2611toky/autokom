@@ -1,0 +1,52 @@
+---
+- name: AUTOKOM | Dépendances du backend Django Platform
+  hosts: local
+  connection: local
+  become: true
+  gather_facts: true
+  vars:
+    autokom_backend_runtime: systemd
+  pre_tasks:
+    - name: Vérifier Ubuntu LTS
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - autokom_backend_runtime in ['systemd', 'docker']
+        fail_msg: "AUTOKOM Backend nécessite Ubuntu et un runtime systemd ou docker."
+  tasks:
+    - name: Installer les dépendances système du backend
+      ansible.builtin.apt:
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        install_recommends: false
+        name:
+          - python3
+          - python3-venv
+          - python3-pip
+          - python3-dev
+          - default-libmysqlclient-dev
+          - pkg-config
+          - build-essential
+          - ca-certificates
+          - acl
+          - nginx
+          - certbot
+          - python3-certbot-nginx
+      when: autokom_backend_runtime == 'systemd'
+    - name: Installer les dépendances Nginx et TLS pour Docker
+      ansible.builtin.apt:
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        install_recommends: false
+        name:
+          - ca-certificates
+          - nginx
+          - certbot
+          - python3-certbot-nginx
+      when: autokom_backend_runtime == 'docker'
+    - name: Vérifier Docker si choisi
+      ansible.builtin.command: docker compose version
+      changed_when: false
+      when: autokom_backend_runtime == 'docker'

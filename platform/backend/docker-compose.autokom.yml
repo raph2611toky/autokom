@@ -6,13 +6,26 @@ services:
       dockerfile: Dockerfile.autokom
     restart: unless-stopped
     env_file:
-      - /etc/autokom/platform-backend.env
+      - ${AUTOKOM_BACKEND_ENV_FILE:-/etc/autokom/platform-backend.env}
     environment:
       AUTOKOM_STATIC_ROOT: /app/staticfiles
       AUTOKOM_MEDIA_ROOT: /app/media
       AUTOKOM_SERVE_STATIC: 'true'
+    command:
+      - gunicorn
+      - config.wsgi:application
+      - --bind
+      - 0.0.0.0:8172
+      - --workers
+      - ${AUTOKOM_BACKEND_WORKERS:-2}
+      - --timeout
+      - '90'
+      - --access-logfile
+      - '-'
+      - --error-logfile
+      - '-'
     ports:
-      - '127.0.0.1:8172:8172'
+      - '127.0.0.1:${AUTOKOM_BACKEND_PORT:-8172}:8172'
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m

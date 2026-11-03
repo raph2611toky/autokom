@@ -7,6 +7,7 @@ Django application process. Does not install arbitrary client applications.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,8 @@ BACKEND = ROOT / 'platform' / 'backend'
 CONFIG_DIR = Path('/etc/autokom')
 ENV_FILE = CONFIG_DIR / 'platform-backend.env'
 STATE_FILE = CONFIG_DIR / 'app-runtime.json'
+SOURCE_ENV_CANDIDATES = (Path('/etc/autokom/secrets/backend.env'), ENV_FILE)
+ANSIBLE_PLAYBOOK = ROOT / 'ansible/playbooks/platform-backend.yml'
 USER = 'autokom'
 SERVICE = 'autokom-backend'
 VENV = Path('/opt/autokom/venv')
@@ -82,26 +85,30 @@ def load_dotenv(path):
     return result
 
 
+ALLOWED_ENV_KEYS = {
+    'DEBUG', 'DJANGO_SECRET_KEY', 'CLIENT_JWT_SIGNING_KEY',
+    'CLIENT_JWT_ISSUER', 'CLIENT_JWT_AUDIENCE', 'CLIENT_ACCESS_MINUTES',
+    'CLIENT_REFRESH_DAYS', 'DB_TEST_NAME', 'EMAIL_USE_SSL',
+    'AES_KEY', 'AES_IV', 'AUTOKOM_GUNICORN_WORKERS', 'AUTOKOM_ENV_NAME',
+    'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REDIRECT_URI',
+    'GOOGLE_ALLOWED_REDIRECT_URIS', 'GOOGLE_CLIENT_SECRET_FILE',
+    'DB_ENGINE', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD',
+    'ALLOWED_HOSTS', 'FRONTEND_URL', 'CSRF_TRUSTED_ORIGINS', 'CORS_ALLOWED_ORIGINS',
+    'EMAIL_BACKEND', 'EMAIL_HOST', 'EMAIL_PORT', 'EMAIL_USE_TLS', 'EMAIL_HOST_USER',
+    'EMAIL_HOST_PASSWORD', 'DEFAULT_FROM_EMAIL', 'GITHUB_APP_CLIENT_ID',
+    'GITHUB_APP_CLIENT_SECRET', 'GITHUB_APP_SLUG', 'GITHUB_APP_CALLBACK_URL',
+    'GITHUB_WEBHOOK_SECRET', 'GITHUB_APP_ID', 'GITHUB_APP_PRIVATE_KEY_PATH',
+    'AUTOKOM_FIELD_ENCRYPTION_KEY', 'AUTOKOM_BASE_DOMAIN', 'GITHUB_API_VERSION',
+    'AUTOKOM_STATIC_ROOT', 'AUTOKOM_MEDIA_ROOT', 'TRUST_PROXY_SSL_HEADER',
+    'SECURE_SSL_REDIRECT', 'SECURE_HSTS_SECONDS', 'AUTOKOM_SERVE_STATIC',
+}
+
+
 def secure_env_write(values):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # Never copy arbitrary .env keys to systemd. Explicit whitelist prevents
     # accidental EnvironmentFile injection and stale/wrong runtime settings.
-    allowed = {
-        'DEBUG', 'DJANGO_SECRET_KEY', 'CLIENT_JWT_SIGNING_KEY',
-        'CLIENT_JWT_ISSUER', 'CLIENT_JWT_AUDIENCE',
-        'CLIENT_ACCESS_MINUTES', 'CLIENT_REFRESH_DAYS',
-        'DB_TEST_NAME', 'EMAIL_USE_SSL',
-        'AES_KEY', 'AES_IV',
-        'DB_ENGINE', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD',
-        'ALLOWED_HOSTS', 'FRONTEND_URL', 'CSRF_TRUSTED_ORIGINS', 'CORS_ALLOWED_ORIGINS',
-        'EMAIL_BACKEND', 'EMAIL_HOST', 'EMAIL_PORT', 'EMAIL_USE_TLS', 'EMAIL_HOST_USER',
-        'EMAIL_HOST_PASSWORD', 'DEFAULT_FROM_EMAIL', 'GITHUB_APP_CLIENT_ID',
-        'GITHUB_APP_CLIENT_SECRET', 'GITHUB_APP_SLUG', 'GITHUB_APP_CALLBACK_URL',
-        'GITHUB_WEBHOOK_SECRET', 'GITHUB_APP_ID', 'GITHUB_APP_PRIVATE_KEY_PATH',
-        'AUTOKOM_FIELD_ENCRYPTION_KEY', 'AUTOKOM_BASE_DOMAIN', 'GITHUB_API_VERSION',
-        'AUTOKOM_STATIC_ROOT', 'AUTOKOM_MEDIA_ROOT', 'TRUST_PROXY_SSL_HEADER',
-        'SECURE_SSL_REDIRECT', 'SECURE_HSTS_SECONDS', 'AUTOKOM_SERVE_STATIC',
-    }
+    allowed = ALLOWED_ENV_KEYS
     output = []
     for key in sorted(set(values) & allowed):
         val = str(values[key])
@@ -110,13 +117,19 @@ def secure_env_write(values):
         # Values use systemd EnvironmentFile double-quoted escaping.
         escaped = val.replace('\\', '\\\\').replace('"', '\\"')
         output.append(f'{key}="{escaped}"')
+    # Explicitly report unknown variables instead of silently dropping configuration.
+    unknown = sorted(set(values).difference(allowed))
+    if unknown:
+        raise AppError('Variables .env non reconnues (aucune suppression silencieuse) : ' + ', '.join(unknown))
     tmp = ENV_FILE.with_suffix('.new')
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:
             stream.write('\n'.join(output) + '\n')
-        shutil.chown(tmp, 'root', USER)
-        os.chmod(tmp, 0o640)
+        # systemd reads EnvironmentFile as manager; run_as_service injects the
+        # environment after privilege drop. No direct read by unprivileged users.
+        shutil.chown(tmp, 'root', 'root')
+        os.chmod(tmp, 0o600)
         os.replace(tmp, ENV_FILE)
     finally:
         if tmp.exists():
@@ -220,7 +233,7 @@ def install_python():
     call(['chmod', '-R', 'go-w', str(VENV)], timeout=180)
 
 
-def write_service():
+def write_service(port=PORT, workers=2):
     unit = f'''[Unit]
 Description=AUTOKOM Platform Django Backend
 After=network-online.target mysql.service
@@ -232,7 +245,7 @@ User={USER}
 Group={USER}
 WorkingDirectory={BACKEND}
 EnvironmentFile={ENV_FILE}
-ExecStart={VENV}/bin/gunicorn config.wsgi:application --bind 127.0.0.1:{PORT} --workers 2 --timeout 90 --access-logfile - --error-logfile -
+ExecStart={VENV}/bin/gunicorn config.wsgi:application --bind 127.0.0.1:{port} --workers {workers} --timeout 90 --access-logfile - --error-logfile -
 Restart=on-failure
 RestartSec=5
 UMask=0027
@@ -260,7 +273,7 @@ WantedBy=multi-user.target
     call(['systemctl', 'enable', SERVICE])
 
 
-def write_nginx(domain, email, *, issue_tls, runtime):
+def write_nginx(domain, email, *, issue_tls, runtime, port=PORT):
     if not shutil.which('nginx'):
         raise AppError('Nginx absent ; exécuter autokom install avant app setup.')
     avail = Path('/etc/nginx/sites-available')
@@ -292,7 +305,7 @@ def write_nginx(domain, email, *, issue_tls, runtime):
                 raise AppError(f'Domaine déjà pris par un autre vhost : {config}.')
     static_location = ('location /static/ { alias /var/lib/autokom/staticfiles/; autoindex off; }'
                        if runtime == 'systemd' else
-                       f'location /static/ {{ proxy_pass http://127.0.0.1:{PORT}; }}')
+                       f'location /static/ {{ proxy_pass http://127.0.0.1:{port}; }}')
     conf = f'''# MANAGED BY AUTOKOM PLATFORM
 server {{
     listen 80;
@@ -301,7 +314,7 @@ server {{
     client_max_body_size 20m;
     {static_location}
     location / {{
-        proxy_pass http://127.0.0.1:{PORT};
+        proxy_pass http://127.0.0.1:{port};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -377,8 +390,13 @@ def run_checks():
         run_as_service([str(VENV/'bin/python'), 'manage.py', 'makemigrations', '--check', '--dry-run'])
 
 
-def verify_health():
-    request = urllib.request.Request(f'http://127.0.0.1:{PORT}/api/health/',
+def verify_health(port=None):
+    if port is None:
+        try:
+            port = int(load_state().get('port', PORT))
+        except (AppError, ValueError, TypeError):
+            port = PORT
+    request = urllib.request.Request(f'http://127.0.0.1:{port}/api/health/',
                                      headers={'Host': 'localhost', 'X-Forwarded-Proto': 'https', 'User-Agent': 'AUTOKOM-Health/1'})
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
@@ -388,67 +406,298 @@ def verify_health():
         return False
 
 
-def setup(args):
-    root_only()
-    if not BACKEND.is_dir():
-        raise AppError('platform/backend introuvable dans le dépôt AUTOKOM.')
+def _is_interactive():
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _ask(prompt, default=''):
+    answer = input(f'  {prompt} [{default}] : ').strip()
+    return answer or default
+
+
+def _choose(title, options, default):
+    print(f'\n  {title}')
+    for index, (key, label) in enumerate(options, 1):
+        print(f'    {index}. {label}' + (' (défaut)' if key == default else ''))
+    raw = _ask('Choix', str(next(i for i, (k, _) in enumerate(options, 1) if k == default)))
+    if not raw.isdigit() or int(raw) not in range(1, len(options)+1):
+        raise AppError('Choix invalide ; relancer setup.')
+    return options[int(raw)-1][0]
+
+
+def _candidate_env(explicit):
+    if explicit:
+        src = Path(explicit)
+        if not src.is_absolute():
+            raise AppError('--env-file doit être un chemin absolu sous /etc/autokom/.')
+        src = src.resolve(strict=True)
+        if src != Path('/etc/autokom') and Path('/etc/autokom') not in src.parents:
+            raise AppError('Le fichier .env doit se trouver dans /etc/autokom/, hors dépôt.')
+        if not src.is_file():
+            raise AppError('Fichier .env introuvable.')
+        return src
+    for src in SOURCE_ENV_CANDIDATES:
+        if src.is_file():
+            return src
+    raise AppError('Aucun fichier serveur : créer /etc/autokom/secrets/backend.env (sans l’envoyer sur GitHub).')
+
+
+def _derive_domain(config):
+    for host in config.get('ALLOWED_HOSTS', '').split(','):
+        host = host.strip().lower()
+        if host not in ('localhost', '127.0.0.1', '0.0.0.0') and '.' in host and '*' not in host:
+            return host
+    return ''
+
+
+def _safe_env_check(src):
+    if src.is_symlink():
+        raise AppError('Fichier .env symbolique refusé ; choisir un fichier réel dans /etc/autokom/.')
+    if Path('/etc/autokom') not in src.parents:
+        raise AppError('Le fichier des secrets doit être dans /etc/autokom/.')
+    info = src.stat()
+    if info.st_uid != 0:
+        raise AppError('Le .env de production doit appartenir à root.')
+    if info.st_mode & 0o077:
+        print('  ATTENTION : le .env est trop accessible ; setup corrigera son mode à 0600.')
+
+
+def _preflight(args, settings, source):
+    if not BACKEND.is_dir() or not (BACKEND / 'manage.py').is_file():
+        raise AppError('Code Django introuvable dans platform/backend.')
+    if args.runtime not in ('systemd', 'docker'):
+        raise AppError('Runtime invalide.')
+    if args.nginx_mode == 'existing' and args.tls_mode == 'certbot':
+        raise AppError('Nginx existant : choisir --tls-mode external (HTTPS déjà géré).')
+    if args.environment not in ('production', 'staging'):
+        raise AppError('Environnement invalide.')
     domain = validate_domain(args.domain)
-    if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', args.email):
-        raise AppError('Adresse e-mail Certbot invalide.')
-    if STATE_FILE.exists() and load_state().get('runtime') != args.runtime:
-        raise AppError('Un autre runtime est déjà configuré ; migration manuelle nécessaire.')
+    if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', args.email or '') and args.tls_mode == 'certbot':
+        raise AppError('E-mail Let’s Encrypt valide obligatoire avec Certbot.')
+    if not 1024 <= args.port <= 65535:
+        raise AppError('Port interne non privilégié requis (1024–65535).')
+    if not 1 <= args.workers <= 16:
+        raise AppError('Gunicorn : 1–16 workers.')
+    if not args.frontend or not re.fullmatch(r'https://[a-zA-Z0-9.-]+(?::[0-9]{2,5})?', args.frontend):
+        raise AppError('Frontend HTTPS invalide.')
+    if any(not settings.get(key) for key in ('DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_HOST')) and not args.provision_db:
+        raise AppError('Configuration MySQL incomplète dans le .env source.')
+    if args.provision_db and args.runtime == 'docker':
+        raise AppError('--provision-db est réservé à systemd et doit être explicitement accepté.')
+    if args.runtime == 'docker' and settings.get('DB_HOST', '').lower() in ('localhost','127.0.0.1','::1'):
+        raise AppError('En Docker, DB_HOST=127.0.0.1 pointe vers le conteneur. Configurer un hôte MySQL joignable.')
+    if args.environment == 'production' and args.tls_mode == 'none':
+        raise AppError('Le mode production requiert HTTPS (certbot ou external).')
+    if settings.get('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend') != 'django.core.mail.backends.smtp.EmailBackend':
+        raise AppError('Le backend doit utiliser EMAIL_BACKEND SMTP pour l’inscription clients.')
+    if settings.get('DB_ENGINE', 'mysql').lower() != 'mysql':
+        raise AppError('Seule la base MySQL est prise en charge.')
+    if not settings.get('EMAIL_HOST') or not settings.get('EMAIL_HOST_USER') or not settings.get('EMAIL_HOST_PASSWORD'):
+        raise AppError('SMTP incomplet : EMAIL_HOST, EMAIL_HOST_USER et EMAIL_HOST_PASSWORD requis.')
+    if any(not settings.get(k) or settings[k].startswith('CHANGE_ME')
+           for k in ('DJANGO_SECRET_KEY', 'CLIENT_JWT_SIGNING_KEY')):
+        raise AppError('DJANGO_SECRET_KEY et CLIENT_JWT_SIGNING_KEY doivent être configurés.')
+    unknown = sorted(set(settings) - ALLOWED_ENV_KEYS)
+    if unknown:
+        raise AppError('Variables .env non reconnues : ' + ', '.join(unknown))
+    _safe_env_check(source)
+    if STATE_FILE.exists():
+        state = load_state()
+        changed = [key for key, new in (('runtime', args.runtime), ('domain', domain), ('port', args.port))
+                   if state.get(key) != new]
+        if changed:
+            raise AppError('Installation existante avec paramètres différents (' + ', '.join(changed)
+                           + '). Migration explicite requise, refus d’écraser.')
+    if args.nginx_mode == 'managed' and not shutil.which('nginx') and not ANSIBLE_PLAYBOOK.is_file():
+        raise AppError('Nginx absent et playbook de dépendances introuvable.')
+    return domain
+
+
+def _print_setup_plan(args, source, settings):
+    print('\n  AUTOKOM Platform · Plan de configuration du backend')
+    for label, value in (
+        ('Environnement', args.environment), ('Runtime', args.runtime),
+        ('Utilisateur', USER if args.runtime == 'systemd' else 'autokom (container)'),
+        ('Domaine backend', args.domain), ('Frontend', args.frontend),
+        ('Proxy Nginx', args.nginx_mode), ('HTTPS', args.tls_mode),
+        ('Port local', f'127.0.0.1:{args.port}'), ('Workers Gunicorn', str(args.workers)),
+        ('Configuration secrète source', str(source)),
+        ('Configuration secrète service', str(ENV_FILE)),
+        ('MySQL', f"{settings.get('DB_HOST', '?')}:{settings.get('DB_PORT','3306')}/{settings.get('DB_NAME', '?')}"),
+        ('Base existante', 'conservée' if not args.provision_db else 'création uniquement si absente'),
+        ('Django', 'DEBUG=False, MySQL, HTTPS/CORS/CSRF, JWT et SMTP conservés'),
+        ('DevSecOps', 'Semgrep, Trivy, Django checks à la commande app deploy'),
+    ):
+        print(f'    {label:<27} {value}')
+    print('  Aucun secret ne sera affiché. Aucun déploiement ne sera déclenché par setup.\n')
+
+
+def _wizard_business_settings(settings):
+    print('\n  Paramètres existants détectés (les mots de passe ne sont jamais affichés) :')
+    for label, key in [('MySQL', 'DB_NAME'), ('SMTP', 'EMAIL_HOST'),
+                       ('GitHub App clients', 'GITHUB_APP_CLIENT_ID'),
+                       ('Clé de chiffrement', 'AUTOKOM_FIELD_ENCRYPTION_KEY')]:
+        print(f'    {label:<25} {"configuré" if settings.get(key) else "absent"}')
+    choice = _choose('Configuration des services applicatifs',
+        [('keep','Conserver les paramètres du backend.env'),
+         ('edit','Modifier MySQL, SMTP ou GitHub App pour cette installation')], 'keep')
+    if choice == 'keep':
+        return settings
+    which = _choose('Configurer',
+        [('mysql','MySQL'), ('smtp','SMTP'), ('github','GitHub App des clients')], 'mysql')
+    if which == 'mysql':
+        for key, title, default in (
+            ('DB_HOST','Serveur MySQL', '127.0.0.1'), ('DB_PORT','Port MySQL','3306'),
+            ('DB_NAME','Base MySQL','autokom_platform'), ('DB_USER','Utilisateur MySQL','autokom')):
+            settings[key] = _ask(title, settings.get(key, default))
+        secret = getpass.getpass('  Mot de passe MySQL (Entrée = conserver) : ')
+        if secret: settings['DB_PASSWORD'] = secret
+    elif which == 'smtp':
+        for key, title, default in (
+            ('EMAIL_HOST','Hôte SMTP',''), ('EMAIL_PORT','Port SMTP','587'),
+            ('EMAIL_HOST_USER','Identifiant SMTP',''),
+            ('DEFAULT_FROM_EMAIL','Adresse expéditeur','noreply@localhost')):
+            settings[key] = _ask(title, settings.get(key, default))
+        settings['EMAIL_BACKEND'] = 'django.core.mail.backends.smtp.EmailBackend'
+        settings['EMAIL_USE_TLS'] = _ask('SMTP STARTTLS (True/False)', settings.get('EMAIL_USE_TLS','True'))
+        secret = getpass.getpass('  Mot de passe SMTP (Entrée = conserver) : ')
+        if secret: settings['EMAIL_HOST_PASSWORD'] = secret
+    else:
+        for key, title in (
+            ('GITHUB_APP_CLIENT_ID','GitHub App Client ID'),
+            ('GITHUB_APP_SLUG','GitHub App slug'),
+            ('GITHUB_APP_CALLBACK_URL','GitHub Callback URL')):
+            settings[key] = _ask(title, settings.get(key,''))
+        for key, title in (
+            ('GITHUB_APP_CLIENT_SECRET','GitHub App Client secret'),
+            ('GITHUB_WEBHOOK_SECRET','GitHub Webhook secret'),
+            ('AUTOKOM_FIELD_ENCRYPTION_KEY','Clé Fernet des données clients')):
+            secret = getpass.getpass(f'  {title} (Entrée = conserver) : ')
+            if secret: settings[key] = secret
+    return settings
+
+
+def _wizard(args):
+    print('\n  AUTOKOM · Assistant de configuration du backend\n')
+    args.runtime = _choose('Mode d’exécution', [('systemd','Système (systemd + Gunicorn)'),
+                                                  ('docker','Docker Compose')], args.runtime)
+    args.environment = _choose('Environnement', [('production','Production'),
+                                                         ('staging','Préproduction / staging')], args.environment)
+    source = _candidate_env(args.env_file)
+    print('  Fichier serveur détecté :', source)
+    args.env_file = _ask('Fichier .env sur le serveur', str(source))
+    settings = load_dotenv(Path(args.env_file))
+    settings = _wizard_business_settings(settings)
+    args._wizard_values = settings
+    args.domain = _ask('Domaine du backend', args.domain or _derive_domain(settings))
+    args.frontend = _ask('URL HTTPS du frontend', args.frontend or settings.get('FRONTEND_URL', ''))
+    args.port = int(_ask('Port interne (boucle locale)', str(args.port)))
+    args.workers = int(_ask('Nombre de workers Gunicorn', str(args.workers)))
+    args.nginx_mode = _choose('Configuration du reverse proxy',
+        [('managed','Gérer le vhost Nginx AUTOKOM'),('existing','Nginx existant (ne pas modifier)')], args.nginx_mode)
+    tls_options = ([('certbot','Certbot : obtenir ou conserver le certificat'),
+                    ('external','TLS déjà géré par un proxy externe / existant'),
+                    ('none','HTTP seulement (environnement isolé)')]
+                   if args.nginx_mode == 'managed' else
+                   [('external','HTTPS déjà géré par le Nginx existant'),
+                    ('none','HTTP seulement (environnement isolé)')])
+    args.tls_mode = _choose('Gestion HTTPS', tls_options,
+                            args.tls_mode if any(k == args.tls_mode for k, _ in tls_options) else 'external')
+    if args.tls_mode == 'certbot':
+        email = settings.get('DEFAULT_FROM_EMAIL', '').strip()
+        args.email = _ask('E-mail Let’s Encrypt', args.email or email)
+    args.provision_db = False if all(settings.get(k) for k in ('DB_NAME','DB_USER','DB_PASSWORD')) else (
+        _ask('Créer une base MySQL si absente ? (oui/non)', 'non').lower() == 'oui')
+    return args
+
+
+def _install_os_requirements(runtime):
+    if not ANSIBLE_PLAYBOOK.is_file():
+        raise AppError('Playbook Ansible platform-backend.yml manquant.')
+    if not shutil.which('ansible-playbook'):
+        raise AppError('Ansible absent : lancer la fondation AUTOKOM Core avant app setup.')
+    config = ROOT / 'ansible/ansible.cfg'
+    env = dict(os.environ)
+    if config.is_file():
+        env['ANSIBLE_CONFIG'] = str(config)
+    inventory = ROOT / 'ansible/inventories/local/hosts.ini'
+    if not inventory.is_file():
+        raise AppError('Inventaire Ansible local introuvable.')
+    call(['ansible-playbook', '-i', str(inventory), str(ANSIBLE_PLAYBOOK),
+          '-e', f'autokom_backend_runtime={runtime}'], cwd=ROOT, env=env, timeout=900)
+
+
+def setup(args):
+    # Without flags on a real terminal, setup becomes an interactive wizard.
+    if args.wizard:
+        if not _is_interactive():
+            raise AppError('Assistant interactif : lancer dans un vrai terminal ou renseigner les options.')
+        try:
+            args = _wizard(args)
+        except (ValueError, EOFError, KeyboardInterrupt):
+            raise AppError('Saisie annulée ou invalide.') from None
+    elif not args.domain or not args.frontend:
+        raise AppError('Utiliser autokom app setup (assistant) ou fournir --domain et --frontend.')
+    source = _candidate_env(args.env_file)
+    values = load_dotenv(source)
+    if hasattr(args, '_wizard_values'):
+        values.update(args._wizard_values)
+    domain = _preflight(args, values, source)
+    _print_setup_plan(args, source, values)
+    if args.check:
+        print('  Vérification uniquement : aucune modification effectuée.')
+        return 0
+    root_only()
+    if not args.yes:
+        if not _is_interactive() or input('  Taper INSTALLER pour confirmer : ').strip() != 'INSTALLER':
+            raise AppError('Installation annulée (aucune modification).')
+    _install_os_requirements(args.runtime)
     create_user()
-    settings = load_dotenv(ENV_FILE) if ENV_FILE.exists() else load_dotenv(BACKEND / '.env')
     if args.provision_db:
-        if args.runtime == 'docker':
-            raise AppError('En mode Docker, configurer un MySQL accessible dans un réseau privé. --provision-db est réservé à systemd.')
-        provision_database(settings)
-    elif not all(settings.get(k) for k in ('DB_NAME', 'DB_USER', 'DB_PASSWORD')):
-        raise AppError('Configurer MySQL dans backend/.env ou ajouter --provision-db.')
-    if args.runtime == 'docker' and settings.get('DB_HOST', '127.0.0.1') in ('127.0.0.1', 'localhost', '::1'):
-        raise AppError('MySQL Docker doit être joignable depuis le conteneur : DB_HOST ne peut pas être localhost.')
-    settings.update({
-        'DEBUG': 'false', 'DB_ENGINE': 'mysql',
+        provision_database(values)
+    values.update({
+        'DEBUG': 'False', 'DB_ENGINE': 'mysql',
         'ALLOWED_HOSTS': f'{domain},127.0.0.1,localhost',
-        'CSRF_TRUSTED_ORIGINS': f'https://{domain}',
+        'CSRF_TRUSTED_ORIGINS': f'https://{domain},' + args.frontend,
+        'CORS_ALLOWED_ORIGINS': args.frontend,
+        'FRONTEND_URL': args.frontend,
         'TRUST_PROXY_SSL_HEADER': 'true',
-        'SECURE_SSL_REDIRECT': 'true' if not args.no_tls else 'false',
-        'SECURE_HSTS_SECONDS': '31536000' if not args.no_tls else '0',
+        'SECURE_SSL_REDIRECT': 'false' if args.tls_mode == 'none' else 'true',
+        'SECURE_HSTS_SECONDS': '0' if args.tls_mode == 'none' else '31536000',
         'AUTOKOM_STATIC_ROOT': '/var/lib/autokom/staticfiles',
         'AUTOKOM_MEDIA_ROOT': '/var/lib/autokom/media',
+        'AUTOKOM_GUNICORN_WORKERS': str(args.workers),
+        'AUTOKOM_ENV_NAME': args.environment,
     })
-    if args.frontend:
-        settings['FRONTEND_URL'] = args.frontend
-        settings['CORS_ALLOWED_ORIGINS'] = args.frontend
-    if not settings.get('DJANGO_SECRET_KEY') or settings['DJANGO_SECRET_KEY'].startswith('CHANGE_ME'):
-        settings['DJANGO_SECRET_KEY'] = secrets.token_urlsafe(56)
-    if not settings.get('CLIENT_JWT_SIGNING_KEY') or settings['CLIENT_JWT_SIGNING_KEY'].startswith('CHANGE_ME'):
-        settings['CLIENT_JWT_SIGNING_KEY'] = secrets.token_urlsafe(56)
-    if not settings.get('EMAIL_BACKEND') or 'console' in settings['EMAIL_BACKEND']:
-        raise AppError('Configurer un backend SMTP réel dans backend/.env avant setup (inscription clients).')
+    # Secrets in /etc/autokom only; preserve original source and all app-specific keys.
+    secure_env_write(values)
+    if source != ENV_FILE:
+        os.chmod(source, 0o600)
     if args.runtime == 'systemd':
         install_python()
-    else:
-        if not shutil.which('docker'):
-            raise AppError('Docker absent. Installer Docker avant --runtime docker.')
-        if not (BACKEND / 'docker-compose.autokom.yml').is_file():
-            raise AppError('Fichier Docker Compose AUTOKOM manquant.')
-    secure_env_write(settings)
-    if args.update_github_client_id:
-        if not re.fullmatch(r'[A-Za-z0-9_]{8,128}', args.update_github_client_id):
-            raise AppError('GitHub Client ID de mise à jour invalide.')
-        update_file = CONFIG_DIR / 'update.env'
-        update_file.write_text('AUTOKOM_UPDATE_GITHUB_CLIENT_ID=' + args.update_github_client_id + '\n', encoding='utf-8')
-        os.chmod(update_file, 0o600)
-    if args.runtime == 'systemd':
-        write_service()
-    write_nginx(domain, args.email, issue_tls=not args.no_tls, runtime=args.runtime)
-    STATE_FILE.write_text(json.dumps({'runtime': args.runtime, 'domain': domain,
-                                      'port': PORT}, indent=2)+'\n', encoding='utf-8')
-    STATE_FILE.chmod(0o640)
-    print('  Configuration terminée. Ensuite : sudo autokom app deploy')
-    if args.no_tls:
-        print('  ATTENTION : HTTPS non émis. Ne pas exposer les API clients avant Certbot.')
+        write_service(args.port, args.workers)
+    elif not shutil.which('docker'):
+        raise AppError('Docker indisponible après provisioning des prérequis.')
+    if args.nginx_mode == 'managed':
+        write_nginx(domain, args.email, issue_tls=args.tls_mode == 'certbot',
+                    runtime=args.runtime, port=args.port)
+    state = {'runtime': args.runtime, 'environment': args.environment, 'domain': domain,
+             'frontend': args.frontend, 'port': args.port, 'workers': args.workers,
+             'env_source': str(source), 'nginx_mode': args.nginx_mode, 'tls_mode': args.tls_mode}
+    temp = STATE_FILE.with_suffix('.new')
+    temp.write_text(json.dumps(state, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+    temp.chmod(0o600)
+    os.replace(temp, STATE_FILE)
+    print('  Setup terminé. La mise en service se fait avec : sudo autokom app deploy --check, puis deploy')
+    if args.tls_mode == 'none':
+        print('  ATTENTION : HTTP uniquement. Ne pas exposer les clients en production.')
+
+def _compose_env(state):
+    env = dict(os.environ)
+    env['AUTOKOM_BACKEND_PORT'] = str(state.get('port', PORT))
+    env['AUTOKOM_BACKEND_WORKERS'] = str(state.get('workers', 2))
+    env['AUTOKOM_BACKEND_ENV_FILE'] = str(ENV_FILE)
+    return env
 
 
 def deploy(args):
@@ -468,11 +717,11 @@ def deploy(args):
         call(['systemctl', 'is-active', '--quiet', SERVICE])
     else:
         call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
-              'up', '-d', '--build'], cwd=BACKEND, timeout=900)
+              'up', '-d', '--build'], cwd=BACKEND, timeout=900, env=_compose_env(state))
         call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
-              'exec', '-T', 'web', 'python', 'manage.py', 'migrate', '--noinput'], cwd=BACKEND, timeout=300)
+              'exec', '-T', 'web', 'python', 'manage.py', 'migrate', '--noinput'], cwd=BACKEND, timeout=300, env=_compose_env(state))
         call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
-              'exec', '-T', 'web', 'python', 'manage.py', 'collectstatic', '--noinput'], cwd=BACKEND, timeout=300)
+              'exec', '-T', 'web', 'python', 'manage.py', 'collectstatic', '--noinput'], cwd=BACKEND, timeout=300, env=_compose_env(state))
     # Django startup may be delayed; retry without falsely reporting success.
     import time
     for _ in range(25):
@@ -489,13 +738,14 @@ def status(args):
     except AppError as exc:
         print(str(exc))
         return 1
+    print('  Environnement :', state.get('environment', 'production'))
     print('  Runtime :', state['runtime'])
     print('  Domaine :', state['domain'])
     if state['runtime'] == 'systemd':
         call(['systemctl', 'status', '--no-pager', '--lines=12', SERVICE], timeout=15)
     else:
         call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
-              'ps'], cwd=BACKEND, timeout=30)
+              'ps'], cwd=BACKEND, timeout=30, env=_compose_env(state))
     print('  Health check :', 'OK' if verify_health() else 'INDISPONIBLE')
 
 
@@ -505,27 +755,37 @@ def logs(args):
         call(['journalctl', '-u', SERVICE, '-n', str(args.lines), '--no-pager'], timeout=30)
     else:
         call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
-              'logs', '--tail', str(args.lines), 'web'], cwd=BACKEND, timeout=30)
+              'logs', '--tail', str(args.lines), 'web'], cwd=BACKEND, timeout=30, env=_compose_env(state))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='autokom app', description='Gestion du service backend AUTOKOM Platform')
     sub = parser.add_subparsers(dest='action', required=True)
-    setup_p = sub.add_parser('setup', help='Installer le backend, le service et le reverse proxy')
-    setup_p.add_argument('--domain', required=True)
-    setup_p.add_argument('--email', required=True)
+    setup_p = sub.add_parser('setup', help='Assistant de configuration backend (sans option : interactif)')
+    setup_p.add_argument('--domain', help='Domaine public du backend Django')
+    setup_p.add_argument('--email', help='Adresse Let’s Encrypt (requise pour --tls-mode certbot)')
     setup_p.add_argument('--frontend', help='URL HTTPS du frontend (CORS)')
     setup_p.add_argument('--runtime', choices=['systemd','docker'], default='systemd')
-    setup_p.add_argument('--update-github-client-id', help='Client ID GitHub App autorisée à lire le dépôt privé AUTOKOM')
-    setup_p.add_argument('--provision-db', action='store_true', help='Créer une base et un utilisateur MySQL dédiés si absents')
-    setup_p.add_argument('--no-tls', action='store_true', help='Configurer HTTP seulement (tests en interne)')
+    setup_p.add_argument('--environment', choices=['production','staging'], default='production')
+    setup_p.add_argument('--env-file', help='Chemin absolu du backend.env dans /etc/autokom/')
+    setup_p.add_argument('--port', type=int, default=PORT, help='Port local, défaut 8172')
+    setup_p.add_argument('--workers', type=int, default=2, help='Workers Gunicorn (1–16)')
+    setup_p.add_argument('--nginx-mode', choices=['managed','existing'], default='managed')
+    setup_p.add_argument('--tls-mode', choices=['certbot','external','none'], default='certbot')
+    setup_p.add_argument('--provision-db', action='store_true', help='Créer MySQL seulement si aucun DB existant')
+    setup_p.add_argument('--check', action='store_true', help='Prévisualisation et diagnostic sans modification')
+    setup_p.add_argument('--yes', action='store_true', help='Confirmer en mode non interactif (Ansible)')
+    setup_p.add_argument('--wizard', action='store_true', help='Forcer l’assistant interactif')
     deploy_p = sub.add_parser('deploy', help='Contrôles DevSecOps et déploiement Django')
     deploy_p.add_argument('--check', action='store_true', help='Scanner et vérifier sans déployer')
     sub.add_parser('status', help='État du service et health check')
     log_p = sub.add_parser('logs', help='Dernières lignes de journaux')
     log_p.add_argument('--lines', type=int, default=80)
     args = parser.parse_args(argv)
-    if args.action == 'setup': return setup(args)
+    if args.action == 'setup':
+        if not args.domain and not args.yes and _is_interactive():
+            args.wizard = True
+        return setup(args)
     if args.action == 'deploy': return deploy(args)
     if args.action == 'status': return status(args)
     if args.action == 'logs': return logs(args)
