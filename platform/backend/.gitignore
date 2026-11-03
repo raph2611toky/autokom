@@ -1,0 +1,12 @@
+.env
+*.sqlite3
+__pycache__/
+*.py[cod]
+.venv/
+staticfiles/
+media/**
+!media/.gitkeep
+!media/users/
+!media/users/profiles/
+!media/users/profiles/anonymous.png
+!media/users/profiles/default.png
