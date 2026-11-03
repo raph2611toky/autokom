@@ -33,7 +33,7 @@ class UpdateError(RuntimeError):
 
 
 OWNER_REPO = ("raph2611toky", "autokom")
-UPDATE_BRANCH = "toky"
+UPDATE_BRANCH = "main"
 CONFIG_FILE = Path("/etc/autokom/update.env")
 REQUIRED_CORE = (
     "autokom",
