@@ -1,63 +1,125 @@
 #!/usr/bin/env python3
-"""AUTOKOM manager patch: dry-run default, conservative 3-way merge, no services."""
+"""AUTOKOM: restore ignored Django secrets *source code* + 3-line live progress.
+
+Dry-run by default. No backups, no deletes, no service changes and no secrets read.
+The expected original app-manager is stored as a 3-way merge base; conflicts fail.
+"""
+from __future__ import annotations
+import argparse
+import os
 from pathlib import Path
-import argparse, os, subprocess, tempfile, sys, difflib
-HERE=Path(__file__).resolve().parent
-MODIFIED=('scripts/lib/autokom_app_manager.py','pipelines/autokom-backend/Jenkinsfile')
-ADDED=('pipelines/autokom-backend/semgrep-rules.yml','tests/test_autokom_app_deploy_ui.py','docs/AUTOKOM-BACKEND-DEPLOY-UX.md')
+import subprocess
+import sys
+import tempfile
+
+HERE = Path(__file__).resolve().parent
+MANAGER = Path('scripts/lib/autokom_app_manager.py')
+APP = Path('platform/backend/apps/projects/secrets')
+MARKER = '!platform/backend/apps/projects/secrets/'
 
 
-def merge(repo, rel):
-    source=(HERE/rel).read_bytes()
-    base=(HERE/'base'/rel).read_bytes()
-    dst=repo/rel
-    if not dst.is_file() or dst.is_symlink():
-        raise RuntimeError('Fichier attendu manquant/lien symbolique : '+rel)
-    current=dst.read_bytes()
-    if current == source: return None
-    if current == base: return source
-    # Preserve local changes, fail instead of overwriting a conflict.
-    with tempfile.TemporaryDirectory() as folder:
-        paths=[Path(folder)/p for p in ('local','base','desired')]
-        for p,b in zip(paths,(current,base,source)): p.write_bytes(b)
-        proc=subprocess.run(['git','merge-file','-p',*map(str,paths)],capture_output=True)
+def merge_file(local: bytes, base: bytes, desired: bytes) -> bytes:
+    if local == desired:
+        return local
+    if local == base:
+        return desired
+    with tempfile.TemporaryDirectory(prefix='autokom-merge-') as directory:
+        paths = [Path(directory, p) for p in ('current', 'base', 'desired')]
+        for file, content in zip(paths, (local, base, desired)):
+            file.write_bytes(content)
+        proc = subprocess.run(['git', 'merge-file', '-p', *map(str, paths)],
+                              capture_output=True, check=False)
         if proc.returncode or b'<<<<<<<' in proc.stdout or b'>>>>>>>' in proc.stdout:
-            raise RuntimeError('Conflit avec modifications locales : '+rel+' (aucun fichier modifié)')
-        return proc.stdout if proc.stdout != current else None
+            raise RuntimeError('Conflit dans autokom_app_manager.py : aucune modification effectuée.')
+        return proc.stdout
 
 
-def main():
-    p=argparse.ArgumentParser()
-    p.add_argument('--repo',required=True,type=Path)
-    p.add_argument('--apply',action='store_true')
-    args=p.parse_args(); repo=args.repo.resolve()
-    if not (repo/'autokom').is_file() or not (repo/'platform/backend/manage.py').is_file():
-        raise RuntimeError('Dépôt AUTOKOM non reconnu.')
-    changes={}
-    for rel in MODIFIED:
-        desired=merge(repo,rel)
-        print(('MODIFIER' if desired is not None else 'INCHANGÉ')+' : '+rel)
-        if desired is not None:changes[rel]=desired
-    for rel in ADDED:
-        dst=repo/rel
-        if dst.is_symlink(): raise RuntimeError('Lien symbolique interdit : '+rel)
-        source=(HERE/rel).read_bytes()
-        if dst.exists() and dst.read_bytes()!=source:
-            raise RuntimeError('Fichier existant différent : '+rel)
-        if not dst.exists():changes[rel]=source
-        print(('AJOUTER' if not dst.exists() else 'INCHANGÉ')+' : '+rel)
-    if not args.apply:
-        print('\nSimulation. Aucun fichier ni service modifié. Pour appliquer: --apply')
-        return
-    for rel,data in changes.items():
-        dst=repo/rel; dst.parent.mkdir(parents=True,exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=dst.parent,delete=False) as fd:
-            fd.write(data); temp=Path(fd.name)
-        os.chmod(temp,(dst.stat().st_mode & 0o777) if dst.exists() else 0o644)
-        os.replace(temp,dst)
-    print('Correctif appliqué. Vérifier git diff avant tout commit.')
+def collect(repo: Path) -> dict[Path, bytes]:
+    if not (repo / 'autokom').is_file() or not (repo / 'platform/backend/manage.py').is_file():
+        raise RuntimeError('Ce répertoire ne ressemble pas à la racine du dépôt AUTOKOM.')
+    changes: dict[Path, bytes] = {}
+    gitignore = repo / '.gitignore'
+    if not gitignore.is_file() or gitignore.is_symlink():
+        raise RuntimeError('.gitignore à la racine manquant ou lien symbolique.')
+    old_ignore = gitignore.read_text(encoding='utf-8')
+    if 'secrets/' not in old_ignore.splitlines() and MARKER not in old_ignore.splitlines():
+        raise RuntimeError('La règle secrets/ attendue est absente : vérifier le .gitignore avant correction.')
+    if MARKER not in old_ignore.splitlines():
+        # Unignore *directory* only. Ignore rules for .env, *.pem, *.key stay active.
+        new_ignore = old_ignore.rstrip('\n') + (
+            '\n\n# Package Python Django versionné (aucune donnée secrète ici)\n'
+            + MARKER + '\n'
+        )
+        changes[gitignore] = new_ignore.encode('utf-8')
+    dst_manager = repo / MANAGER
+    if not dst_manager.is_file() or dst_manager.is_symlink():
+        raise RuntimeError('Gestionnaire AUTOKOM manquant (scripts/lib/autokom_app_manager.py).')
+    new_manager = merge_file(
+        dst_manager.read_bytes(),
+        (HERE/'base'/MANAGER).read_bytes(),
+        (HERE/MANAGER).read_bytes(),
+    )
+    if new_manager != dst_manager.read_bytes():
+        changes[dst_manager] = new_manager
+    for pkg_file in sorted((HERE/APP).rglob('*.py')):
+        relative = pkg_file.relative_to(HERE)
+        target = repo / relative
+        if any(part.startswith('.') for part in relative.parts) or '__pycache__' in relative.parts:
+            raise RuntimeError('Chemin package non autorisé : ' + str(relative))
+        if target.is_symlink() or any(p.is_symlink() for p in target.parents if p != repo.parent):
+            raise RuntimeError('Lien symbolique interdit : '+str(relative))
+        if target.exists():
+            # Respect local source code: never overwrite even when it differs.
+            continue
+        changes[target] = pkg_file.read_bytes()
+    for relative in (Path('tests/test_autokom_secrets_live_ui.py'),
+                     Path('docs/AUTOKOM-SECRETS-SOURCE-ET-LIVE-LOGS.md')):
+        target = repo / relative
+        if target.is_symlink():
+            raise RuntimeError('Lien symbolique interdit : ' + str(relative))
+        if not target.exists():
+            changes[target] = (HERE / relative).read_bytes()
+        elif target.read_bytes() != (HERE / relative).read_bytes():
+            raise RuntimeError('Fichier existant différent, refus de remplacer : ' + str(relative))
+    return changes
 
-if __name__=='__main__':
-    try: main()
-    except (RuntimeError,OSError,subprocess.SubprocessError) as e:
-        print('ERREUR : '+str(e),file=sys.stderr);sys.exit(1)
+
+def apply(changes: dict[Path, bytes]):
+    for path, data in changes.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+            stream.write(data)
+            temporary = Path(stream.name)
+        try:
+            os.chmod(temporary, path.stat().st_mode & 0o777 if path.exists() else 0o644)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Corriger package Django secrets et loader sans modifier la production')
+    parser.add_argument('--repo', required=True, type=Path)
+    parser.add_argument('--apply', action='store_true')
+    args = parser.parse_args(argv)
+    root = args.repo.resolve()
+    changes = collect(root)
+    if not changes:
+        print('Rien à modifier : correctif déjà appliqué.')
+        return 0
+    for path in changes:
+        print(f"  {'MODIFIER' if path.exists() else 'AJOUTER'} {path.relative_to(root)}")
+    if args.apply:
+        apply(changes)
+        print('\nCorrectif appliqué. Vérifier git diff et suivre le package Django avant de publier.')
+    else:
+        print('\nSimulation uniquement. Pour appliquer, ajouter --apply.')
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        print('ERREUR : ' + str(exc), file=sys.stderr)
+        sys.exit(1)

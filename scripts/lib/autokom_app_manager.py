@@ -46,9 +46,18 @@ class AppError(RuntimeError):
 
 
 class LiveProgress:
-    """Root-only durable logs, transient single-line TTY activity, concise results."""
+    """Transitory spinner + three green lines; full logs remain protected on disk.
+
+    Only non-sensitive, sanitized log text reaches the live TTY preview.
+    Terminal state is restored at each phase boundary, including failures.
+    """
 
     FRAMES = ('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏')
+    SENSITIVE = re.compile(
+        r'(?i)(password|passwd|secret|token|authorization|credential|'
+        r'private[_ -]?key|api[_ -]?key|access[_ -]?key|cookie|bearer|'
+        r'jwt|smtp|mysql://|postgres://|https?://[^/\s:@]+:[^/\s@]+@)'
+    )
 
     def __init__(self, action):
         self.action = action
@@ -56,6 +65,8 @@ class LiveProgress:
         self._frame = 0
         self._last = 0.0
         self._tty = sys.stdout.isatty()
+        self._visible = False
+        self._preview_start = 0
 
     def __enter__(self):
         OPERATION_LOGS.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -83,32 +94,68 @@ class LiveProgress:
             print(f'  ✓ Journal détaillé : {self.log_path}')
 
     def write(self, value):
-        # This log is root-only, never emitted to stdout in full during setup.
         with self.log_path.open('a', encoding='utf-8') as handle:
             handle.write(value)
+
+    def start_preview(self):
+        """Do not mix output from previous phases into the current preview."""
+        self._preview_start = self.log_path.stat().st_size
+
+    @classmethod
+    def _safe_line(cls, value):
+        # Discard ANSI/control sequences from subprocess output (terminal safety).
+        value = re.sub(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))', '', value)
+        value = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', value).strip()
+        if not value:
+            return ''
+        if cls.SENSITIVE.search(value):
+            return 'sortie masquée (information potentiellement sensible)'
+        return value
+
+    def _last_lines(self):
+        if not self.log_path:
+            return []
+        try:
+            with self.log_path.open('rb') as handle:
+                handle.seek(0, os.SEEK_END)
+                end = handle.tell()
+                handle.seek(max(self._preview_start, end - 16384))
+                raw = handle.read().decode('utf-8', errors='replace')
+            cleaned = [self._safe_line(line) for line in raw.splitlines()]
+            return [line for line in cleaned if line][-3:]
+        except OSError:
+            return []
 
     def paint(self, label, elapsed):
         if not self._tty:
             return
         now = time.monotonic()
-        if now - self._last < 0.09:
+        if now - self._last < 0.18:
             return
         self._last = now
+        width = max(26, shutil.get_terminal_size((90, 24)).columns)
         frame = self.FRAMES[self._frame % len(self.FRAMES)]
         self._frame += 1
-        text = f'  {frame} {label}  {int(elapsed)}s'
-        try:
-            width = shutil.get_terminal_size((90, 20)).columns
-            text = text[:max(10, width - 2)]
-        except (OSError, ValueError):
-            pass
-        sys.stdout.write('\r\x1b[2K' + text)
+        summary = f'  {frame} {label} · {int(elapsed)}s'[:width - 1]
+        lines = self._last_lines() or ['exécution en cours…']
+        lines = [''] * (3-len(lines)) + lines[-3:]
+        if self._visible:
+            sys.stdout.write('\r\x1b[3A')
+        rendered = [summary] + [f'\x1b[32m  │ {v[:max(1,width-6)]}\x1b[0m' for v in lines]
+        sys.stdout.write('\r\x1b[2K' + ('\n\r\x1b[2K'.join(rendered)))
         sys.stdout.flush()
+        self._visible = True
 
     def clear(self):
-        if self._tty:
-            sys.stdout.write('\r\x1b[2K')
+        if self._tty and self._visible:
+            sys.stdout.write('\r\x1b[3A')
+            for i in range(4):
+                sys.stdout.write('\r\x1b[2K')
+                if i < 3:
+                    sys.stdout.write('\n')
+            sys.stdout.write('\r\x1b[3A')
             sys.stdout.flush()
+            self._visible = False
 
 
 @contextmanager
@@ -155,6 +202,7 @@ def call(args, *, cwd=None, input_text=None, timeout=120, env=None):
 
     label = _STAGE or Path(args[0]).name
     _LIVE.write(f'\n[{datetime.now().isoformat(timespec="seconds")}] {label} · {Path(args[0]).name}\n')
+    _LIVE.start_preview()
     start = time.monotonic()
     try:
         with _LIVE.log_path.open('ab', buffering=0) as log:
@@ -303,8 +351,11 @@ def create_user():
             call(['setfacl', '-m', 'u:autokom:r-x', str(directory)])
         for source in BACKEND.rglob('*'):
             relative = source.relative_to(BACKEND)
-            if source.is_symlink() or any(piece in {'.git', '.venv', '__pycache__', 'secrets', '.env'}
-                                           for piece in relative.parts):
+            is_django_secret_app = relative.parts[:3] == ('apps', 'projects', 'secrets')
+            excluded = {'.git', '.venv', '__pycache__', '.env'}
+            if not is_django_secret_app:
+                excluded.add('secrets')
+            if source.is_symlink() or any(piece in excluded for piece in relative.parts):
                 continue
             if source.is_dir():
                 call(['setfacl', '-m', 'u:autokom:r-x', str(source)])
@@ -503,6 +554,35 @@ def run_as_service(args, *, timeout=300):
     # Explicitly drop privileges to the system user for Django operations.
     command = ['runuser', '-u', USER, '--', *args]
     return call(command, cwd=BACKEND, env=env, timeout=timeout)
+
+
+def ensure_django_secrets_package_access():
+    """Grant read-only access to the *Django source package*, not to stored credentials.
+
+    This is intentionally repeatable: setup may have run before Git tracked the
+    application. Do not open /etc/autokom/secrets or arbitrary directories.
+    """
+    package = BACKEND / 'apps' / 'projects' / 'secrets'
+    if not (package / '__init__.py').is_file() or not (package / 'apps.py').is_file():
+        raise AppError('Application Django apps.projects.secrets absente du dépôt. '
+                       'Vérifier son suivi Git et exécuter autokom update.')
+    paths = [package, *sorted(package.rglob('*'))]
+    for entry in paths:
+        if entry.is_symlink():
+            raise AppError('Lien symbolique interdit dans l’application Django secrets.')
+    if not shutil.which('setfacl'):
+        # Without ACL, check actual permissions with service account instead.
+        call(['runuser', '-u', USER, '--', str(VENV / 'bin/python'), '-c',
+              'import apps.projects.secrets'], cwd=BACKEND, env=django_env())
+        return
+    for entry in paths:
+        if entry.is_dir():
+            call(['setfacl', '-m', f'u:{USER}:r-x', str(entry)])
+        elif entry.is_file() and entry.suffix == '.py':
+            call(['setfacl', '-m', f'u:{USER}:r--', str(entry)])
+    # Fail early with a clear error if a parent directory is inaccessible.
+    call(['runuser', '-u', USER, '--', str(VENV / 'bin/python'), '-c',
+          'import apps.projects.secrets'], cwd=BACKEND, env=django_env())
 
 
 def run_checks():
@@ -859,6 +939,14 @@ def deploy(args):
                 raise AppError('Code backend manquant.')
             if not ENV_FILE.is_file():
                 raise AppError('Fichier de configuration sécurisé manquant.')
+        if state['runtime'] == 'systemd':
+            with phase('Django · présence du code applicatif'):
+                package = BACKEND / 'apps' / 'projects' / 'secrets'
+                if not (package / '__init__.py').is_file() or not (package / 'apps.py').is_file():
+                    raise AppError('Application Django apps.projects.secrets absente du dépôt.')
+                # A dry-run must not modify filesystem ACLs.
+                if not args.check:
+                    ensure_django_secrets_package_access()
         run_checks()
         if args.check:
             print('  ✓ Contrôles DevSecOps terminés · aucun changement déployé.')
