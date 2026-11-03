@@ -305,7 +305,7 @@ def authorize(action='opération sensible', *, require_setup=True):
             # Une période expirée doit donner de nouvelles tentatives, pas re-bloquer au 1er échec.
             failed={'failures':0,'blocked_until':0}
             _write(ATTEMPTS, failed)
-        attempt=_tty_secret('Autorisation AUTOKOM · '+action)
+        attempt=_tty_secret('[KEY] Passphrase credential AUTOKOM · '+action+' [saisie masquée]')
         if not _verify(attempt,state['passphrase']):
             count=int(failed.get('failures',0))+1
             next_block=now+900 if count>=5 else 0
