@@ -21,7 +21,7 @@ pipeline {
       steps { sh 'python3 -m compileall -q platform/backend/apps platform/backend/config platform/backend/helpers' }
     }
     stage('Semgrep SAST') {
-      steps { sh 'semgrep scan --config auto --error --metrics off platform/backend' }
+      steps { sh 'semgrep scan --config pipelines/autokom-backend/semgrep-rules.yml --error --metrics off platform/backend' }
     }
     stage('Trivy vulnerability and secrets') {
       steps { sh 'trivy fs --scanners vuln,secret --exit-code 1 --severity HIGH,CRITICAL --no-progress platform/backend' }

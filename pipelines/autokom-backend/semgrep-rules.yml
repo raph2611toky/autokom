@@ -1,0 +1,26 @@
+rules:
+  - id: autokom.python.dynamic-code-execution
+    languages: [python]
+    severity: ERROR
+    message: "Exécution dynamique de code interdite dans le backend AUTOKOM."
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+  - id: autokom.python.unsafe-pickle-deserialization
+    languages: [python]
+    severity: ERROR
+    message: "Désérialisation pickle potentiellement dangereuse."
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+  - id: autokom.python.subprocess-shell
+    languages: [python]
+    severity: ERROR
+    message: "Éviter shell=True ; préférer un tableau d'arguments explicite."
+    patterns:
+      - pattern: subprocess.$METHOD(..., shell=True, ...)
+  - id: autokom.python.yaml-unsafe-load
+    languages: [python]
+    severity: ERROR
+    message: "Chargement YAML non sécurisé : utiliser yaml.safe_load."
+    pattern: yaml.load(..., Loader=yaml.Loader)

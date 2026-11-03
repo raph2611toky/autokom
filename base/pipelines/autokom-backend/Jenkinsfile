@@ -1,0 +1,59 @@
+// CI for AUTOKOM Platform itself. Production deployment remains a privileged
+// explicit operation: sudo autokom app deploy, after approved verification.
+pipeline {
+  agent { label 'linux-devsecops' }
+  options { timestamps(); disableConcurrentBuilds(); timeout(time: 30, unit: 'MINUTES') }
+  stages {
+    stage('Checkout') { steps { checkout scm } }
+    stage('Dependencies') {
+      steps {
+        dir('platform/backend') {
+          sh '''
+            set -eu
+            python3 -m venv .ci-venv
+            . .ci-venv/bin/activate
+            pip install -r requirements.txt
+          '''
+        }
+      }
+    }
+    stage('Python compilation') {
+      steps { sh 'python3 -m compileall -q platform/backend/apps platform/backend/config platform/backend/helpers' }
+    }
+    stage('Semgrep SAST') {
+      steps { sh 'semgrep scan --config auto --error --metrics off platform/backend' }
+    }
+    stage('Trivy vulnerability and secrets') {
+      steps { sh 'trivy fs --scanners vuln,secret --exit-code 1 --severity HIGH,CRITICAL --no-progress platform/backend' }
+    }
+    stage('Django system checks') {
+      steps {
+        dir('platform/backend') {
+          // Requires Jenkins credentials to supply an isolated test MySQL
+          // database and nonproduction settings. No SQLite fallback.
+          sh '''
+            set -eu
+            . .ci-venv/bin/activate
+            python manage.py check --deploy
+            python manage.py makemigrations --check --dry-run
+          '''
+        }
+      }
+    }
+    stage('Tests with MySQL') {
+      steps {
+        dir('platform/backend') {
+          sh '''
+            set -eu
+            . .ci-venv/bin/activate
+            python manage.py test
+          '''
+        }
+      }
+    }
+  }
+  post {
+    always { archiveArtifacts artifacts: 'platform/backend/test-results/*.xml', allowEmptyArchive: true }
+    cleanup { cleanWs() }
+  }
+}

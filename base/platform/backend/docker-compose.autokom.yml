@@ -1,0 +1,28 @@
+services:
+  web:
+    container_name: autokom-platform-backend
+    build:
+      context: .
+      dockerfile: Dockerfile.autokom
+    restart: unless-stopped
+    env_file:
+      - /etc/autokom/platform-backend.env
+    environment:
+      AUTOKOM_STATIC_ROOT: /app/staticfiles
+      AUTOKOM_MEDIA_ROOT: /app/media
+      AUTOKOM_SERVE_STATIC: 'true'
+    ports:
+      - '127.0.0.1:8172:8172'
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - media_data:/app/media
+      - static_data:/app/staticfiles
+volumes:
+  media_data:
+  static_data:

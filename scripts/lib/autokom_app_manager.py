@@ -7,6 +7,9 @@ Django application process. Does not install arbitrary client applications.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+from datetime import datetime
+import time
 import getpass
 import json
 import os
@@ -32,18 +35,148 @@ USER = 'autokom'
 SERVICE = 'autokom-backend'
 VENV = Path('/opt/autokom/venv')
 PORT = 8172
+SECURITY_RULES = ROOT / 'pipelines' / 'autokom-backend' / 'semgrep-rules.yml'
+OPERATION_LOGS = Path('/var/log/autokom/platform')
+_LIVE = None
+_STAGE = None
 
 
 class AppError(RuntimeError):
     pass
 
 
-def call(args, *, cwd=None, input_text=None, timeout=120, env=None):
+class LiveProgress:
+    """Root-only durable logs, transient single-line TTY activity, concise results."""
+
+    FRAMES = ('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏')
+
+    def __init__(self, action):
+        self.action = action
+        self.log_path = None
+        self._frame = 0
+        self._last = 0.0
+        self._tty = sys.stdout.isatty()
+
+    def __enter__(self):
+        OPERATION_LOGS.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(OPERATION_LOGS, 0o700)
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        path = OPERATION_LOGS / f'{self.action}-{stamp}-{os.getpid()}.log'
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            stream.write(f'AUTOKOM · {self.action} · {datetime.now().isoformat(timespec="seconds")}\n')
+        self.log_path = path
+        global _LIVE
+        if _LIVE is not None:
+            raise AppError('Une opération AUTOKOM est déjà en cours.')
+        _LIVE = self
+        print(f'  ◈ AUTOKOM · {self.action.upper()}')
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        global _LIVE
+        self.clear()
+        _LIVE = None
+        if exc_type:
+            print(f'  ✗ Opération interrompue · diagnostic : {self.log_path}')
+        else:
+            print(f'  ✓ Journal détaillé : {self.log_path}')
+
+    def write(self, value):
+        # This log is root-only, never emitted to stdout in full during setup.
+        with self.log_path.open('a', encoding='utf-8') as handle:
+            handle.write(value)
+
+    def paint(self, label, elapsed):
+        if not self._tty:
+            return
+        now = time.monotonic()
+        if now - self._last < 0.09:
+            return
+        self._last = now
+        frame = self.FRAMES[self._frame % len(self.FRAMES)]
+        self._frame += 1
+        text = f'  {frame} {label}  {int(elapsed)}s'
+        try:
+            width = shutil.get_terminal_size((90, 20)).columns
+            text = text[:max(10, width - 2)]
+        except (OSError, ValueError):
+            pass
+        sys.stdout.write('\r\x1b[2K' + text)
+        sys.stdout.flush()
+
+    def clear(self):
+        if self._tty:
+            sys.stdout.write('\r\x1b[2K')
+            sys.stdout.flush()
+
+
+@contextmanager
+def operation(action):
+    with LiveProgress(action) as progress:
+        yield progress
+
+
+@contextmanager
+def phase(label):
+    global _STAGE
+    old = _STAGE
+    _STAGE = label
+    start = time.monotonic()
+    if _LIVE:
+        _LIVE.paint(label, 0)
     try:
-        return subprocess.run(args, cwd=cwd, input=input_text, text=True, timeout=timeout,
-                              check=True, env=env)
-    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as exc:
-        raise AppError(f'Échec de {args[0]} ({getattr(exc, "returncode", "interrompu")}).') from exc
+        yield
+    except Exception:
+        if _LIVE:
+            _LIVE.clear()
+        print(f'  ✗ {label} ({int(time.monotonic() - start)}s)')
+        raise
+    else:
+        if _LIVE:
+            _LIVE.clear()
+        print(f'  ✓ {label} ({int(time.monotonic() - start)}s)')
+    finally:
+        _STAGE = old
+
+
+def call(args, *, cwd=None, input_text=None, timeout=120, env=None):
+    """Run synchronously with live TTY progress while redirecting verbose output.
+
+    Exit codes and timeouts always fail closed. Never include SQL/stdin secrets
+    or full command arguments in the log or the user-facing error.
+    """
+    if _LIVE is None:
+        try:
+            return subprocess.run(args, cwd=cwd, input=input_text, text=True,
+                                  timeout=timeout, check=True, env=env)
+        except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as exc:
+            raise AppError(f'Échec de {args[0]} ({getattr(exc, "returncode", "interrompu")}).') from exc
+
+    label = _STAGE or Path(args[0]).name
+    _LIVE.write(f'\n[{datetime.now().isoformat(timespec="seconds")}] {label} · {Path(args[0]).name}\n')
+    start = time.monotonic()
+    try:
+        with _LIVE.log_path.open('ab', buffering=0) as log:
+            proc = subprocess.Popen(args, cwd=cwd, env=env,
+                                    stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+                                    stdout=log, stderr=subprocess.STDOUT)
+            if input_text is not None:
+                proc.stdin.write(input_text.encode('utf-8'))
+                proc.stdin.close()
+            while proc.poll() is None:
+                if time.monotonic() - start > timeout:
+                    proc.kill()
+                    proc.wait()
+                    raise AppError(f'Délai dépassé : {label}. Journal : {_LIVE.log_path}')
+                _LIVE.paint(label, time.monotonic() - start)
+                time.sleep(0.12)
+            _LIVE.clear()
+            if proc.returncode:
+                raise AppError(f'Échec : {label} (code {proc.returncode}). Journal : {_LIVE.log_path}')
+            return subprocess.CompletedProcess(args, proc.returncode)
+    except OSError as exc:
+        raise AppError(f'Impossible de lancer : {label}. Journal : {_LIVE.log_path}') from exc
 
 
 def root_only():
@@ -375,18 +508,27 @@ def run_as_service(args, *, timeout=300):
 def run_checks():
     if not (BACKEND / 'manage.py').is_file():
         raise AppError('Code Django introuvable.')
+    if not SECURITY_RULES.is_file():
+        raise AppError(f'Règles Semgrep locales absentes : {SECURITY_RULES}')
     for scanner in ('semgrep', 'trivy'):
         if not shutil.which(scanner):
-            raise AppError(f'Scanner obligatoire absent : {scanner}. Installer via AUTOKOM Core.')
-    # Scans target the platform backend only, not other customer repositories.
-    call(['semgrep', 'scan', '--config', 'auto', '--error', '--metrics', 'off',
-          '--exclude', '**/.env', str(BACKEND)], cwd=ROOT, timeout=600)
-    call(['trivy', 'fs', '--scanners', 'vuln,secret', '--severity', 'HIGH,CRITICAL',
-          '--exit-code', '1', '--no-progress', '--skip-files', str(BACKEND/'.env'),
-          '--skip-dirs', str(BACKEND/'media'), str(BACKEND)], cwd=ROOT, timeout=600)
-    if VENV.exists():
+            raise AppError(f'Scanner DevSecOps obligatoire absent : {scanner}. Installer via AUTOKOM Core.')
+    # Never mix Semgrep --config auto with --metrics off: use versioned rules.
+    with phase('SAST · Semgrep (règles locales, télémétrie désactivée)'):
+        call(['semgrep', 'scan', '--config', str(SECURITY_RULES), '--error',
+              '--metrics', 'off', '--exclude', '**/.env',
+              '--exclude', '**/.venv/**', '--exclude', '**/media/**',
+              str(BACKEND)], cwd=ROOT, timeout=600)
+    with phase('SCA / secrets · Trivy'):
+        call(['trivy', 'fs', '--scanners', 'vuln,secret', '--severity', 'HIGH,CRITICAL',
+              '--exit-code', '1', '--no-progress', '--skip-files', str(BACKEND/'.env'),
+              '--skip-dirs', str(BACKEND/'media'), str(BACKEND)], cwd=ROOT, timeout=600)
+    if not VENV.is_dir() or not (VENV / 'bin/python').is_file():
+        raise AppError('Environnement Python absent : lancer autokom app setup.')
+    with phase('Django · vérification production'):
         run_as_service([str(VENV/'bin/python'), 'manage.py', 'check', '--deploy'])
-        # Migrations MUST be committed in source control, never generated on prod.
+    # Migrations MUST be committed in source control, never generated on prod.
+    with phase('Django · cohérence des migrations'):
         run_as_service([str(VENV/'bin/python'), 'manage.py', 'makemigrations', '--check', '--dry-run'])
 
 
@@ -651,43 +793,51 @@ def setup(args):
     if not args.yes:
         if not _is_interactive() or input('  Taper INSTALLER pour confirmer : ').strip() != 'INSTALLER':
             raise AppError('Installation annulée (aucune modification).')
-    _install_os_requirements(args.runtime)
-    create_user()
-    if args.provision_db:
-        provision_database(values)
-    values.update({
-        'DEBUG': 'False', 'DB_ENGINE': 'mysql',
-        'ALLOWED_HOSTS': f'{domain},127.0.0.1,localhost',
-        'CSRF_TRUSTED_ORIGINS': f'https://{domain},' + args.frontend,
-        'CORS_ALLOWED_ORIGINS': args.frontend,
-        'FRONTEND_URL': args.frontend,
-        'TRUST_PROXY_SSL_HEADER': 'true',
-        'SECURE_SSL_REDIRECT': 'false' if args.tls_mode == 'none' else 'true',
-        'SECURE_HSTS_SECONDS': '0' if args.tls_mode == 'none' else '31536000',
-        'AUTOKOM_STATIC_ROOT': '/var/lib/autokom/staticfiles',
-        'AUTOKOM_MEDIA_ROOT': '/var/lib/autokom/media',
-        'AUTOKOM_GUNICORN_WORKERS': str(args.workers),
-        'AUTOKOM_ENV_NAME': args.environment,
-    })
-    # Secrets in /etc/autokom only; preserve original source and all app-specific keys.
-    secure_env_write(values)
-    if source != ENV_FILE:
-        os.chmod(source, 0o600)
-    if args.runtime == 'systemd':
-        install_python()
-        write_service(args.port, args.workers)
-    elif not shutil.which('docker'):
-        raise AppError('Docker indisponible après provisioning des prérequis.')
-    if args.nginx_mode == 'managed':
-        write_nginx(domain, args.email, issue_tls=args.tls_mode == 'certbot',
-                    runtime=args.runtime, port=args.port)
-    state = {'runtime': args.runtime, 'environment': args.environment, 'domain': domain,
-             'frontend': args.frontend, 'port': args.port, 'workers': args.workers,
-             'env_source': str(source), 'nginx_mode': args.nginx_mode, 'tls_mode': args.tls_mode}
-    temp = STATE_FILE.with_suffix('.new')
-    temp.write_text(json.dumps(state, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-    temp.chmod(0o600)
-    os.replace(temp, STATE_FILE)
+    with operation('setup'):
+        with phase('Ansible · dépendances système'):
+            _install_os_requirements(args.runtime)
+        with phase('Compte système · permissions minimales'):
+            create_user()
+        if args.provision_db:
+            with phase('MySQL · initialisation contrôlée'):
+                provision_database(values)
+        values.update({
+            'DEBUG': 'False', 'DB_ENGINE': 'mysql',
+            'ALLOWED_HOSTS': f'{domain},127.0.0.1,localhost',
+            'CSRF_TRUSTED_ORIGINS': f'https://{domain},' + args.frontend,
+            'CORS_ALLOWED_ORIGINS': args.frontend,
+            'FRONTEND_URL': args.frontend,
+            'TRUST_PROXY_SSL_HEADER': 'true',
+            'SECURE_SSL_REDIRECT': 'false' if args.tls_mode == 'none' else 'true',
+            'SECURE_HSTS_SECONDS': '0' if args.tls_mode == 'none' else '31536000',
+            'AUTOKOM_STATIC_ROOT': '/var/lib/autokom/staticfiles',
+            'AUTOKOM_MEDIA_ROOT': '/var/lib/autokom/media',
+            'AUTOKOM_GUNICORN_WORKERS': str(args.workers),
+            'AUTOKOM_ENV_NAME': args.environment,
+        })
+        # Secrets in /etc/autokom only; preserve original source and all app-specific keys.
+        with phase('Configuration Django · secrets et sécurité'):
+            secure_env_write(values)
+        if source != ENV_FILE:
+            os.chmod(source, 0o600)
+        if args.runtime == 'systemd':
+            with phase('Python · installation des dépendances'):
+                install_python()
+            with phase('systemd · création du service'):
+                write_service(args.port, args.workers)
+        elif not shutil.which('docker'):
+            raise AppError('Docker indisponible après provisioning des prérequis.')
+        if args.nginx_mode == 'managed':
+            with phase('Nginx / TLS · configuration sécurisée'):
+                write_nginx(domain, args.email, issue_tls=args.tls_mode == 'certbot',
+                            runtime=args.runtime, port=args.port)
+        state = {'runtime': args.runtime, 'environment': args.environment, 'domain': domain,
+                 'frontend': args.frontend, 'port': args.port, 'workers': args.workers,
+                 'env_source': str(source), 'nginx_mode': args.nginx_mode, 'tls_mode': args.tls_mode}
+        temp = STATE_FILE.with_suffix('.new')
+        temp.write_text(json.dumps(state, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+        temp.chmod(0o600)
+        os.replace(temp, STATE_FILE)
     print('  Setup terminé. La mise en service se fait avec : sudo autokom app deploy --check, puis deploy')
     if args.tls_mode == 'none':
         print('  ATTENTION : HTTP uniquement. Ne pas exposer les clients en production.')
@@ -703,54 +853,96 @@ def _compose_env(state):
 def deploy(args):
     root_only()
     state = load_state()
-    if args.check:
+    with operation('deploy') as progress:
+        with phase('Préparation · vérification du code et de la configuration'):
+            if not (BACKEND / 'manage.py').is_file():
+                raise AppError('Code backend manquant.')
+            if not ENV_FILE.is_file():
+                raise AppError('Fichier de configuration sécurisé manquant.')
         run_checks()
-        print('  Vérifications DevSecOps réussies ; aucune migration ni publication.')
-        return 0
-    run_checks()
-    if state['runtime'] == 'systemd':
-        run_as_service([str(VENV/'bin/python'), 'manage.py', 'migrate', '--noinput'], timeout=300)
-        run_as_service([str(VENV/'bin/python'), 'manage.py', 'collectstatic', '--noinput'], timeout=300)
-        if shutil.which('setfacl'):
-            call(['setfacl', '-R', '-m', 'u:www-data:r-X', '/var/lib/autokom/staticfiles'])
-        call(['systemctl', 'restart', SERVICE])
-        call(['systemctl', 'is-active', '--quiet', SERVICE])
-    else:
-        call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
-              'up', '-d', '--build'], cwd=BACKEND, timeout=900, env=_compose_env(state))
-        call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
-              'exec', '-T', 'web', 'python', 'manage.py', 'migrate', '--noinput'], cwd=BACKEND, timeout=300, env=_compose_env(state))
-        call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
-              'exec', '-T', 'web', 'python', 'manage.py', 'collectstatic', '--noinput'], cwd=BACKEND, timeout=300, env=_compose_env(state))
-    # Django startup may be delayed; retry without falsely reporting success.
-    import time
-    for _ in range(25):
-        if verify_health():
-            print('  Déploiement AUTOKOM Platform réussi · /api/health/ = 200')
+        if args.check:
+            print('  ✓ Contrôles DevSecOps terminés · aucun changement déployé.')
             return 0
-        time.sleep(2)
-    raise AppError('Le backend ne répond pas au health check. Voir autokom app logs.')
+        if state['runtime'] == 'systemd':
+            with phase('MySQL · migrations Django versionnées'):
+                run_as_service([str(VENV/'bin/python'), 'manage.py', 'migrate', '--noinput'], timeout=300)
+            with phase('Staticfiles · collecte'):
+                run_as_service([str(VENV/'bin/python'), 'manage.py', 'collectstatic', '--noinput'], timeout=300)
+                if shutil.which('setfacl'):
+                    call(['setfacl', '-R', '-m', 'u:www-data:r-X', '/var/lib/autokom/staticfiles'])
+            with phase('systemd · démarrage / redémarrage de Gunicorn'):
+                call(['systemctl', 'restart', SERVICE])
+                call(['systemctl', 'is-active', '--quiet', SERVICE])
+        else:
+            with phase('Docker · construction et démarrage'):
+                call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
+                      'up', '-d', '--build'], cwd=BACKEND, timeout=900, env=_compose_env(state))
+            with phase('Docker · migrations Django'):
+                call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
+                      'exec', '-T', 'web', 'python', 'manage.py', 'migrate', '--noinput'],
+                     cwd=BACKEND, timeout=300, env=_compose_env(state))
+            with phase('Docker · collecte des staticfiles'):
+                call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
+                      'exec', '-T', 'web', 'python', 'manage.py', 'collectstatic', '--noinput'],
+                     cwd=BACKEND, timeout=300, env=_compose_env(state))
+        with phase('Disponibilité · réponse HTTP /api/health/'):
+            for _ in range(25):
+                if verify_health(port=state.get('port', PORT)):
+                    print('  ✓ Backend opérationnel sur http://127.0.0.1:' + str(state.get('port', PORT)))
+                    print('  ✓ URL publique prévue : https://' + state.get('domain', '?'))
+                    return 0
+                if progress._tty:
+                    progress.paint('Vérification du health check', _ * 2)
+                time.sleep(2)
+        raise AppError('Gunicorn a été lancé mais le health check est indisponible. '
+                       'Vérifier autokom app logs et le journal de déploiement.')
 
 
 def status(args):
     try:
         state = load_state()
     except AppError as exc:
-        print(str(exc))
+        print('  ✗ '+str(exc))
         return 1
+    print('  ◈ AUTOKOM Platform · État')
     print('  Environnement :', state.get('environment', 'production'))
     print('  Runtime :', state['runtime'])
     print('  Domaine :', state['domain'])
     if state['runtime'] == 'systemd':
-        call(['systemctl', 'status', '--no-pager', '--lines=12', SERVICE], timeout=15)
+        proc = subprocess.run(['systemctl', 'is-active', SERVICE], capture_output=True,
+                              text=True, check=False, timeout=15)
+        service_state = proc.stdout.strip() or 'unknown'
+        print('  Service systemd :', service_state)
+        if service_state == 'inactive':
+            print('  › Setup effectué, backend non démarré. Lancer : sudo autokom app deploy')
+        elif service_state == 'failed':
+            print('  ✗ Service en échec. Diagnostic : sudo journalctl -u autokom-backend -n 80 --no-pager')
     else:
-        call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
-              'ps'], cwd=BACKEND, timeout=30, env=_compose_env(state))
-    print('  Health check :', 'OK' if verify_health() else 'INDISPONIBLE')
+        proc = subprocess.run(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
+                               'ps'], cwd=BACKEND, timeout=30, env=_compose_env(state), check=False)
+        if proc.returncode:
+            print('  ✗ Docker compose indisponible ou conteneur arrêté.')
+    healthy = verify_health(port=state.get('port', PORT))
+    print('  Health check local :', 'OK' if healthy else 'INDISPONIBLE')
+    if not healthy:
+        print('  › Un 502 Nginx est normal tant que Gunicorn ne répond pas sur le port local.')
+    return 0 if healthy else 1
 
 
 def logs(args):
     state = load_state()
+    if args.source in ('setup', 'deploy'):
+        candidates = sorted(OPERATION_LOGS.glob(args.source + '-*.log')) if OPERATION_LOGS.is_dir() else []
+        if not candidates:
+            raise AppError('Aucun journal de '+args.source+' disponible.')
+        selected = candidates[-1]
+        if os.geteuid() != 0:
+            raise AppError('Les journaux détaillés sont réservés à root : utiliser sudo.')
+        print('  Journal :', selected)
+        lines = selected.read_text(encoding='utf-8', errors='replace').splitlines()[-args.lines:]
+        for line in lines:
+            print(line)
+        return 0
     if state['runtime'] == 'systemd':
         call(['journalctl', '-u', SERVICE, '-n', str(args.lines), '--no-pager'], timeout=30)
     else:
@@ -781,6 +973,8 @@ def main(argv=None):
     sub.add_parser('status', help='État du service et health check')
     log_p = sub.add_parser('logs', help='Dernières lignes de journaux')
     log_p.add_argument('--lines', type=int, default=80)
+    log_p.add_argument('--source', choices=['service', 'setup', 'deploy'], default='service',
+                       help='Service Gunicorn ou journal détaillé de setup/deploy')
     args = parser.parse_args(argv)
     if args.action == 'setup':
         if not args.domain and not args.yes and _is_interactive():
