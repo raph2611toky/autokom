@@ -57,7 +57,7 @@ class AdminCliTests(unittest.TestCase):
         with patch.object(admin.os, 'geteuid', return_value=0), \
              patch.object(admin, '_require_authorization'), \
              patch.object(admin, '_interactive', return_value=True), \
-             patch('builtins.input', return_value='n'), \
+             patch.object(admin, '_confirm_account_change', return_value=False), \
              patch.object(admin, '_execute') as execute:
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(admin.main(['disable', '--email', 'admin@example.com']), 0)

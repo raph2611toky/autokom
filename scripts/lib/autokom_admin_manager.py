@@ -102,17 +102,45 @@ def _execute(action: str, payload: dict) -> dict:
 
 
 def _menu() -> str | None:
+    """Réutiliser le sélecteur natif AUTOKOM, sans saisie de numéro.
+
+    Navigation ↑/↓ + Entrée, annulation q/0/Ctrl-C ; le menu s'efface
+    après validation et ne laisse que l'action sélectionnée.
+    """
     if not _interactive():
-        raise AdminError('Choisir une action : create, list, reset-password, disable ou enable.')
-    print('  ◈ AUTOKOM · ADMINISTRATION DJANGO')
-    print('  1. Créer un administrateur')
-    print('  2. Lister les administrateurs')
-    print('  3. Changer un mot de passe')
-    print('  4. Désactiver un administrateur')
-    print('  5. Réactiver un administrateur')
-    print('  0. Annuler')
-    return {'1': 'create', '2': 'list', '3': 'reset-password',
-            '4': 'disable', '5': 'enable', '0': None}.get(input('  Choix : ').strip(), None)
+        raise AdminError('Choisir une action explicite : create, list, reset-password, disable ou enable.')
+    from menu import pick
+    actions = (
+        ('create', 'Créer un administrateur'),
+        ('list', 'Lister les administrateurs'),
+        ('reset-password', 'Changer un mot de passe'),
+        ('disable', 'Désactiver un administrateur'),
+        ('enable', 'Réactiver un administrateur'),
+    )
+    try:
+        selected = pick('AUTOKOM · ADMINISTRATION DJANGO',
+                        [label for _, label in actions], default=1,
+                        cancel_label='Quitter sans modification')
+    except KeyboardInterrupt:
+        return None
+    except RuntimeError as exc:
+        raise AdminError('Terminal interactif indisponible : utiliser une sous-commande explicite.') from exc
+    return actions[selected - 1][0] if selected else None
+
+
+def _confirm_account_change(action: str, email: str) -> bool:
+    """Confirmation à choix fléché, NON sélectionné par défaut."""
+    from menu import pick
+    verb = 'Désactiver' if action == 'disable' else 'Réactiver'
+    try:
+        result = pick(f'AUTOKOM · {verb} {email} ?',
+                      ['Non, conserver le compte', f'Oui, {verb.lower()} le compte'],
+                      default=1, cancel_label='Annuler')
+    except KeyboardInterrupt:
+        return False
+    except RuntimeError as exc:
+        raise AdminError('Confirmation interactive indisponible ; aucune modification.') from exc
+    return result == 2
 
 
 def main(argv=None) -> int:
@@ -154,8 +182,7 @@ def main(argv=None) -> int:
         _require_authorization()
         if not _interactive():
             raise AdminError('Confirmation interactive obligatoire pour modifier un compte.')
-        confirmation = input(f'  Confirmer {action} pour {payload["email"]} ? [o/N] : ').strip().lower()
-        if confirmation not in ('o', 'oui'):
+        if not _confirm_account_change(action, payload['email']):
             print('  › Annulé. Aucun compte modifié.')
             return 0
     # list est lecture seule, mais réservé à root ; pas de passphrase additionnelle.

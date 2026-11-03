@@ -32,10 +32,18 @@ def _valid(config):
 
 
 def _yesno(prompt):
+    """Choix AUTOKOM animé, refus par défaut ; aucune action sur annulation."""
+    from menu import pick
     try:
-        return input(f'  {prompt} [o/N] : ').strip().casefold() in ('o', 'oui')
+        selected = pick('AUTOKOM · ' + prompt,
+                        ['Non, ne rien modifier', 'Oui, vérifier et proposer la réparation'],
+                        default=1, cancel_label='Annuler sans modification')
+        return selected == 2
     except (KeyboardInterrupt, EOFError):
         print('\n  › Opération annulée ; aucun changement MySQL.')
+        return False
+    except RuntimeError as exc:
+        print('  › Terminal interactif indisponible ; aucune modification MySQL.')
         return False
 
 

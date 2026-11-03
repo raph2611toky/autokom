@@ -727,13 +727,27 @@ def _ask(prompt, default=''):
 
 
 def _choose(title, options, default):
-    print(f'\n  {title}')
-    for index, (key, label) in enumerate(options, 1):
-        print(f'    {index}. {label}' + (' (défaut)' if key == default else ''))
-    raw = _ask('Choix', str(next(i for i, (k, _) in enumerate(options, 1) if k == default)))
-    if not raw.isdigit() or int(raw) not in range(1, len(options)+1):
-        raise AppError('Choix invalide ; relancer setup.')
-    return options[int(raw)-1][0]
+    """Sélection standard AUTOKOM via /dev/tty (↑/↓, Entrée, q/Ctrl-C).
+
+    N'affiche plus de menu numéroté statique. L'index reste local à ce
+    choix, les clés métier sont conservées inchangées.
+    """
+    from menu import pick
+    values = [key for key, _ in options]
+    if not values:
+        raise AppError('Aucune option disponible pour ' + title)
+    default_index = values.index(default) + 1 if default in values else 1
+    try:
+        selected = pick('AUTOKOM · ' + title,
+                        [label for _, label in options], default=default_index,
+                        cancel_label='Annuler sans modification')
+    except KeyboardInterrupt as exc:
+        raise AppError('Configuration annulée par l’administrateur.') from exc
+    except RuntimeError as exc:
+        raise AppError('Terminal interactif indisponible : fournir les options CLI pour Ansible.') from exc
+    if selected == 0:
+        raise AppError('Configuration annulée par l’administrateur.')
+    return values[selected - 1]
 
 
 def _candidate_env(explicit):
@@ -870,7 +884,7 @@ def _wizard_business_settings(settings):
             ('DEFAULT_FROM_EMAIL','Adresse expéditeur','noreply@localhost')):
             settings[key] = _ask(title, settings.get(key, default))
         settings['EMAIL_BACKEND'] = 'django.core.mail.backends.smtp.EmailBackend'
-        settings['EMAIL_USE_TLS'] = _ask('SMTP STARTTLS (True/False)', settings.get('EMAIL_USE_TLS','True'))
+        settings['EMAIL_USE_TLS'] = _choose('SMTP STARTTLS', [('True', 'Activer STARTTLS'), ('False', 'Désactiver STARTTLS')], 'False' if str(settings.get('EMAIL_USE_TLS', 'True')).lower() == 'false' else 'True')
         secret = getpass.getpass('  Mot de passe SMTP (Entrée = conserver) : ')
         if secret: settings['EMAIL_HOST_PASSWORD'] = secret
     else:
@@ -918,7 +932,9 @@ def _wizard(args):
         email = settings.get('DEFAULT_FROM_EMAIL', '').strip()
         args.email = _ask('E-mail Let’s Encrypt', args.email or email)
     args.provision_db = False if all(settings.get(k) for k in ('DB_NAME','DB_USER','DB_PASSWORD')) else (
-        _ask('Créer une base MySQL si absente ? (oui/non)', 'non').lower() == 'oui')
+        _choose('Créer une base MySQL si absente ?',
+                [('non', 'Non, conserver la configuration'),
+                 ('oui', 'Oui, provisionner une nouvelle base')], 'non') == 'oui')
     return args
 
 
