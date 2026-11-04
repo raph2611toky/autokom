@@ -107,14 +107,21 @@ def setup(*,apply):
     playbook=ROOT/'ansible/playbooks/platform-runtime.yml'
     inventory=ROOT/'ansible/inventories/local/hosts.ini'
     args=['ansible-playbook','-i',str(inventory),'--syntax-check',str(playbook)]
-    env=os.environ.copy();env['ANSIBLE_CONFIG']=str(ROOT/'ansible/ansible.cfg')
+    env=os.environ.copy()
+    env['ANSIBLE_CONFIG']=str(ROOT/'ansible/ansible.cfg')
+    env['AUTOKOM_CHECK_MODE']='0'
     check=subprocess.run(args,env=env,capture_output=True,text=True,timeout=25)
     if check.returncode:raise SetupError('Validation Ansible échouée : '+check.stderr[-900:])
     print('  ✓ Playbook AUTOKOM runtime valide')
     print('  › Service root broker UNIX · worker Django non privilégié · BuildKit artefacts privés')
     print('  › Ne touche ni aux zones BIND, ni aux DNS dot.mg, ni aux sites Nginx existants.')
     if not apply:
-        print('  ✓ Prévisualisation uniquement');return 0
+        args=['ansible-playbook','-i',str(inventory),'--check',str(playbook)]
+        check_env=env.copy()
+        check_env['AUTOKOM_CHECK_MODE']='1'
+        run_live(args,env=check_env,label='Prévisualisation runtime via Ansible',timeout=240)
+        print('  ✓ Prévisualisation Ansible terminée (mode check, sans modification).')
+        return 0
     if not RUNTIME_ENV.is_file():
         raise SetupError('Configuration absente : sudo autokom runtime env setup (enregistrement exclusivement sous /etc/autokom/secrets/).')
     if RUNTIME_ENV.stat().st_mode & 0o077:

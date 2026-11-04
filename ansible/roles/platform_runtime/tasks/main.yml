@@ -5,13 +5,23 @@
       - ansible_facts['distribution'] == 'Ubuntu'
       - ansible_facts['os_family'] == 'Debian'
 
-- name: Vérifier la présence des outils sans les réinstaller
-  ansible.builtin.command: "{{ item }} --version"
-  loop:
-    - docker
-    - nginx
-    - certbot
+- name: Vérifier Docker sans le réinstaller
+  ansible.builtin.command:
+    argv: [docker, --version]
   changed_when: false
+  check_mode: false
+
+- name: Vérifier Nginx sans le réinstaller
+  ansible.builtin.command:
+    argv: [nginx, -v]
+  changed_when: false
+  check_mode: false
+
+- name: Vérifier Certbot sans le réinstaller
+  ansible.builtin.command:
+    argv: [certbot, --version]
+  changed_when: false
+  check_mode: false
 
 - name: Préparer le compte de build client sans privilège Docker
   ansible.builtin.user:

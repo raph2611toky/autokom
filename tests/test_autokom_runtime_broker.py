@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -36,7 +37,9 @@ class BrokerTests(unittest.TestCase):
            'run_id':'a'*8+'-'+ 'b'*4+'-'+'c'*4+'-'+'d'*4+'-'+'e'*12,
            'cpu_millicores':500,'memory_mb':512,'storage_mb':512,'internal_port':8000,
            'replicas':2,'healthcheck':'/'}
-        with self.assertRaises(broker.BrokerError):broker._docker_deploy(p)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(broker,'STATE',Path(directory)/'client-runtime'):
+                with self.assertRaises(broker.BrokerError):broker._docker_deploy(p)
 
     def test_nginx_vhost_not_arbitrary_upstream(self):
         with self.assertRaises(broker.BrokerError):broker._nginx_config('app.ikom.mg',22)
@@ -59,6 +62,28 @@ class BrokerTests(unittest.TestCase):
         xml=admin.pipeline_xml("pipeline { agent none }")
         self.assertIn(b"<sandbox>true</sandbox>",xml)
         self.assertIn(b'AUTOKOM_RUN_ID',xml)
+
+    def test_runtime_preflight_uses_tool_specific_version_flags(self):
+        role=(ROOT/'ansible/roles/platform_runtime/tasks/main.yml').read_text()
+        self.assertIn('name: Vérifier Docker sans le réinstaller',role)
+        self.assertIn('argv: [docker, --version]',role)
+        self.assertIn('name: Vérifier Nginx sans le réinstaller',role)
+        self.assertIn('argv: [nginx, -v]',role)
+        self.assertIn('name: Vérifier Certbot sans le réinstaller',role)
+        self.assertIn('argv: [certbot, --version]',role)
+        self.assertEqual(role.count('check_mode: false'),3)
+        self.assertNotIn('{{ item }} --version',role)
+
+    def test_runtime_setup_check_runs_ansible_check_mode(self):
+        from unittest.mock import Mock
+        with patch.object(admin.subprocess,'run',return_value=Mock(returncode=0,stderr='')) as syntax:
+            with patch.object(admin,'run_live') as preview:
+                admin.setup(apply=False)
+        self.assertIn('--syntax-check',syntax.call_args.args[0])
+        command=preview.call_args.args[0]
+        self.assertIn('--check',command)
+        self.assertEqual(command[-1],str(ROOT/'ansible/playbooks/platform-runtime.yml'))
+        self.assertEqual(preview.call_args.kwargs['env']['AUTOKOM_CHECK_MODE'],'1')
 
     def test_runner_does_not_mount_docker_socket(self):
         runner=(ROOT/'scripts/runtime/Jenkinsfile.autokom-local').read_text()
