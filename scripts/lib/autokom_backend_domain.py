@@ -8,7 +8,7 @@ be authoritative on a configured Cloudflare zone. Root-only env survives in
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import ipaddress
 import json
 import os
@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import socket
 import sys
+import time
 
 import autokom_domain_migration as dm
 from autokom_domain_dns import plan as dns_plan, ensure as dns_ensure, DNSMigrationError
@@ -81,7 +82,12 @@ def _derive(legacy, zone, explicit=None):
     return target
 
 
-def create_plan(*, target=None, dns_mode='cname'):
+def _is_deep_domain(host, zone):
+    # Universal SSL of a full Cloudflare zone only covers apex and *.zone.
+    return len(host[:-len(zone)-1].split('.')) > 1
+
+
+def create_plan(*, target=None, dns_mode='auto'):
     state = _read_state()
     runtime = read_env(file_path('runtime'))
     cloudflare = read_env(file_path('cloudflare'))
@@ -91,6 +97,8 @@ def create_plan(*, target=None, dns_mode='cname'):
     zone = _domain(cloudflare.get('CLOUDFLARE_ZONE_NAME') or '')
     old = _domain(state.get('domain') or '')
     new = _derive(old, zone, target)
+    if dns_mode == 'auto':
+        dns_mode = 'a' if _is_deep_domain(new, zone) else 'cname'
     if dns_mode not in ('cname', 'a'):
         raise DomainError('Utiliser --dns-mode cname ou a.')
     try:
@@ -233,8 +241,10 @@ def _dns_current(cf,p):
         dns = dns_plan(cf,p.zone,p.target,p.ingress)
     except DNSMigrationError as exc:
         raise DomainError(str(exc)) from exc
-    if p.dns_mode == 'a' and dns.site_mode == 'cname':
-        raise DomainError('Le domaine utilise déjà un CNAME : choisir --dns-mode cname.')
+    # A pre-existing CNAME can be converted only after local TLS and Django
+    # have been validated. It requires an additional typed confirmation.
+    if p.dns_mode == 'a' and dns.site_mode == 'cname' and not dns.site_record.get('id'):
+        raise DomainError('CNAME existant sans identifiant Cloudflare : conversion refusée.')
     if p.dns_mode == 'cname' and dns.site_mode == 'legacy_a':
         # No A->CNAME conversion during backend cutover: prevent downtime.
         return dns
@@ -242,6 +252,8 @@ def _dns_current(cf,p):
 
 
 def _dns_ensure(cf,p,dns):
+    if dns.site_mode == 'cname' and p.dns_mode == 'a':
+        return 'CNAME existant préservé pendant la validation HTTPS'
     if dns.site_mode != 'new':
         return 'Enregistrement DNS existant conservé'
     if p.dns_mode == 'a':
@@ -249,6 +261,44 @@ def _dns_ensure(cf,p,dns):
         return 'A DNS-only créé'
     dns_ensure(cf,dns)
     return 'CNAME créé vers le domaine racine'
+
+
+def _convert_cname_to_a(cf, p):
+    """Explicitly authorized CNAME->A conversion with best-effort restoration.
+
+    The target is allowed only if it is still the zone-apex CNAME found by
+    the strict DNS planner. No unrelated DNS record can be overwritten.
+    """
+    current = _dns_current(cf, p)
+    if current.site_mode == 'legacy_a':
+        return 'Déjà en A DNS-only'
+    if current.site_mode != 'cname' or p.dns_mode != 'a':
+        raise DomainError('Le DNS a changé : conversion refusée.')
+    old = current.site_record
+    if not old or not old.get('id'):
+        raise DomainError('Identifiant DNS absent : conversion refusée.')
+    cf.delete(old['id'])
+    try:
+        cf.create(p.zone, 'A', p.target, p.ingress, ttl=120, proxied=False)
+    except Exception as exc:
+        try:
+            cf.create(p.zone, 'CNAME', p.target, p.zone,
+                      ttl=int(old.get('ttl') or 120), proxied=bool(old.get('proxied')))
+        except Exception as restore_exc:
+            raise DomainError('Conversion DNS échouée et restauration impossible : intervention Cloudflare nécessaire.') from restore_exc
+        raise DomainError('Conversion DNS échouée : CNAME précédent restauré.') from exc
+    return 'CNAME remplacé par A DNS-only (AWS)'
+
+
+def _wait_for_health(port, *, timeout=30, interval=1):
+    """Give systemd/Gunicorn time to start after a successful restart."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if verify_health(port=port):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(interval, max(0, deadline - time.monotonic())))
 
 
 def _backend_values(p):
@@ -272,8 +322,9 @@ def _apply_backend_env(p):
     write_env(file_path('backend'),after)
     try:
         _run_ok(['systemctl','restart',SERVICE],timeout=45)
-        if not verify_health(port=p.port):
-            raise DomainError('Le healthcheck Django local a échoué après redémarrage.')
+        if not _wait_for_health(p.port, timeout=30):
+            raise DomainError('Django ne répond pas après le redémarrage (30 s). '
+                              'Examiner journalctl -u autokom-backend et les logs AUTOKOM.')
     except Exception:
         write_env(file_path('backend'),before)
         dm.run(['systemctl','restart',SERVICE],timeout=45)
@@ -308,6 +359,10 @@ def _display_plan(p,dns=None):
     print('  › Nouveau domaine : https://'+p.target)
     print('  › Runtime actuel : systemd / Gunicorn sur 127.0.0.1:'+str(p.port))
     print('  › DNS : '+('CNAME → '+p.zone if p.dns_mode=='cname' else 'A DNS-only → '+p.ingress))
+    if _is_deep_domain(p.target, p.zone) and p.dns_mode == 'cname':
+        print('  ! Cloudflare Free : ce domaine à plusieurs niveaux exige un certificat Edge supplémentaire si proxifié.')
+    if p.dns_mode == 'a':
+        print('  › HTTPS géré par Certbot sur AWS ; pas de proxy Cloudflare pour ce nom.')
     if dns:
         print('  › DNS existant : '+dns.site_mode)
         if p.dns_mode == 'cname' and dns.site_mode != 'legacy_a' and dns.site_proxied:
@@ -367,6 +422,11 @@ def _apply(p):
         print('  › Opération annulée.');return 0
     if input('  Saisir MIGRER pour confirmer : ').strip()!='MIGRER':
         print('  › Aucune modification.');return 0
+    convert_dns = p.dns_mode == 'a' and dns.site_mode == 'cname'
+    if convert_dns:
+        print('  ! Attention : le CNAME actuel sera remplacé par un A DNS-only APRÈS validation TLS locale.')
+        if input('  Saisir REMPLACER pour confirmer la conversion DNS : ').strip() != 'REMPLACER':
+            print('  › DNS conservé · opération annulée.');return 0
     from autokom_domain_progress import LiveDomainProgress
     with LiveDomainProgress() as live:
         previous=dm._LIVE
@@ -375,7 +435,10 @@ def _apply(p):
             dm.stage('Backend · connexion locale',_check_local,p)
             dm.stage('Nginx · préparation HTTP',_nginx_commit,p,tls=False)
             dm.stage('Cloudflare · enregistrement DNS',_dns_ensure,cf,p,dns)
-            mode_proxied=(p.dns_mode=='cname' and dns.site_mode!='legacy_a' and dns.site_proxied)
+            # Until a legacy proxied CNAME is converted, public DNS still
+            # resolves to Cloudflare IP addresses.
+            mode_proxied = (dns.site_mode == 'cname' and dns.site_proxied) or (
+                p.dns_mode == 'cname' and dns.site_mode != 'legacy_a' and dns.site_proxied)
             ready=dm.stage('DNS · résolution autoritaire',dm._wait_dns,
                            p.target,p.ingress,nameservers,origin=p.zone,proxied=mode_proxied)
             if not ready:
@@ -396,6 +459,12 @@ def _apply(p):
             dm.stage('Nginx · activation HTTPS',_nginx_commit,p,tls=True)
             dm.stage('Django · mise à jour des hôtes',_apply_backend_env,p)
             dm.stage('HTTPS · santé du nouveau backend',_tls_probe,p)
+            if convert_dns:
+                dm.stage('Cloudflare · conversion DNS-only', _convert_cname_to_a, cf, p)
+                if not dm.stage('DNS · publication du A', dm._wait_dns,
+                                p.target, p.ingress, nameservers,
+                                origin=p.zone, proxied=False):
+                    print('  › DNS modifié ; propagation encore en cours. Le certificat local est valide.')
             dm.stage('AUTOKOM · état du backend',_write_state,p)
         finally:
             dm._LIVE=previous
@@ -409,8 +478,8 @@ def main(argv=None):
     parser=argparse.ArgumentParser(prog='autokom app backend domain',
         description='Ajouter un nouveau domaine au backend Django, sans frontend et sans migrations MySQL')
     parser.add_argument('--target',help='Nouveau nom du backend (par défaut dérivé du domaine actuel)')
-    parser.add_argument('--dns-mode',choices=('cname','a'),default='cname',
-        help='CNAME vers la racine Cloudflare (défaut), ou A DNS-only')
+    parser.add_argument('--dns-mode',choices=('cname','a'),default=None,
+        help='A DNS-only pour sous-domaines profonds (défaut), sinon CNAME Cloudflare')
     mode=parser.add_mutually_exclusive_group()
     mode.add_argument('--check',action='store_true',help='Contrôle en lecture seule (défaut)')
     mode.add_argument('--apply',action='store_true',help='Ajouter DNS, Nginx, TLS et ALLOWED_HOSTS')
@@ -423,7 +492,16 @@ def main(argv=None):
         print('  › Préféré : '+str(state.get('preferred_domain',state.get('domain','?'))))
         print('  › Alias : '+', '.join(state.get('domain_aliases',[])) if state.get('domain_aliases') else '  › Aucun alias')
         return 0
-    p=create_plan(target=args.target,dns_mode=args.dns_mode)
+    p=create_plan(target=args.target,dns_mode=args.dns_mode or 'auto')
+    if args.apply and args.dns_mode is None:
+        from autokom_env_manager import select
+        dns_choices = [
+            'A DNS-only → IP AWS (certificat Certbot)',
+            'CNAME → ikom.mg (proxy Cloudflare : certificat Edge nécessaire si nom profond)',
+        ]
+        selected = select('Mode DNS du backend', dns_choices,
+                          default=1 if p.dns_mode == 'a' else 2)
+        p=replace(p, dns_mode='a' if selected == dns_choices[0] else 'cname')
     if not args.apply:
         _check_local(p)
         cf=Cloudflare()
