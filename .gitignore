@@ -11,3 +11,10 @@ __pycache__/
 *.env.*
 **/.env.example
 **/*.env.example
+
+# Compilations locales Vite et dependances npm
+**/node_modules/
+**/dist/
+**/.vite/
+**/.env.local
+**/.env.*.local

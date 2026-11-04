@@ -1150,6 +1150,9 @@ def logs(args):
 
 
 def main(argv=None):
+    if argv and argv[0] == 'frontend' and (len(argv) == 1 or argv[1] in ('-h', '--help')):
+        from autokom_frontend_manager import main as frontend_main
+        return frontend_main(['--help'])
     parser = argparse.ArgumentParser(prog='autokom app', description='Gestion du service backend AUTOKOM Platform')
     sub = parser.add_subparsers(dest='action', required=True)
     setup_p = sub.add_parser('setup', help='Assistant de configuration backend (sans option : interactif)')
@@ -1192,6 +1195,10 @@ def main(argv=None):
             try: return domain_main(args.backend_args[1:])
             except (DomainError, DNSError, DNSMigrationError, MigrationError) as exc:
                 raise AppError(str(exc)) from exc
+        if args.action == 'frontend' and args.backend_args and args.backend_args[0] != 'env':
+            from autokom_frontend_manager import main as frontend_main, FrontendError
+            try: return frontend_main(args.backend_args)
+            except FrontendError as exc: raise AppError(str(exc)) from exc
         if not args.backend_args or args.backend_args[0] != 'env':
             raise AppError('Utiliser : autokom app '+args.action+' env [show|setup|edit|delete] ou backend domain [--check|--apply|--status]')
         try: return env_main(args.action,args.backend_args[1:])

@@ -702,7 +702,9 @@ def main(argv=None):
             (len(arguments)>2 and arguments[1] == 'cloudflare' and arguments[2] in ('add','delete') and '--apply' in arguments))
         backend_domain_write = (cmd=='app' and len(arguments)>=3 and
             arguments[1:3]==['backend','domain'] and '--apply' in arguments)
-        mutating=(env_edit or backend_domain_write or dns_write or
+        frontend_write = (cmd=='app' and len(arguments)>3 and arguments[1]=='frontend' and
+                          arguments[2] in ('setup','deploy','rollback') and '--apply' in arguments)
+        mutating=(env_edit or backend_domain_write or dns_write or frontend_write or
             (cmd=='domains' and '--apply' in arguments) or
             (cmd=='runtime' and '--apply' in arguments) or
             (cmd in ('update','configure')) or

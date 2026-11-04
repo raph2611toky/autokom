@@ -1,0 +1,15 @@
+rules:
+  - id: autokom-frontend-no-eval
+    languages: [javascript, typescript]
+    message: Exécution dynamique interdite dans le frontend AUTOKOM.
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: new Function(...)
+          - pattern: $EL.innerHTML = $VALUE
+  - id: autokom-frontend-no-html-injection
+    languages: [javascript, typescript]
+    message: Revoir impérativement toute injection HTML directe.
+    severity: ERROR
+    pattern-regex: 'dangerouslySetInnerHTML\s*='

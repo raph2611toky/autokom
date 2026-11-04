@@ -26,7 +26,9 @@ SAFE_KEYS = {
                 'AUTOKOM_JENKINS_API_TOKEN', 'AUTOKOM_INGRESS_IPV4', 'AUTOKOM_MANAGED_DOMAIN_SUFFIX',
                 'AUTOKOM_ACME_EMAIL', 'AUTOKOM_RUNNER_SHARED_KEY'),
     'cloudflare': ('CLOUDFLARE_ZONE_ID', 'CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ZONE_NAME'),
-    'frontend': ('FRONTEND_URL', 'BACKEND_URL'),
+    'frontend': ('FRONTEND_URL', 'BACKEND_URL', 'VITE_AUTOKOM_API_BASE',
+                 'VITE_AUTOKOM_FRONTEND_ONLY', 'VITE_AUTOKOM_API_ENABLED',
+                 'VITE_AUTOKOM_GITHUB_ENABLED'),
 }
 SENSITIVE = re.compile(r'(PASSWORD|SECRET|TOKEN|KEY|PASS|PRIVATE|CREDENTIAL|AUTH)', re.I)
 _KEY = re.compile(r'^[A-Z][A-Z0-9_]{1,90}$')
@@ -182,6 +184,18 @@ def _validate(kind,values):
             if ip.version!=4 or not ip.is_global:raise EnvError('IP ingress publique IPv4 requise.')
         if values.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX') and not _DOMAIN.fullmatch(values['AUTOKOM_MANAGED_DOMAIN_SUFFIX']):
             raise EnvError('Suffixe DNS géré invalide.')
+    if kind=='frontend':
+        for name in ('FRONTEND_URL','BACKEND_URL'):
+            if name in values and (not re.fullmatch(r'https://[a-z0-9.-]+',values[name]) or
+                                   not _DOMAIN.fullmatch(values[name][8:])):
+                raise EnvError('URL HTTPS invalide pour '+name)
+        for name in ('VITE_AUTOKOM_FRONTEND_ONLY','VITE_AUTOKOM_API_ENABLED','VITE_AUTOKOM_GITHUB_ENABLED'):
+            if name in values and values[name] not in ('true','false'):
+                raise EnvError('Valeur booléenne invalide : '+name)
+        if values.get('VITE_AUTOKOM_API_BASE', '/api') != '/api':
+            raise EnvError('La base API doit être /api (proxy Nginx).')
+        if values.get('VITE_AUTOKOM_GITHUB_ENABLED','false') == 'true':
+            raise EnvError('La liaison UI GitHub simulée ne peut pas être activée en production.')
     if kind=='cloudflare' and values.get('CLOUDFLARE_ZONE_ID') and not re.fullmatch(r'[a-fA-F0-9]{32}',values['CLOUDFLARE_ZONE_ID']):
         raise EnvError('Zone ID Cloudflare invalide (32 caractères hexadécimaux).')
 

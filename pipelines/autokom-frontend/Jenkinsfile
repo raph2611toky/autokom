@@ -1,0 +1,73 @@
+// CI frontend : vérification et compilation uniquement.
+// Ne donne jamais à Jenkins les droits root, le token Cloudflare,
+// ni un accès au répertoire Nginx de production.
+pipeline {
+  agent { label 'linux-devsecops' }
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    timeout(time: 30, unit: 'MINUTES')
+    skipDefaultCheckout(true)
+  }
+  environment {
+    CI = 'true'
+    VITE_AUTOKOM_API_BASE = '/api'
+    VITE_AUTOKOM_FRONTEND_ONLY = 'false'
+    VITE_AUTOKOM_API_ENABLED = 'true'
+    VITE_AUTOKOM_GITHUB_ENABLED = 'false'
+  }
+  stages {
+    stage('Source contrôlée') {
+      steps { checkout scm }
+    }
+    stage('Dépendances vérifiées') {
+      steps {
+        dir('platform/frontend') {
+          sh 'npm ci --ignore-scripts --no-audit --no-fund'
+        }
+      }
+    }
+    stage('Tests React') {
+      steps {
+        dir('platform/frontend') { sh 'npm run test' }
+      }
+    }
+    stage('SCA - npm audit') {
+      steps {
+        dir('platform/frontend') { sh 'npm audit --audit-level=high' }
+      }
+    }
+    stage('SAST - Semgrep') {
+      steps {
+        sh 'semgrep scan --config pipelines/autokom-frontend/semgrep-rules.yml --error --metrics off platform/frontend/src'
+      }
+    }
+    stage('Secrets et vulnérabilités - Trivy') {
+      steps {
+        sh 'trivy fs --scanners vuln,secret --exit-code 1 --severity HIGH,CRITICAL --no-progress platform/frontend'
+      }
+    }
+    stage('Build Vite') {
+      steps {
+        dir('platform/frontend') { sh 'npm run build' }
+      }
+    }
+    stage('Contrôle artefact') {
+      steps {
+        sh '''
+          set -eu
+          test -s platform/frontend/dist/index.html
+          test -d platform/frontend/dist/assets
+          test ! -e platform/frontend/dist/.env
+          ! find platform/frontend/dist -name '*.map' | grep -q .
+        '''
+      }
+    }
+  }
+  post {
+    success {
+      archiveArtifacts artifacts: 'platform/frontend/dist/**', fingerprint: true, allowEmptyArchive: false
+    }
+    always { cleanWs() }
+  }
+}
