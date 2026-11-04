@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Parallel, per-service .tech -> .mg migrations. Never remove old DNS/vhosts.
 
-Only simple, locally-owned reverse proxies are migrated automatically. Complex
-multi-location, static, wildcard and upstream configurations require review.
+Only simple, locally-owned reverse proxies are migrated automatically. A named
+NGINX upstream is allowed only if it resolves unambiguously to one loopback
+server. Complex multi-location, static, wildcard and remote upstreams need review.
 """
 from __future__ import annotations
 import argparse
@@ -48,8 +49,65 @@ def destination(source):
     return check_hostname(dest)
 
 
+def _resolve_proxy(text):
+    """Return (port, kind, reason) for a *single* safe localhost proxy.
+
+    Conservative on purpose: reject dynamic proxy_pass values, HTTP paths,
+    multiple upstreams/backends, additional locations and location rewrites.
+    Never execute or import directives from a client vhost.
+    """
+    if re.search(r'\b(?:root|alias)\s', text):
+        return 0, '', 'directives root/alias (contenu statique ou ACME spécifique)'
+    if re.search(r'\b(?:fastcgi_pass|uwsgi_pass|scgi_pass)\s', text):
+        return 0, '', 'backend FastCGI/uWSGI'
+
+    proxies=[v.strip() for v in re.findall(r'\bproxy_pass\s+([^;]+);',text)]
+    if not proxies or len(set(proxies))!=1:
+        return 0, '', 'proxy HTTP absent ou plusieurs cibles'
+
+    locations=re.findall(r'\blocation\s+([^\s{]+)\s*\{([^{}]*)\}',text)
+    if len(locations)!=1 or len(re.findall(r'\blocation\s',text))!=1 or locations[0][0]!='/':
+        return 0, '', 'plusieurs locations ou configuration de location non standard'
+    location_body=locations[0][1]
+    if re.search(r'\b(?:return|rewrite|try_files|error_page|auth_request|proxy_cache|proxy_redirect|set)\s',location_body):
+        return 0, '', 'directives de traitement spécifiques dans location /'
+
+    proxy=proxies[0]
+    direct=re.fullmatch(r'http://127\.0\.0\.1:(\d+)',proxy)
+    if direct:
+        port=int(direct.group(1))
+        return (port,'direct','') if 1024<=port<=65535 else (0,'','port local non autorisé')
+
+    name=re.fullmatch(r'http://([A-Za-z_][A-Za-z0-9_.-]*)',proxy)
+    if not name:
+        return 0,'','proxy non local ou dynamique (Docker/upstream/localhost/HTTPS)'
+
+    # A single, inline upstream, with exactly one server on 127.0.0.1.
+    # Never guess a definition from included snippets or remote peers.
+    groups=list(re.finditer(r'\bupstream\s+([A-Za-z_][A-Za-z0-9_.-]*)\s*\{([^{}]*)\}',text))
+    if len(groups)!=1 or len(re.findall(r'\bupstream\s+',text))!=1:
+        return 0,'','upstream non localisé ou multiple'
+    group=groups[0]
+    if group.group(1)!=name.group(1):
+        return 0,'','nom upstream différent du proxy_pass'
+    statements=[part.strip() for part in group.group(2).split(';') if part.strip()]
+    servers=[]
+    for statement in statements:
+        server=re.fullmatch(r'server\s+127\.0\.0\.1:(\d+)',statement)
+        keepalive=re.fullmatch(r'keepalive\s+([1-9][0-9]{0,3})',statement)
+        if server:
+            servers.append(int(server.group(1)))
+        elif keepalive:
+            pass
+        else:
+            return 0,'','directive upstream non prise en charge'
+    if len(servers)!=1 or not 1024<=servers[0]<=65535:
+        return 0,'','upstream non local ou plusieurs serveurs'
+    return servers[0],'upstream', ''
+
+
 def discover_nginx():
-    """Inventory only, never execute a shell or evaluate Nginx directives."""
+    """Inventory only. Never evaluate NGINX directives or follow user input."""
     found={}
     for folder in NGINX_DIRS:
         if not folder.is_dir():continue
@@ -57,7 +115,6 @@ def discover_nginx():
             if not f.is_file() or f.name.startswith('.'):continue
             try:raw=f.read_text(encoding='utf-8')
             except (UnicodeError,OSError):continue
-            # Ignore commented directives, avoid wildcard/default-server names.
             text='\n'.join(line.split('#',1)[0] for line in raw.splitlines())
             domains=[]
             for match in re.finditer(r'(?m)^\s*server_name\s+([^;]+);',text):
@@ -67,16 +124,17 @@ def discover_nginx():
                         if candidate==OLD_SUFFIX or candidate.endswith('.'+OLD_SUFFIX):domains.append(candidate)
                     except MigrationError:pass
             if not domains:continue
-            # Only a unique local, literal proxy endpoint is eligible.
-            proxies=set(re.findall(r'\bproxy_pass\s+http://127\.0\.0\.1:(\d+)\s*;',text))
-            requires_review= (len(proxies)!=1 or bool(re.search(r'\b(?:fastcgi_pass|uwsgi_pass|root|alias)\s',text))
-                              or bool(re.search(r'\bproxy_pass\s+(?!http://127\.0\.0\.1:\d+\s*;)',text)))
-            port=int(next(iter(proxies))) if proxies else 0
-            if not 1024<=port<=65535: requires_review=True
-            for source in domains:
-                item=found.setdefault(source,{'sources':[],'port':port,'supported':not requires_review})
-                item['sources'].append(str(f))
-                if requires_review or item['port']!=port:item['supported']=False
+            port,kind,reason=_resolve_proxy(text)
+            for source in dict.fromkeys(domains):
+                if source not in found:
+                    found[source]={'sources':[str(f)], 'port':port, 'supported':bool(port),
+                                   'proxy_kind':kind, 'review_reason':reason}
+                    continue
+                item=found[source]
+                if str(f) not in item['sources']:item['sources'].append(str(f))
+                if not port or item['port']!=port or item['proxy_kind']!=kind:
+                    item['supported']=False
+                    item['review_reason']='Définitions Nginx incohérentes ou non prises en charge'
     return found
 
 
@@ -211,10 +269,36 @@ def _append_backend_hosts(new_host, frontend=False):
     return None
 
 
+def _assert_destination_unclaimed(host):
+    """Fail before DNS writes if another enabled NGINX vhost owns the name."""
+    host=check_hostname(host)
+    managed=(SITES_AVAILABLE/('autokom-migrate-'+host+'.conf')).resolve()
+    for directory in NGINX_DIRS:
+        if not directory.is_dir():
+            continue
+        for conf in directory.iterdir():
+            if not conf.is_file() or conf.name.startswith('.'):
+                continue
+            if conf.resolve()==managed:
+                # The managed vhost is checked for tampering by _commit_nginx.
+                continue
+            try:
+                raw=conf.read_text(encoding='utf-8')
+            except (OSError,UnicodeError):
+                raise MigrationError('Impossible de vérifier les collisions Nginx.')
+            text='\n'.join(line.split('#',1)[0] for line in raw.splitlines())
+            for matched in re.findall(r'\bserver_name\s+([^;]+);',text):
+                for name in matched.split():
+                    name=name.lower().rstrip('.')
+                    if name==host or (name.startswith('*.') and host.endswith(name[1:])):
+                        raise MigrationError('Nom DNS déjà défini dans un autre vhost Nginx : '+host)
+
+
 def apply_one(source,host_data,ip,cf,acme_email):
     dest=destination(source)
     if not host_data['supported']:raise MigrationError('Configuration Nginx complexe : revue manuelle requise.')
     port=host_data['port']
+    _assert_destination_unclaimed(dest)
     existing=cloudflare_preflight(cf,dest,ip)
     if existing is None:
         cf.create(NEW_SUFFIX,'A',dest,ip,ttl=120,proxied=False)
@@ -258,42 +342,13 @@ def apply_one(source,host_data,ip,cf,acme_email):
 
 
 def audit_reasons(host_data):
-    """Explain conservative Nginx migration refusal without exposing config contents.
-
-    An audit is informational only. It never reclassifies a vhost as safe.
-    """
-    reasons=[]
-    files=host_data.get('sources') or []
-    for filename in files:
-        try:
-            raw=Path(filename).read_text(encoding='utf-8')
-        except (OSError, UnicodeError):
-            reasons.append('fichier Nginx non lisible')
-            continue
-        # Comments are not effective Nginx directives.
-        text='\n'.join(line.split('#', 1)[0] for line in raw.splitlines())
-        proxies=re.findall(r'\bproxy_pass\s+([^;]+);',text)
-        local=re.findall(r'\bproxy_pass\s+http://127\.0\.0\.1:(\d+)\s*;',text)
-        if not proxies:
-            reasons.append('aucun proxy HTTP local (site statique ou simple redirection)')
-        if len(set(local))>1:
-            reasons.append('plusieurs ports de service détectés')
-        if any(not re.fullmatch(r'http://127\.0\.0\.1:\d+',x.strip()) for x in proxies):
-            reasons.append('proxy non local ou dynamique (Docker/upstream/localhost/HTTPS)')
-        if re.search(r'\b(?:root|alias)\s',text):
-            reasons.append('directives root/alias (contenu statique ou ACME spécifique)')
-        if re.search(r'\b(?:fastcgi_pass|uwsgi_pass)\s',text):
-            reasons.append('backend FastCGI/uWSGI')
-        if not proxies and re.search(r'\b(?:return|rewrite)\s',text):
-            reasons.append('redirection ou réécriture HTTP')
-    port=int(host_data.get('port') or 0)
-    if port and not 1024<=port<=65535:
-        reasons.append('port local hors plage autorisée')
-    if not port:
-        reasons.append('port applicatif local non identifié')
-    if not host_data.get('supported') and not reasons:
-        reasons.append('structure Nginx non reconnue (relecture obligatoire)')
-    return list(dict.fromkeys(reasons))
+    """Describe the exact reason for the conservative decision, no secrets."""
+    if host_data.get('supported'):
+        return []
+    reason=host_data.get('review_reason')
+    if reason:
+        return [reason]
+    return ['structure Nginx non reconnue (relecture obligatoire)']
 
 
 def print_audit(found):
@@ -302,7 +357,7 @@ def print_audit(found):
         print('  ◈ '+source+' → '+destination(source))
         print('    › Vhost : '+', '.join(item.get('sources') or ['introuvable']))
         if item.get('supported'):
-            print('    ✓ Proxy local unique : 127.0.0.1:'+str(item['port']))
+            print('    ✓ Proxy local unique : 127.0.0.1:'+str(item['port']) + (' (upstream nommé)' if item.get('proxy_kind')=='upstream' else ''))
         else:
             for reason in audit_reasons(item):
                 print('    ! '+reason)
