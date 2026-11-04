@@ -1102,6 +1102,10 @@ def status(args):
     print('  Environnement :', state.get('environment', 'production'))
     print('  Runtime :', state['runtime'])
     print('  Domaine :', state['domain'])
+    if state.get('preferred_domain'):
+        print('  Domaine HTTPS préféré :', state['preferred_domain'])
+    if state.get('domain_aliases'):
+        print('  Domaines supplémentaires :', ', '.join(state['domain_aliases']))
     if state['runtime'] == 'systemd':
         proc = subprocess.run(['systemctl', 'is-active', SERVICE], capture_output=True,
                               text=True, check=False, timeout=15)
@@ -1179,8 +1183,16 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.action in ('backend','frontend'):
         from autokom_env_manager import main as env_main, EnvError
+        if args.action == 'backend' and args.backend_args and args.backend_args[0] == 'domain':
+            from autokom_backend_domain import main as domain_main, DomainError
+            from autokom_dns_core import DNSError
+            from autokom_domain_dns import DNSMigrationError
+            from autokom_domain_migration import MigrationError
+            try: return domain_main(args.backend_args[1:])
+            except (DomainError, DNSError, DNSMigrationError, MigrationError) as exc:
+                raise AppError(str(exc)) from exc
         if not args.backend_args or args.backend_args[0] != 'env':
-            raise AppError('Utiliser : autokom app '+args.action+' env [show|setup|edit|delete]')
+            raise AppError('Utiliser : autokom app '+args.action+' env [show|setup|edit|delete] ou backend domain [--check|--apply|--status]')
         try: return env_main(args.action,args.backend_args[1:])
         except EnvError as exc: raise AppError(str(exc)) from exc
     if args.action == 'setup':
