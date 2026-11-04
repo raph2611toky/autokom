@@ -51,6 +51,12 @@ REQUIRED_CORE = (
     "ansible/playbooks/foundation.yml",
 )
 PROTECTED_AREAS = ("scripts/", "ansible/", "autokom", "install.sh")
+# Retraits intentionnels, déjà approuvés : ce sont des modèles de configuration
+# publics obsolètes, et NON des composants exécutables du Core.
+# Ne jamais généraliser cette exception à tous les chemins *.env.example.
+APPROVED_NON_CORE_REMOVALS = frozenset({
+    "scripts/dev/platform-runtime.env.example",
+})
 DEVICE_URL = "https://github.com/login/device/code"
 TOKEN_URL = "https://github.com/login/oauth/access_token"
 
@@ -132,10 +138,15 @@ def _check_target(root, old, new):
     if old != new:
         deleted = _git(root, "diff", "--name-only", "--diff-filter=D", old, new,
                        "--", *PROTECTED_AREAS)
-        if deleted:
+        # Contrôle TOUJOURS bloquant pour les suppressions de vrai code,
+        # rôles, scripts et playbooks ; exception explicite pour les anciens
+        # exemples .env retirés volontairement du dépôt.
+        blocked = [path for path in deleted.splitlines()
+                   if path not in APPROVED_NON_CORE_REMOVALS]
+        if blocked:
             raise UpdateError(
                 "Mise à jour refusée : suppression de composants Core/Ansible :\n"
-                + deleted[:1400]
+                + "\n".join(blocked)[:1400]
             )
 
 
@@ -351,7 +362,8 @@ def update(root: Path, *, check=False):
     remaining = [name for name in REQUIRED_CORE if not (root / name).is_file()]
     if remaining:
         raise UpdateError("Mise à jour appliquée mais composants manquants : " + ", ".join(remaining))
-
+    print("AUTOKOM Core restauré / mis à jour. Aucun service redémarré.")
+    print("Backend : utiliser autokom app deploy séparément après vérification.")
     return 0
 
 
