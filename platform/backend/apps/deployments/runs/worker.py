@@ -109,14 +109,23 @@ def poll_one(client, run_id):
                 if marker:
                     add_log(run, marker.group(1))
                 update['console_pending'] = ''
-            # Success is trusted only if health stage really passed.
-            if state['status'] == 'SUCCEEDED' and not PipelineStageRun.objects.filter(
-                deployment=run, stage_key='health', status='SUCCESS').exists():
-                state['status'] = 'FAILED'
-                update['error_message'] = 'Jenkins a terminé sans preuve de disponibilité de l’application.'
             if state['status'] == 'SUCCEEDED':
-                # Persist Release/site BEFORE marking run SUCCEEDED. Retry on transient DB errors.
-                register_release(run)
+                try:
+                    _release_docker_and_proxy(run)
+                    register_release(run)
+                    from apps.deployments.runs.autokom_socket import request_control
+                    request_control('runtime.commit',{'run_id':str(run.pk),'environment_id':str(run.environment_id)},timeout=25)
+                except Exception as exc:
+                    # Never leave an unfinished local Docker release as the desired state.
+                    try:
+                        from apps.deployments.runs.autokom_socket import request_control
+                        request_control('runtime.rollback',{
+                            'run_id':str(run.id),'environment_id':str(run.environment_id)},timeout=35)
+                    except Exception:
+                        logger.warning('Rollback manuel requis pour %s',run.pk)
+                    logger.warning('Release AUTOKOM refusée pour %s (%s)',run.pk,type(exc).__name__)
+                    state['status']='FAILED'
+                    update['error_message']='Déploiement Docker, vérification ou TLS impossible. Vérifier le broker.'
             update['status'] = state['status']
             update['finished_at'] = timezone.now()
         if update:
@@ -127,6 +136,44 @@ def poll_one(client, run_id):
     except (JenkinsUnavailable, ValueError) as exc:
         logger.warning('Jenkins status unavailable for run %s: %s', run_id, type(exc).__name__)
         return False
+
+
+
+def _release_docker_and_proxy(run):
+    """Runs only in background worker; every host operation goes through the socket."""
+    from apps.deployments.runs.autokom_socket import request_control
+    from apps.deployments.runs.runner_manifest import fetch_runner_manifest
+    from apps.deployments.domains.models import Domain
+    from apps.deployments.domains.services import _challenge
+    manifest=fetch_runner_manifest(run.id,include_secrets=True)
+    resource=manifest['resources']
+    cfg=manifest['build']
+    if resource.get('replicas') != 1:
+        raise ValueError('Haute disponibilité interdite avant activation GCP.')
+    PipelineStageRun.objects.filter(deployment=run,stage_key='release').update(status='RUNNING',started_at=timezone.now())
+    result=request_control('runtime.deploy',{
+        'run_id':str(run.pk),'environment_id':str(run.environment_id),
+        'cpu_millicores':int(resource['cpu_millicores']),
+        'memory_mb':int(resource['memory_mb']),'storage_mb':int(resource['storage_mb']),
+        'internal_port':int(cfg['port']),'healthcheck':cfg['healthcheck'],
+        'replicas':1,'variables':manifest['variables'],
+    },timeout=280)
+    PipelineStageRun.objects.filter(deployment=run,stage_key='release').update(status='SUCCESS',finished_at=timezone.now())
+    PipelineStageRun.objects.filter(deployment=run,stage_key='health').update(status='RUNNING',started_at=timezone.now())
+    domains=Domain.objects.filter(environment=run.environment,verified_at__isnull=False,status__in=[Domain.Status.VERIFYING,Domain.Status.ACTIVE])
+    for domain in domains:
+        request_control('domain.activate',{
+            'hostname':domain.hostname,'environment_id':str(run.environment_id),
+            'managed':domain.domain_type==Domain.Type.SUBDOMAIN,
+            'token':_challenge(domain),
+        },timeout=160)
+        domain.status=Domain.Status.ACTIVE
+        domain.tls_status='ACTIVE'
+        domain.save(update_fields=['status','tls_status'])
+    PipelineStageRun.objects.filter(deployment=run,stage_key='health').update(status='SUCCESS',finished_at=timezone.now())
+    add_log(run,'AUTOKOM_STAGE:release:SUCCESS')
+    add_log(run,'AUTOKOM_STAGE:health:SUCCESS')
+    add_log(run,'AUTOKOM_LOG: Image Docker locale, endpoint privé et TLS contrôlés.')
 
 
 def register_release(run):
@@ -140,7 +187,7 @@ def register_release(run):
         if previous:
             previous.status = Release.Status.SUPERSEDED
             previous.save(update_fields=['status'])
-        image_ref = f"{settings.AUTOKOM_IMAGE_REGISTRY.rstrip('/')}/{run.environment.project.id.hex}/{run.id.hex}"
+        image_ref = f'autokom-local:{run.id}'
         release = Release.objects.create(environment=run.environment, source_deployment=run,
               previous_release=previous, version=str(run.id), image_reference=image_ref,
               status=Release.Status.ACTIVE, published_at=timezone.now())

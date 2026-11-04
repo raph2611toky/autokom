@@ -229,3 +229,8 @@ AUTOKOM_LOKI_URL = os.getenv('AUTOKOM_LOKI_URL', '').strip()
 AUTOKOM_RUNTIME_LOGS_ENABLED = env_bool('AUTOKOM_RUNTIME_LOGS_ENABLED', False)
 
 AUTOKOM_PROMETHEUS_URL = os.getenv('AUTOKOM_PROMETHEUS_URL','').strip()
+
+# Host actions are delegated to AUTOKOM over a permissioned Unix socket.
+AUTOKOM_CONTROL_SOCKET = os.getenv('AUTOKOM_CONTROL_SOCKET','/run/autokom/platform-control.sock')
+
+REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['domains'] = '12/hour'

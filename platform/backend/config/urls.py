@@ -23,6 +23,7 @@ client_api_patterns = [
     path('api/projects/', include('apps.projects.secrets.urls')),
     path('api/projects/', include('apps.projects.project.urls')),
     path('api/projects/', include('apps.deployments.runs.urls')),
+    path('api/projects/', include('apps.deployments.domains.urls')),
 ]
 schema_view = get_schema_view(
     openapi.Info(

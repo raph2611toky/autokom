@@ -38,14 +38,7 @@ def effective_replicas(env, plan):
     if option.status != HighAvailabilityOption.Status.ACTIVE:
         # Pending purchase doesn't interrupt existing single-replica operations.
         return 1
-    if (not option.approved_by_id or not option.billing_reference or not option.activated_at or
-            (option.expires_at and option.expires_at <= timezone.now())):
-        raise PermissionDenied('Haute disponibilité non autorisée ou expirée.')
-    if option.desired_replicas > plan.max_instances:
-        raise PermissionDenied('Le plan de ressources ne permet pas ce nombre de réplicas.')
-    if not getattr(settings, 'AUTOKOM_HA_CLUSTER_READY', False):
-        raise DeploymentConflict('Un cluster multi-nœuds avec répartiteur et stockage adapté doit être prêt pour la HA.')
-    return option.desired_replicas
+    raise DeploymentConflict('Haute disponibilité : option visible mais non activable avant le cluster GCP.')
 
 
 def plan_deployment(env, *, verify_remote=False, user=None):
@@ -99,13 +92,10 @@ def _select_branch_commit(user, cfg):
 
 def ensure_runner_ready():
     from apps.deployments.runs.jenkins import verify_settings
-    verify_settings()
-    registry = getattr(settings, 'AUTOKOM_IMAGE_REGISTRY', '')
-    if not re.fullmatch(r'[a-zA-Z0-9_.:-]+(?:/[a-zA-Z0-9_.-]+)*', registry or ''):
-        raise DeploymentConflict('Registry privé AUTOKOM_IMAGE_REGISTRY requis.')
+    verify_settings()  # local Unix socket + approved Jenkins service account
     key = getattr(settings, 'AUTOKOM_RUNNER_SHARED_KEY', '')
     if len(key) < 32:
-        raise DeploymentConflict('Clé AUTOKOM_RUNNER_SHARED_KEY requise (au moins 32 caractères).')
+        raise DeploymentConflict('Clé interne du runner Jenkins manquante.')
 
 
 def _create_run(env, cfg, resources, *, actor, trigger, sha, idem, event=None):
@@ -117,8 +107,8 @@ def _create_run(env, cfg, resources, *, actor, trigger, sha, idem, event=None):
         ci_provider='JENKINS', status=DeploymentRun.Status.QUEUED)
     stage_specs = [('source','Récupération GitHub','git'), ('sast','SAST / Semgrep','semgrep'),
                    ('sca','SCA / Trivy','trivy'), ('build','Build isolé','buildkit'),
-                   ('release','Déploiement Kubernetes','kubernetes'),
-                   ('health','Disponibilité / probes','kubernetes')]
+                   ('release','Docker privé · AUTOKOM','docker'),
+                   ('health','Healthcheck & Nginx TLS','nginx')]
     if cfg.mode == 'DEVOPS':
         stage_specs = [st for st in stage_specs if st[0] not in ('sast', 'sca')]
     PipelineStageRun.objects.bulk_create([

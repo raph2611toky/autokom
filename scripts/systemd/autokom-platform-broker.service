@@ -1,0 +1,29 @@
+[Unit]
+Description=AUTOKOM Platform Unix Socket Broker (allowlisted host operations)
+After=network-online.target docker.service nginx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+RuntimeDirectory=autokom
+RuntimeDirectoryMode=0750
+ExecStartPre=/usr/bin/chgrp autokom /run/autokom
+EnvironmentFile=/etc/autokom/platform-runtime.env
+ExecStart=/usr/bin/python3 /opt/autokom/source/scripts/lib/autokom_platform_broker.py
+Restart=on-failure
+RestartSec=4
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

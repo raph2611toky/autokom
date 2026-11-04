@@ -1,0 +1,70 @@
+---
+- name: Vérifier Ubuntu et les services requis
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['os_family'] == 'Debian'
+
+- name: Vérifier la présence des outils sans les réinstaller
+  ansible.builtin.command: "{{ item }} --version"
+  loop:
+    - docker
+    - nginx
+    - certbot
+  changed_when: false
+
+- name: Préparer le compte de build client sans privilège Docker
+  ansible.builtin.user:
+    name: autokom-builder
+    system: true
+    create_home: true
+    shell: /usr/sbin/nologin
+    groups: []
+    append: false
+
+- name: Créer les répertoires protégés du runtime
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /var/lib/autokom/client-runtime, owner: root, group: root, mode: '0700'}
+    - {path: /var/lib/autokom/build-artifacts, owner: root, group: autokom-builder, mode: '2770'}
+    - {path: /var/lib/autokom/acme, owner: root, group: root, mode: '0755'}
+    - {path: /etc/autokom, owner: root, group: root, mode: '0750'}
+
+- name: Installer le service root broker depuis AUTOKOM Core
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/systemd/autokom-platform-broker.service"
+    dest: /etc/systemd/system/autokom-platform-broker.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload runtime units
+
+- name: Installer le worker Django non privilégié
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../platform/backend/deployment_templates/autokom-deployment-worker.service.example"
+    dest: /etc/systemd/system/autokom-deployment-worker.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload runtime units
+
+- name: Recharger systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Démarrer le broker Unix
+  ansible.builtin.systemd_service:
+    name: autokom-platform-broker
+    enabled: true
+    state: restarted
+
+- name: Démarrer le worker des exécutions
+  ansible.builtin.systemd_service:
+    name: autokom-deployment-worker
+    enabled: true
+    state: restarted

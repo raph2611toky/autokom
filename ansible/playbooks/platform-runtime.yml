@@ -1,0 +1,7 @@
+---
+- name: AUTOKOM | Runtime sécurisé des projets clients
+  hosts: local
+  become: true
+  gather_facts: true
+  roles:
+    - role: ../roles/platform_runtime

@@ -15,11 +15,11 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 BASE = Path(__file__).resolve().parents[1]
-AGENT = BASE / 'deployment_templates' / 'autokom_agent.py'
+CORE = BASE.parent.parent
+AGENT = CORE / 'scripts/runtime/autokom_agent_local.py'
 spec = importlib.util.spec_from_file_location('autokom_trusted_agent_test', AGENT)
 agent = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(agent)
-
 
 class PipelineSecurityTests(unittest.TestCase):
     def test_ast_compile_all_changed_paths(self):
@@ -43,39 +43,25 @@ class PipelineSecurityTests(unittest.TestCase):
         for name in modules:
             self.assertTrue((BASE/f'apps/deployments/runs/swagger/{name}.py').is_file())
 
-    def test_trusted_runner_rejects_user_shell_and_local_credentials(self):
+    def test_trusted_runner_rejects_local_credentials(self):
         with patch.dict(os.environ, {'AUTOKOM_RUNNER_SHARED_KEY':'NEVER_LEAK','JENKINS_API_TOKEN':'HIDE_ME'},clear=False):
             with patch.object(agent.subprocess,'run') as execute:
-                agent.run(['echo','safe'])
+                agent.execute(['true'])
                 env = execute.call_args.kwargs['env']
                 self.assertNotIn('AUTOKOM_RUNNER_SHARED_KEY',env)
                 self.assertNotIn('JENKINS_API_TOKEN',env)
                 self.assertIsInstance(execute.call_args.args[0],list)
 
-    def test_image_tag_stable_scoped_to_run(self):
-        doc={'project_id':'12345678-aaaa-bbbb-cccc-000000000001','run_id':'12345678-aaaa-bbbb-cccc-000000000002'}
-        with patch.dict(os.environ, {'AUTOKOM_IMAGE_REGISTRY':'registry.example.invalid/autokom'}):
-            self.assertIn('12345678aaaabbbbcccc000000000001',agent.image_ref(doc))
-            self.assertIn('12345678aaaabbbbcccc000000000002',agent.image_ref(doc))
+    def test_image_tag_is_local_and_scoped_to_run(self):
+        text=AGENT.read_text(encoding='utf-8')
+        self.assertIn("autokom-local:'+rid",text)
+        self.assertNotIn('AUTOKOM_IMAGE_REGISTRY',text)
 
-    def test_kubernetes_replicas_and_secret_never_in_cli_args(self):
-        run_id='12345678-aaaa-bbbb-cccc-000000000002'
-        doc={'project_id':'12345678-aaaa-bbbb-cccc-000000000001', 'environment_id':'12345678-aaaa-bbbb-cccc-000000000003',
-             'run_id':run_id, 'variables':{'DATABASE_PASSWORD':'not-to-log'},
-             'resources':{'replicas':2,'cpu_millicores':500,'memory_mb':512,'storage_mb':1024},
-             'build':{'port':8000,'healthcheck':'/health/','start_command':''}}
-        applied=[]
-        with patch.dict(os.environ,{'AUTOKOM_IMAGE_REGISTRY':'registry.example.invalid/autokom'}):
-            with patch.object(agent,'kube_apply',side_effect=lambda obj,ns:applied.append((obj,ns))):
-                with patch.object(agent,'stage'):
-                    agent.deploy(doc)
-        self.assertEqual(3,len(applied))
-        self.assertEqual('Secret',applied[0][0]['kind'])
-        self.assertEqual('not-to-log',base64.b64decode(applied[0][0]['data']['DATABASE_PASSWORD']).decode())
-        deployment=applied[1][0]
-        self.assertEqual(2,deployment['spec']['replicas'])
-        self.assertIn('affinity',deployment['spec']['template']['spec'])
-        self.assertFalse(deployment['spec']['template']['spec']['automountServiceAccountToken'])
+    def test_no_kubernetes_or_registry_active(self):
+        text=(CORE/'scripts/runtime/Jenkinsfile.autokom-local').read_text()
+        self.assertNotIn('kubectl ',text)
+        self.assertNotIn('docker.sock',text)
+        self.assertIn('autokom-isolated',text)
 
     def test_invalid_source_path_cannot_traverse_workspace(self):
         from tempfile import TemporaryDirectory
@@ -83,8 +69,8 @@ class PipelineSecurityTests(unittest.TestCase):
             base=Path(td); (base/'.git').mkdir()
             with patch.dict(os.environ, {'WORKSPACE':str(base)}):
                 with self.assertRaises(SystemExit):
-                    agent.workdir({'build':{'root':'../outside'}})
-                self.assertEqual(base,agent.workdir({'build':{'root':''}}))
+                    agent.source({'build':{'root':'../outside'}})
+                self.assertEqual(base,agent.source({'build':{'root':''}}))
 
     def test_sensitive_encryption_payload_not_written_to_logs(self):
         source=(BASE/'apps/deployments/runs/worker.py').read_text()

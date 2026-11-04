@@ -28,7 +28,7 @@ def check_runner_signature(run_id, epoch, signature):
         raise PermissionDenied('Authentification du runner refusée.')
 
 
-def fetch_runner_manifest(run_id):
+def fetch_runner_manifest(run_id, *, include_secrets=False):
     run = (DeploymentRun.objects.select_related('environment__project','configuration','environment__project__git_connection')
            .filter(pk=run_id, status=DeploymentRun.Status.RUNNING).first())
     if run is None or run.cancel_requested:
@@ -37,7 +37,7 @@ def fetch_runner_manifest(run_id):
     env = run.environment
     project = env.project
     variables = {}
-    for item in EnvironmentVariable.objects.filter(environment=env).select_related('secret'):
+    for item in (EnvironmentVariable.objects.filter(environment=env).select_related('secret') if include_secrets else []):
         if item.secret_id:
             sec = item.secret
             if not sec.is_active or sec.project_id != project.id or (sec.environment_id and sec.environment_id != env.id):
@@ -60,5 +60,5 @@ def fetch_runner_manifest(run_id):
                   'start_command': cfg.start_command, 'output_directory': cfg.output_directory,
                   'port': cfg.internal_port, 'healthcheck': cfg.healthcheck_path},
         'mode': run.mode_snapshot, 'resources': run.resources_snapshot,
-        'variables': variables, 'domains': domains,
+        'variables': variables if include_secrets else {}, 'domains': domains,
     }

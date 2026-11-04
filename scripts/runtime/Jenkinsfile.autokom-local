@@ -1,0 +1,54 @@
+// AUTOKOM trusted single-host pipeline. Never load Jenkinsfile from a customer repo.
+// Runs ONLY on isolated agent with rootless BuildKit, NO Docker socket, NO host root.
+pipeline {
+    agent { label 'autokom-isolated' }
+    options { timestamps(); skipDefaultCheckout(true); disableConcurrentBuilds(); timeout(time: 45, unit: 'MINUTES') }
+    parameters { string(name: 'AUTOKOM_RUN_ID', defaultValue: '', description: 'UUID d’une exécution AUTOKOM') }
+    stages {
+        stage('GitHub source') {
+            steps {
+                script {
+                    echo 'AUTOKOM_STAGE:source:RUNNING'
+                    withCredentials([string(credentialsId:'autokom-runner-key', variable:'AUTOKOM_RUNNER_SHARED_KEY')]) {
+                        def sourceJson = sh(script:'set +x; python3 /opt/autokom/source/scripts/runtime/autokom_agent_local.py metadata', returnStdout:true).trim()
+                        def meta = new groovy.json.JsonSlurperClassic().parseText(sourceJson)
+                        if (!(meta.repo ==~ /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/) ||
+                            !(meta.sha ==~ /^[0-9a-f]{40}$/)) { error('Dépôt ou commit non autorisé') }
+                        checkout([$class:'GitSCM',branches:[[name:meta.sha]],
+                           doGenerateSubmoduleConfigurations:false,
+                           extensions:[[$class:'CloneOption',shallow:true,depth:1,noTags:true]],
+                           userRemoteConfigs:[[url:'https://github.com/'+meta.repo+'.git',
+                                              credentialsId:'autokom-github-app']]])
+                    }
+                    echo 'AUTOKOM_STAGE:source:SUCCESS'
+                }
+            }
+        }
+        stage('SAST Semgrep') {
+            steps {
+                withCredentials([string(credentialsId:'autokom-runner-key',variable:'AUTOKOM_RUNNER_SHARED_KEY')]) {
+                    sh 'set +x; python3 /opt/autokom/source/scripts/runtime/autokom_agent_local.py sast'
+                }
+            }
+        }
+        stage('SCA Trivy') {
+            steps {
+                withCredentials([string(credentialsId:'autokom-runner-key',variable:'AUTOKOM_RUNNER_SHARED_KEY')]) {
+                    sh 'set +x; python3 /opt/autokom/source/scripts/runtime/autokom_agent_local.py sca'
+                }
+            }
+        }
+        stage('BuildKit rootless · export local') {
+            steps {
+                withCredentials([string(credentialsId:'autokom-runner-key',variable:'AUTOKOM_RUNNER_SHARED_KEY')]) {
+                    sh 'set +x; python3 /opt/autokom/source/scripts/runtime/autokom_agent_local.py build'
+                }
+            }
+        }
+    }
+    post {
+        failure { echo 'AUTOKOM_LOG: Build refusé par le runner isolé.' }
+        aborted { echo 'AUTOKOM_LOG: Build annulé.' }
+        success { echo 'AUTOKOM_LOG: Image locale créée; activation Docker via broker AUTOKOM.' }
+    }
+}

@@ -1,7 +1,8 @@
 [Unit]
-Description=AUTOKOM Platform - Jenkins Deployment Queue Worker
-After=network-online.target mysql.service
+Description=AUTOKOM Platform - deployment queue worker (no host shell)
+After=network-online.target mysql.service autokom-platform-broker.service
 Wants=network-online.target
+Requires=autokom-platform-broker.service
 
 [Service]
 Type=simple
@@ -9,6 +10,7 @@ User=autokom
 Group=autokom
 WorkingDirectory=/opt/autokom/source/platform/backend
 EnvironmentFile=/etc/autokom/platform-backend.env
+Environment=AUTOKOM_CONTROL_SOCKET=/run/autokom/platform-control.sock
 ExecStart=/opt/autokom/venv/bin/python manage.py autokom_deployment_worker --interval 5
 Restart=on-failure
 RestartSec=5
@@ -19,6 +21,7 @@ ProtectSystem=strict
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0077
 StandardOutput=journal
 StandardError=journal

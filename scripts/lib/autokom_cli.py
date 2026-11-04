@@ -658,6 +658,7 @@ est conservé. Les logs sont installés séparément pour éviter une charge imp
             fp.add_argument('file_extra',nargs='?',default='')
     subcommand('dns', help='Zones BIND9, Cloudflare, environnements, vérifications DNS')
     subcommand('app', help='Service Django AUTOKOM : setup, deploy, status, logs')
+    subcommand('runtime', help='Moteur client Docker/Jenkins/Unix socket')
     up = subcommand('update', help='Mise à jour privée via code GitHub (fast-forward uniquement)',
                     epilog='Exemple : sudo autokom update')
     up.add_argument('--check', action='store_true', help='Vérifier localement sans accéder à GitHub')
@@ -700,6 +701,7 @@ def main(argv=None):
             )
         )
         mutating=(dns_sensitive or cmd in ('update','configure') or
+            (cmd=='runtime' and '--apply' in arguments) or
             (cmd=='app' and len(arguments)>1 and arguments[1] in ('setup','deploy') and '--check' not in arguments) or
             (cmd=='install' and '--check' not in arguments) or
             (cmd=='logs' and ('--apply' in arguments or (len(arguments)>1 and arguments[1]=='use'))) or
@@ -714,6 +716,10 @@ def main(argv=None):
             return dns_main(arguments[1:])
         except DNSError as exc:
             raise CLIError(str(exc)) from exc
+    if arguments and arguments[0] == 'runtime':
+        from autokom_runtime_admin import main as runtime_main, SetupError
+        try: return runtime_main(arguments[1:])
+        except SetupError as exc: raise CLIError(str(exc)) from exc
     if arguments and arguments[0] == 'app':
         from autokom_app_manager import main as app_main, AppError
         try:
