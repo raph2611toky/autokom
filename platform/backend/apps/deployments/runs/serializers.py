@@ -13,7 +13,7 @@ class DeploymentRunSerializer(serializers.ModelSerializer):
         model = DeploymentRun
         fields = ('id','environment','configuration','trigger_type','mode_snapshot','resources_snapshot',
                   'branch','commit_sha','status','ci_provider','created_at','started_at',
-                  'finished_at','cancel_requested','stages')
+                  'finished_at','cancel_requested','error_message','stages')
         read_only_fields = fields
 
 class DeploymentLogSerializer(serializers.ModelSerializer):

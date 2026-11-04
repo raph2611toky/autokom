@@ -6,6 +6,8 @@ from django.utils import timezone
 from django.db.models import Max, Q
 from apps.deployments.runs.models import DeploymentRun, PipelineStageRun, DeploymentLogEntry
 from apps.deployments.runs.jenkins import JenkinsClient, JenkinsUnavailable
+from apps.deployments.runs.autokom_socket import AutokomControlUnavailable
+from apps.deployments.runs.console_stream import consume_chunk
 
 logger = logging.getLogger('autokom.deployments')
 SECRETS = re.compile(r'(?i)((?:authorization\s*:\s*bearer|password|token|secret|api[_-]?key)\s*[=:]\s*)(\S+)')
@@ -21,23 +23,59 @@ def redact(text):
 
 def add_log(run, line, level='INFO'):
     line = redact(line)
-    # Only trusted agent markers, never arbitrary stdout from customer builds.
+    # Markers are informational only. Never use customer-originated log text as
+    # proof that a security scan or deployment has passed.
     if not line.startswith(('AUTOKOM_LOG:', 'AUTOKOM_STAGE:')) and level != 'ERROR':
         return
-    # Single worker per deployment, bounded per-run log count.
-    last = DeploymentLogEntry.objects.filter(deployment=run).aggregate(last=Max('sequence'))['last'] or 0
-    if last >= 10000:
-        return
-    DeploymentLogEntry.objects.create(deployment=run, sequence=last+1, level=level, message=line)
-    stage = re.search(r'^AUTOKOM_STAGE:(source|sast|sca|build|release|health):(RUNNING|SUCCESS|FAILED|SKIPPED)$', line)
-    if stage:
-        key, status = stage.groups()
-        updates = {'status': status}
-        if status == 'RUNNING':
-            updates['started_at'] = timezone.now()
-        else:
-            updates['finished_at'] = timezone.now()
-        PipelineStageRun.objects.filter(deployment=run, stage_key=key).update(**updates)
+    # Serialize sequence allocation per deployment across multiple workers.
+    # Prevents duplicate sequence IDs during overlapping log polling.
+    with transaction.atomic():
+        DeploymentRun.objects.select_for_update().only('pk').get(pk=run.pk)
+        last = (DeploymentLogEntry.objects.filter(deployment=run)
+                .aggregate(last=Max('sequence'))['last'] or 0)
+        if last >= 10000:
+            return
+        DeploymentLogEntry.objects.create(
+            deployment=run, sequence=last + 1, level=level, message=line)
+        stage = re.search(
+            r'^AUTOKOM_STAGE:(source|sast|sca|build|release|health):'
+            r'(RUNNING|SUCCESS|FAILED|SKIPPED)$', line)
+        if stage:
+            key, status = stage.groups()
+            # Display state only. Never authorize a release from log markers.
+            updates = {'status': status}
+            if status == 'RUNNING':
+                updates['started_at'] = timezone.now()
+            else:
+                updates['finished_at'] = timezone.now()
+            PipelineStageRun.objects.filter(
+                deployment=run, stage_key=key).update(**updates)
+
+
+def ingest_console(run_id, text, offset, *, final=False):
+    """Atomically checkpoint a Jenkins byte offset, pending line, and markers.
+
+    No Jenkins network request happens while holding a MySQL row lock.
+    """
+    with transaction.atomic():
+        current = (DeploymentRun.objects.select_for_update()
+                   .filter(pk=run_id, status='RUNNING').first())
+        if current is None:
+            return False
+        if offset < current.console_offset:
+            return False
+        if offset == current.console_offset and not final:
+            return False
+        if offset == current.console_offset and text:
+            # A stale duplicate chunk must never append duplicate markers.
+            return False
+        markers, pending = consume_chunk(current.console_pending, text, final=final)
+        for marker in markers:
+            add_log(current, marker)
+        current.console_offset = offset
+        current.console_pending = pending
+        current.save(update_fields=['console_offset', 'console_pending'])
+        return True
 
 
 def dispatch_one(client):
@@ -68,17 +106,19 @@ def dispatch_one(client):
 
 
 def poll_one(client, run_id):
+    """Poll Jenkins, persist console markers, then reconcile Docker/DB safely."""
     from datetime import timedelta
     now = timezone.now()
     with transaction.atomic():
         run = (DeploymentRun.objects.select_for_update(skip_locked=True)
                .filter(pk=run_id, status='RUNNING')
-               .filter(Q(next_poll_at__isnull=True) | Q(next_poll_at__lte=now)).first())
+               .filter(Q(next_poll_at__isnull=True) | Q(next_poll_at__lte=now))
+               .first())
         if run is None:
             return False
         run.next_poll_at = now + timedelta(seconds=12)
         run.save(update_fields=['next_poll_at'])
-    if not run or not run.external_run_id:
+    if not run.external_run_id:
         return False
     try:
         if run.cancel_requested:
@@ -87,56 +127,100 @@ def poll_one(client, run_id):
                 status='CANCELLED', finished_at=timezone.now())
             add_log(run, 'AUTOKOM_LOG: Annulation demandée par un utilisateur autorisé.')
             return True
-        state = client.get_state(run.external_run_id)
-        if state['external_id'].startswith('B:'):
-            contents, offset = client.console(state['external_id'], run.console_offset)
-            if offset > run.console_offset and contents:
-                # Only full lines are released to clients; partial lines wait for next poll.
-                combined = (run.console_pending + contents)[:68000]
-                lines = combined.split('\n')
-                for line in lines[:-1][:250]:
-                    marker = re.search(r'(AUTOKOM_(?:LOG|STAGE):[^\r\n]{1,700})', line)
-                    if marker:
-                        add_log(run, marker.group(1))
-                DeploymentRun.objects.filter(pk=run_id, status='RUNNING').update(
-                    console_offset=offset, console_pending=lines[-1][:2000])
-        update = {}
-        if state['external_id'] != run.external_run_id:
-            update['external_run_id'] = state['external_id']
-        if state['status'] != 'RUNNING':
-            if run.console_pending:
-                marker = re.search(r'(AUTOKOM_(?:LOG|STAGE):[^\r\n]{1,700})', run.console_pending)
-                if marker:
-                    add_log(run, marker.group(1))
-                update['console_pending'] = ''
-            if state['status'] == 'SUCCEEDED':
-                try:
-                    _release_docker_and_proxy(run)
-                    register_release(run)
-                    from apps.deployments.runs.autokom_socket import request_control
-                    request_control('runtime.commit',{'run_id':str(run.pk),'environment_id':str(run.environment_id)},timeout=25)
-                except Exception as exc:
-                    # Never leave an unfinished local Docker release as the desired state.
-                    try:
-                        from apps.deployments.runs.autokom_socket import request_control
-                        request_control('runtime.rollback',{
-                            'run_id':str(run.id),'environment_id':str(run.environment_id)},timeout=35)
-                    except Exception:
-                        logger.warning('Rollback manuel requis pour %s',run.pk)
-                    logger.warning('Release AUTOKOM refusée pour %s (%s)',run.pk,type(exc).__name__)
-                    state['status']='FAILED'
-                    update['error_message']='Déploiement Docker, vérification ou TLS impossible. Vérifier le broker.'
-            update['status'] = state['status']
-            update['finished_at'] = timezone.now()
-        if update:
-            DeploymentRun.objects.filter(pk=run_id, status='RUNNING').update(**update)
-        if state['status'] != 'RUNNING':
-            add_log(run, 'AUTOKOM_LOG: Exécution Jenkins terminée : ' + state['status'])
-        return True
-    except (JenkinsUnavailable, ValueError) as exc:
-        logger.warning('Jenkins status unavailable for run %s: %s', run_id, type(exc).__name__)
-        return False
 
+        state = client.get_state(run.external_run_id)
+        external_id = state['external_id']
+        terminal = state['status'] != 'RUNNING'
+        # Persist the B:... identifier before collecting logs, so a crash can
+        # resume from the same build rather than restarting a Jenkins job.
+        if external_id != run.external_run_id:
+            DeploymentRun.objects.filter(pk=run_id, status='RUNNING').update(
+                external_run_id=external_id)
+
+        if external_id.startswith('B:'):
+            # Jenkins progressiveText may return multiple chunks even AFTER the
+            # build has finished. Do not finalize until the console is drained.
+            # Limit each tick to three bounded reads to prevent starvation.
+            for _ in range(3):
+                fresh = DeploymentRun.objects.filter(pk=run_id, status='RUNNING').first()
+                if fresh is None:
+                    return False
+                text, offset = client.console(external_id, fresh.console_offset)
+                if offset < fresh.console_offset:
+                    raise ValueError('Offset Jenkins non monotone.')
+                if offset > fresh.console_offset:
+                    ingest_console(run_id, text, offset, final=False)
+                # A maximum-size chunk might have more data behind it. Finalize
+                # in a subsequent tick rather than silently skipping log lines.
+                if len(text.encode('utf-8')) >= 31_000:
+                    if terminal:
+                        return True
+                    continue
+                if terminal:
+                    latest = DeploymentRun.objects.filter(pk=run_id, status='RUNNING').first()
+                    if latest:
+                        ingest_console(run_id, '', latest.console_offset, final=True)
+                break
+
+        if not terminal:
+            return True
+        run = DeploymentRun.objects.filter(pk=run_id, status='RUNNING').first()
+        if run is None:
+            return False
+        if run.cancel_requested:
+            # A late cancellation must not publish a completed Jenkins build.
+            DeploymentRun.objects.filter(pk=run_id, status='RUNNING').update(
+                status='CANCELLED', finished_at=timezone.now())
+            add_log(run, 'AUTOKOM_LOG: Annulation enregistrée avant publication.')
+            return True
+
+        status = state['status']
+        error_message = ''
+        if status == 'SUCCEEDED':
+            from apps.deployments.runs.autokom_socket import request_control
+            try:
+                _release_docker_and_proxy(run)
+                # The broker may still roll back at this point. Do NOT publish
+                # the release as ACTIVE in MySQL before this commit succeeds.
+                request_control('runtime.commit', {
+                    'run_id': str(run.pk),
+                    'environment_id': str(run.environment_id),
+                }, timeout=25)
+            except Exception as exc:
+                try:
+                    request_control('runtime.rollback', {
+                        'run_id': str(run.pk),
+                        'environment_id': str(run.environment_id),
+                    }, timeout=35)
+                except Exception:
+                    logger.warning('Réconciliation Docker manuelle requise pour %s', run.pk)
+                logger.warning('Publication AUTOKOM refusée pour %s (%s)',
+                               run.pk, type(exc).__name__)
+                status = 'FAILED'
+                error_message = 'Activation Docker, Nginx ou commit AUTOKOM impossible.'
+                PipelineStageRun.objects.filter(deployment=run,
+                    stage_key__in=('release', 'health')).update(
+                        status='FAILED', finished_at=timezone.now())
+            else:
+                try:
+                    # After runtime.commit, the broker can have deleted the old
+                    # container. Never attempt a blind rollback on DB failure.
+                    register_release(run)
+                except Exception as exc:
+                    logger.error('Réconciliation release MySQL requise pour %s (%s)',
+                                 run.pk, type(exc).__name__)
+                    status = 'BLOCKED'
+                    error_message = ('Docker publié, état MySQL à réconcilier. '
+                                     'Ne pas redéployer avant diagnostic.')
+
+        DeploymentRun.objects.filter(pk=run_id, status='RUNNING').update(
+            status=status, finished_at=timezone.now(), error_message=error_message)
+        add_log(run, 'AUTOKOM_LOG: Exécution terminée : ' + status)
+        return True
+    except (JenkinsUnavailable, AutokomControlUnavailable, ValueError) as exc:
+        logger.warning('État Jenkins temporairement indisponible pour %s (%s)',
+                       run_id, type(exc).__name__)
+        return False
 
 
 def _release_docker_and_proxy(run):
@@ -203,7 +287,16 @@ def run_tick():
         started_at__lt=timezone.now()-timedelta(minutes=4)).update(
         status='BLOCKED', finished_at=timezone.now(),
         error_message='Dispatch incertain : rapprochement manuel requis dans Jenkins.')
-    client = JenkinsClient()
+    # A health endpoint does not prove Jenkins/socket are available. Retry on
+    # subsequent ticks instead of crashing the management command every 5s.
+    if not DeploymentRun.objects.filter(status__in=['QUEUED', 'RUNNING']).exists():
+        return False
+    try:
+        client = JenkinsClient()
+    except (JenkinsUnavailable, AutokomControlUnavailable) as exc:
+        logger.warning('Broker/Jenkins indisponible (%s). Nouvelle tentative au prochain tick.',
+                       type(exc).__name__)
+        return False
     dispatched = dispatch_one(client)
     # Check a bounded batch; never starve later running jobs.
     polled = False

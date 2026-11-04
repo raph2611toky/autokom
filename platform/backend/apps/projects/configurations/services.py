@@ -12,15 +12,32 @@ def get_config(env, config_id):
 
 
 def check_configuration(cfg):
+    """Only approve configurations the CURRENT isolated Jenkins runner can build.
+
+    Other modes remain editable in drafts; never represent AUTO, STATIC or
+    buildpacks as deployable until the actual builder supports them.
+    """
     issues = {}
-    if cfg.build_method == DeploymentConfig.BuildMethod.STATIC and not cfg.output_directory:
-        issues['output_directory'] = 'Répertoire de sortie obligatoire pour les sites statiques.'
-    if cfg.build_method == DeploymentConfig.BuildMethod.DOCKERFILE and not cfg.dockerfile_path:
-        issues['dockerfile_path'] = 'Indiquer un Dockerfile.'
+    if cfg.build_method != DeploymentConfig.BuildMethod.DOCKERFILE:
+        issues['build_method'] = (
+            'Le runner Jenkins actuel prend en charge uniquement Dockerfile. '
+            'AUTO, STATIC et BUILDPACKS sont disponibles en brouillon, pas au déploiement.')
+    if not cfg.dockerfile_path:
+        issues['dockerfile_path'] = 'Indiquer le chemin du Dockerfile.'
+    if cfg.build_command or cfg.start_command:
+        issues['commands'] = (
+            'Commandes personnalisées non prises en charge par le runner Dockerfile isolé. '
+            'Configurer les commandes dans le Dockerfile approuvé.')
+    if (cfg.settings or {}).get('install_command'):
+        issues['settings'] = (
+            'install_command ne sera pas exécuté par le runner actuel ; '
+            'placer cette instruction dans le Dockerfile.')
     if cfg.auto_deploy and not (cfg.auto_deploy_branch or cfg.branch):
         issues['auto_deploy_branch'] = 'Branche automatique requise.'
-    if cfg.runtime_type == DeploymentConfig.RuntimeType.STATIC and cfg.start_command:
-        issues['start_command'] = 'Une application statique ne nécessite pas de commande de démarrage.'
+    health = cfg.healthcheck_path
+    if (not isinstance(health, str) or not health.startswith('/') or
+            len(health) > 128 or any(c in health for c in ('?', '#', '%', '\\', '\r', '\n'))):
+        issues['healthcheck_path'] = 'Chemin HTTP local invalide pour le broker AUTOKOM.'
     return issues
 
 
