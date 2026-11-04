@@ -19,7 +19,7 @@ from xml.etree import ElementTree as ET
 from datetime import datetime,timezone
 
 ROOT=Path(__file__).resolve().parents[2]
-RUNTIME_ENV=Path('/etc/autokom/platform-runtime.env')
+RUNTIME_ENV=Path('/etc/autokom/secrets/runtime.env')
 BACKUP=Path('/var/lib/autokom/jenkins-backups')
 JOB_SCRIPT=ROOT/'scripts/runtime/Jenkinsfile.autokom-local'
 
@@ -116,9 +116,9 @@ def setup(*,apply):
     if not apply:
         print('  ✓ Prévisualisation uniquement');return 0
     if not RUNTIME_ENV.is_file():
-        raise SetupError('Créer /etc/autokom/platform-runtime.env (root:0600) depuis le guide, avant --apply.')
+        raise SetupError('Configuration absente : sudo autokom runtime env setup (enregistrement exclusivement sous /etc/autokom/secrets/).')
     if RUNTIME_ENV.stat().st_mode & 0o077:
-        raise SetupError('Permissions trop ouvertes sur platform-runtime.env : chmod 600.')
+        raise SetupError('Permissions trop ouvertes : chmod 600 /etc/autokom/secrets/runtime.env.')
     confirm('INSTALLER')
     args=['ansible-playbook','-i',str(inventory),str(playbook)]
     run_live(args,env=env,label='Fondation Docker / socket / worker via Ansible',timeout=240)
@@ -203,6 +203,12 @@ def jenkins_sync(*,apply):
 
 
 def main(argv=None):
+    # Delegate nested help and subcommands before the parent parser handles -h.
+    raw=list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0]=='env':
+        from autokom_env_manager import main as env_main, EnvError
+        try:return env_main('runtime',raw[1:])
+        except EnvError as exc:raise SetupError(str(exc)) from exc
     parser=argparse.ArgumentParser(prog='autokom runtime',description='Runtime client AUTOKOM Docker/Jenkins/socket')
     sub=parser.add_subparsers(dest='action',required=True)
     for item in ('setup','jenkins'):
@@ -211,7 +217,13 @@ def main(argv=None):
         group.add_argument('--check',action='store_true')
         group.add_argument('--apply',action='store_true')
     sub.add_parser('status')
+    env_p = sub.add_parser('env', help='Secrets runtime : show, setup, edit, delete',add_help=False)
+    env_p.add_argument('env_args', nargs=argparse.REMAINDER)
     opts=parser.parse_args(argv)
+    if opts.action=='env':
+        from autokom_env_manager import main as env_main, EnvError
+        try: return env_main('runtime', opts.env_args)
+        except EnvError as exc: raise SetupError(str(exc)) from exc
     if opts.action=='status':
         print('  ◈ AUTOKOM · RUNTIME CLIENT')
         for unit in ('autokom-platform-broker.service','autokom-deployment-worker.service'):

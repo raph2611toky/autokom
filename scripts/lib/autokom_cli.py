@@ -656,9 +656,10 @@ est conservé. Les logs sont installés séparément pour éviter une charge imp
                             help='Action. Pour les plugins Jenkins/Grafana : « plugins » (menu séparé)')
             fp.add_argument('file_target',nargs='?',default='')
             fp.add_argument('file_extra',nargs='?',default='')
-    subcommand('dns', help='Zones BIND9, Cloudflare, environnements, vérifications DNS')
-    subcommand('app', help='Service Django AUTOKOM : setup, deploy, status, logs')
-    subcommand('runtime', help='Moteur client Docker/Jenkins/Unix socket')
+    subcommand('dns', help='BIND9, Cloudflare et DNS')
+    subcommand('runtime', help='Runtime Docker/Jenkins/socket et environnement')
+    subcommand('app', help='Service Django AUTOKOM : setup, deploy, backend env, status, logs')
+    subcommand('domains', help='Découverte et migration progressive des domaines vers ikom.mg')
     up = subcommand('update', help='Mise à jour privée via code GitHub (fast-forward uniquement)',
                     epilog='Exemple : sudo autokom update')
     up.add_argument('--check', action='store_true', help='Vérifier localement sans accéder à GitHub')
@@ -685,23 +686,24 @@ def main(argv=None):
     if arguments:
         from autokom_security import configured, authorize, SecurityError
         cmd=arguments[0]
-        # AUTOKOM DNS shares the existing passphrase/OTP for sensitive actions.
-        # Read-only checks and explicit --check simulations do not require it.
-        dns_sensitive = (
-            cmd == 'dns' and (
-                len(arguments) == 1 or
-                (len(arguments) > 1 and arguments[1] in ('install', 'setup')
-                 and '--check' not in arguments) or
-                (len(arguments) > 2 and arguments[1] == 'record'
-                 and arguments[2] in ('add', 'delete') and '--apply' in arguments) or
-                (len(arguments) > 2 and arguments[1] == 'tsig'
-                 and arguments[2] == 'generate') or
-                (len(arguments) > 2 and arguments[1] == 'cloudflare'
-                 and arguments[2] in ('add', 'delete') and '--apply' in arguments)
-            )
-        )
-        mutating=(dns_sensitive or cmd in ('update','configure') or
+        # Sensitive configuration writes still use AUTOKOM's normal passphrase.
+        env_edit = (
+            (cmd=='runtime' and len(arguments)>=2 and arguments[1]=='env' and
+             (len(arguments)==2 or arguments[2] in ('setup','edit','delete'))) or
+            (cmd=='dns' and len(arguments)>=3 and arguments[1:3]==['cloudflare','env'] and
+             (len(arguments)==3 or arguments[3] in ('setup','edit','delete'))) or
+            (cmd=='app' and len(arguments)>=3 and arguments[1] in ('backend','frontend') and
+             arguments[2]=='env' and (len(arguments)==3 or arguments[3] in ('setup','edit','delete'))))
+        dns_write = cmd=='dns' and (len(arguments)==1 or
+            (len(arguments)==2 and arguments[1] in ('record','tsig','cloudflare')) or (
+            len(arguments)>1 and arguments[1] in ('install','setup') and '--check' not in arguments) or
+            (len(arguments)>2 and arguments[1] == 'record' and arguments[2] in ('add','delete') and '--apply' in arguments) or
+            (len(arguments)>2 and arguments[1] == 'tsig' and arguments[2] == 'generate') or
+            (len(arguments)>2 and arguments[1] == 'cloudflare' and arguments[2] in ('add','delete') and '--apply' in arguments))
+        mutating=(env_edit or dns_write or
+            (cmd=='domains' and '--apply' in arguments) or
             (cmd=='runtime' and '--apply' in arguments) or
+            (cmd in ('update','configure')) or
             (cmd=='app' and len(arguments)>1 and arguments[1] in ('setup','deploy') and '--check' not in arguments) or
             (cmd=='install' and '--check' not in arguments) or
             (cmd=='logs' and ('--apply' in arguments or (len(arguments)>1 and arguments[1]=='use'))) or
@@ -712,14 +714,16 @@ def main(argv=None):
             except SecurityError as exc:raise CLIError(str(exc)) from exc
     if arguments and arguments[0] == 'dns':
         from autokom_dns import main as dns_main, DNSError
-        try:
-            return dns_main(arguments[1:])
-        except DNSError as exc:
-            raise CLIError(str(exc)) from exc
+        try: return dns_main(arguments[1:])
+        except DNSError as exc: raise CLIError(str(exc)) from exc
     if arguments and arguments[0] == 'runtime':
         from autokom_runtime_admin import main as runtime_main, SetupError
         try: return runtime_main(arguments[1:])
         except SetupError as exc: raise CLIError(str(exc)) from exc
+    if arguments and arguments[0] == 'domains':
+        from autokom_domain_migration import main as domains_main, MigrationError
+        try: return domains_main(arguments[1:])
+        except MigrationError as exc: raise CLIError(str(exc)) from exc
     if arguments and arguments[0] == 'app':
         from autokom_app_manager import main as app_main, AppError
         try:

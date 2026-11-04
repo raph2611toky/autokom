@@ -50,7 +50,7 @@ Un endpoint **interne** existe : `GET /api/internal/runner/deployments/{run_id}/
 
 ## Réglages serveur à ajouter (jamais dans Git)
 
-Conserver `/etc/autokom/platform-backend.env` root:0600. Ne pas copier de vraies clés en conversation ni dans les archives.
+Conserver `/etc/autokom/secrets/backend.env` root:0600. Ne pas copier de vraies clés en conversation ni dans les archives.
 
 ```dotenv
 AUTOKOM_JENKINS_URL=http://127.0.0.1:8080

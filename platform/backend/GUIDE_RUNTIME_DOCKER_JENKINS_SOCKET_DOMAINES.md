@@ -21,7 +21,7 @@ Même avec un Docker rootless builder, des images clients non fiables partagent 
 3. **Jenkins Credentials** : `autokom-runner-key` (Secret Text, même clé que `AUTOKOM_RUNNER_SHARED_KEY` du backend), `autokom-github-app` (credential de lecture GitHub App). Ne jamais exposer le secret à une étape `docker build`.
 4. `AUTOKOM_API_BASE=https://backend.auto.ik0m.tech` et `AUTOKOM_ARTIFACT_DIR=/var/lib/autokom/build-artifacts` sont disponibles sur l'agent local. L'espace partagé ne doit pas être exposé sur HTTP.
 5. `platform/backend/.env` / fichier réel de service root:0600 ou root:autokom 0640 : `AUTOKOM_RUNNER_SHARED_KEY` (min 32 caractères), `AUTOKOM_CONTROL_SOCKET=/run/autokom/platform-control.sock` (optionnel, valeur par défaut). Pas de credentials Jenkins dans Django requis.
-6. Fichier séparé `/etc/autokom/platform-runtime.env` root:root 0600 pour le broker, basé sur `scripts/dev/platform-runtime.env.example`. **Ne jamais committer ce fichier.**
+6. Fichier séparé `/etc/autokom/secrets/runtime.env` root:root 0600 pour le broker, basé sur la commande `sudo autokom runtime env setup`. **Ne jamais committer ce fichier.**
 7. L'adresse publique AWS doit être **stable (Elastic IP)** pour les domaines. Ports 80/443 entrants configurés. Le port Docker privé n'est **jamais** ouvert dans Security Groups.
 8. Pour `ikom.mg`, attendre que dot.mg ait délégué la zone à Cloudflare. Pour des sous-domaines immédiatement utilisables, sélectionner uniquement une zone déjà active, par exemple sous `auto.ik0m.tech` si son compte Cloudflare est effectivement administré par IKOM.
 
@@ -37,8 +37,8 @@ Publier les modifications sur la branche `main`, puis sur Ubuntu :
 
 ```bash
 sudo autokom update
-sudo install -m 0600 -o root -g root scripts/dev/platform-runtime.env.example /etc/autokom/platform-runtime.env
-sudoedit /etc/autokom/platform-runtime.env
+sudo autokom runtime env setup
+sudo autokom runtime env edit
 sudo autokom runtime setup --check
 sudo autokom runtime setup --apply
 sudo autokom runtime jenkins --check

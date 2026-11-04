@@ -371,8 +371,8 @@ def _check_dns(host,token,managed):
 
 def _cloudflare_record(host):
     suffix=os.environ.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX','').strip('.').lower()
-    zone=os.environ.get('AUTOKOM_CLOUDFLARE_ZONE_ID','')
-    token=os.environ.get('AUTOKOM_CLOUDFLARE_TOKEN','')
+    zone=(os.environ.get('CLOUDFLARE_ZONE_ID') or os.environ.get('AUTOKOM_CLOUDFLARE_ZONE_ID',''))
+    token=(os.environ.get('CLOUDFLARE_API_TOKEN') or os.environ.get('AUTOKOM_CLOUDFLARE_TOKEN',''))
     if not suffix or not host.endswith('.'+suffix) or not re.fullmatch(r'[a-f0-9]{32}',zone) or not token:
         raise BrokerError('Gestion Cloudflare IKOM non configurée.')
     ingress=os.environ.get('AUTOKOM_INGRESS_IPV4','')

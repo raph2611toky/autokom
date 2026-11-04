@@ -27,9 +27,9 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / 'platform' / 'backend'
 CONFIG_DIR = Path('/etc/autokom')
-ENV_FILE = CONFIG_DIR / 'platform-backend.env'
+ENV_FILE = CONFIG_DIR / 'secrets' / 'backend.env'
 STATE_FILE = CONFIG_DIR / 'app-runtime.json'
-SOURCE_ENV_CANDIDATES = (Path('/etc/autokom/secrets/backend.env'), ENV_FILE)
+SOURCE_ENV_CANDIDATES = (ENV_FILE,)
 ANSIBLE_PLAYBOOK = ROOT / 'ansible/playbooks/platform-backend.yml'
 USER = 'autokom'
 SERVICE = 'autokom-backend'
@@ -295,7 +295,8 @@ ALLOWED_ENV_KEYS = {
 
 
 def secure_env_write(values):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(ENV_FILE.parent, 0o700)
     # Never copy arbitrary .env keys to systemd. Explicit whitelist prevents
     # accidental EnvironmentFile injection and stale/wrong runtime settings.
     allowed = ALLOWED_ENV_KEYS
@@ -551,7 +552,7 @@ def load_state():
 
 def django_env():
     if not ENV_FILE.is_file():
-        raise AppError('Configuration /etc/autokom/platform-backend.env manquante.')
+        raise AppError('Configuration /etc/autokom/secrets/backend.env manquante.')
     data = load_dotenv(ENV_FILE)
     env = dict(os.environ)
     env.update(data)
@@ -649,7 +650,7 @@ def verify_mysql_service_access():
         raise AppError(
             'MySQL inaccessible avec les identifiants du service Django. '
             'Vérifier DB_USER, DB_PASSWORD et DB_HOST dans '
-            '/etc/autokom/platform-backend.env, puis les droits utilisateur@hôte MySQL. '
+            '/etc/autokom/secrets/backend.env, puis les droits utilisateur@hôte MySQL. '
             'Ne pas créer de migrations ou modifier le mot de passe sans diagnostic. '
             f'Détails dans le journal : {_LIVE.log_path if _LIVE else "voir la sortie précédente"}'
         ) from exc
@@ -690,7 +691,7 @@ def doctor(args):
     print('  ◈ AUTOKOM · DIAGNOSTIC BACKEND')
     print('  Runtime :', state.get('runtime'))
     print('  Domaine :', state.get('domain'))
-    print('  Secrets : /etc/autokom/platform-backend.env (valeurs masquées)')
+    print('  Secrets : /etc/autokom/secrets/backend.env (valeurs masquées)')
     try:
         with operation('doctor'):
             _check_mysql_with_optional_repair(allow_repair=not args.no_repair)
@@ -1172,7 +1173,16 @@ def main(argv=None):
     log_p.add_argument('--lines', type=int, default=80)
     log_p.add_argument('--source', choices=['service', 'setup', 'deploy'], default='service',
                        help='Service Gunicorn ou journal détaillé de setup/deploy')
+    for env_kind in ('backend', 'frontend'):
+        env_p = sub.add_parser(env_kind, help='Configuration '+env_kind+' : env show/setup/edit/delete', add_help=False)
+        env_p.add_argument('backend_args', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    if args.action in ('backend','frontend'):
+        from autokom_env_manager import main as env_main, EnvError
+        if not args.backend_args or args.backend_args[0] != 'env':
+            raise AppError('Utiliser : autokom app '+args.action+' env [show|setup|edit|delete]')
+        try: return env_main(args.action,args.backend_args[1:])
+        except EnvError as exc: raise AppError(str(exc)) from exc
     if args.action == 'setup':
         if not args.domain and not args.yes and _is_interactive():
             args.wizard = True

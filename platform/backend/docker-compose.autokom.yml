@@ -6,7 +6,7 @@ services:
       dockerfile: Dockerfile.autokom
     restart: unless-stopped
     env_file:
-      - ${AUTOKOM_BACKEND_ENV_FILE:-/etc/autokom/platform-backend.env}
+      - ${AUTOKOM_BACKEND_ENV_FILE:-/etc/autokom/secrets/backend.env}
     environment:
       AUTOKOM_STATIC_ROOT: /app/staticfiles
       AUTOKOM_MEDIA_ROOT: /app/media

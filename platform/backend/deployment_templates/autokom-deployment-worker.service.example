@@ -9,7 +9,7 @@ Type=simple
 User=autokom
 Group=autokom
 WorkingDirectory=/opt/autokom/source/platform/backend
-EnvironmentFile=/etc/autokom/platform-backend.env
+EnvironmentFile=/etc/autokom/secrets/backend.env
 Environment=AUTOKOM_CONTROL_SOCKET=/run/autokom/platform-control.sock
 ExecStart=/opt/autokom/venv/bin/python manage.py autokom_deployment_worker --interval 5
 Restart=on-failure

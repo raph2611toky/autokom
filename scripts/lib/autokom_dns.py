@@ -556,6 +556,54 @@ def menu():
     return 0
 
 
+def pick_zone():
+    zones=[]
+    path=core.STATE_ROOT/'zones'
+    if path.is_dir():
+        zones=sorted(p.name[:-5] for p in path.glob('*.json'))
+    if not zones:raise DNSError('Aucune zone configurée : autokom dns setup.')
+    if len(zones)==1:return zones[0]
+    idx=choose('Sélectionner une zone',zones)
+    if not idx:raise DNSError('Annulé.')
+    return zones[idx-1]
+
+
+def record_menu():
+    choice=choose('Enregistrements DNS',[
+        'Lister les enregistrements','Ajouter un enregistrement','Supprimer un enregistrement','Annuler'])
+    if choice in (0,4):return 0
+    zone=pick_zone()
+    if choice==1:return bind_record(argparse.Namespace(action='list',zone=zone))
+    if choice==2:
+        kind_options=['A','AAAA','CNAME','MX','TXT']
+        index=choose('Type DNS',kind_options)
+        if not index:return 0
+        kind=kind_options[index-1]
+        return bind_record(argparse.Namespace(action='add',zone=zone,type=kind,
+            name=ask('Nom relatif à la zone', '@'),value=ask('Valeur DNS'),
+            ttl=300,priority=int(ask('Priorité MX','10')) if kind=='MX' else None,
+            check=False,apply=True,yes=False))
+    return bind_record(argparse.Namespace(action='delete',zone=zone,
+        index=int(ask('Index à supprimer')),check=False,apply=True,yes=False))
+
+
+def tsig_menu():
+    index=choose('Clé de transfert TSIG',['État de la clé','Générer si absente','Annuler'])
+    if index in (0,3):return 0
+    return tsig(argparse.Namespace(action='status' if index==1 else 'generate',
+                                    zone=pick_zone(),yes=False))
+
+
+def cloudflare_menu():
+    index=choose('Cloudflare', ['Enregistrements','Délégation NS',
+                                'Configuration API / secrets','Annuler'])
+    if index in (0,4):return 0
+    if index==3:
+        from autokom_env_manager import main as env_main
+        return env_main('cloudflare',[])
+    return cloudflare(argparse.Namespace(action='list' if index==1 else 'delegation'))
+
+
 def parse(argv=None):
     p = argparse.ArgumentParser(prog='autokom dns', description='Gestion DNS Cloudflare et BIND9 AUTOKOM')
     sub = p.add_subparsers(dest='cmd')
@@ -577,19 +625,20 @@ def parse(argv=None):
     sub.add_parser('list')
     sub.add_parser('environments')
     v = sub.add_parser('verify'); v.add_argument('--zone', default='infra.ikom.mg')
-    rec = sub.add_parser('record'); r = rec.add_subparsers(dest='action', required=True)
-    l = r.add_parser('list'); l.add_argument('--zone', required=True)
+    rec = sub.add_parser('record'); r = rec.add_subparsers(dest='action')
+    l = r.add_parser('list'); l.add_argument('--zone')
     a = r.add_parser('add'); a.add_argument('--zone', required=True)
     a.add_argument('--type', required=True); a.add_argument('--name', required=True); a.add_argument('--value', required=True)
     a.add_argument('--ttl', type=int, default=300); a.add_argument('--priority', type=int)
     d = r.add_parser('delete'); d.add_argument('--zone', required=True); d.add_argument('--index', type=int, required=True)
     for sp in (a,d):
         sp.add_argument('--check', action='store_true'); sp.add_argument('--apply', action='store_true'); sp.add_argument('--yes', action='store_true')
-    t = sub.add_parser('tsig'); ts = t.add_subparsers(dest='action', required=True)
+    t = sub.add_parser('tsig'); ts = t.add_subparsers(dest='action')
     for action in ('status','generate'):
-        x = ts.add_parser(action); x.add_argument('--zone', required=True)
+        x = ts.add_parser(action); x.add_argument('--zone')
         if action == 'generate': x.add_argument('--yes', action='store_true')
-    cl = sub.add_parser('cloudflare'); ca = cl.add_subparsers(dest='action', required=True)
+    cl = sub.add_parser('cloudflare'); ca = cl.add_subparsers(dest='action')
+    env = ca.add_parser('env', help='Configurer Cloudflare sans fichier exemple',add_help=False);env.add_argument('env_args',nargs=argparse.REMAINDER)
     ca.add_parser('list'); ca.add_parser('delegation')
     cr = ca.add_parser('add'); cr.add_argument('--zone', default='ikom.mg'); cr.add_argument('--name', required=True)
     cr.add_argument('--type', required=True); cr.add_argument('--value', required=True)
@@ -601,6 +650,11 @@ def parse(argv=None):
 
 
 def main(argv=None):
+    raw=list(sys.argv[1:] if argv is None else argv)
+    if raw[:2]==['cloudflare','env']:
+        from autokom_env_manager import main as env_main, EnvError
+        try:return env_main('cloudflare',raw[2:])
+        except EnvError as exc:raise DNSError(str(exc)) from exc
     args = parse(argv)
     try:
         if args.cmd is None: return menu()
@@ -610,9 +664,22 @@ def main(argv=None):
         if args.cmd == 'list': return list_zones()
         if args.cmd == 'environments': return list_zones(True)
         if args.cmd == 'verify': return verify(args)
-        if args.cmd == 'record': return bind_record(args)
-        if args.cmd == 'tsig': return tsig(args)
-        if args.cmd == 'cloudflare': return cloudflare(args)
+        if args.cmd == 'record':
+            if not args.action: return record_menu()
+            if not getattr(args,'zone',None):
+                args.zone = pick_zone()
+            return bind_record(args)
+        if args.cmd == 'tsig':
+            if not args.action: return tsig_menu()
+            if not getattr(args,'zone',None):args.zone=pick_zone()
+            return tsig(args)
+        if args.cmd == 'cloudflare':
+            if not args.action: return cloudflare_menu()
+            if args.action == 'env':
+                from autokom_env_manager import main as env_main, EnvError
+                try: return env_main('cloudflare',args.env_args)
+                except EnvError as exc: raise DNSError(str(exc)) from exc
+            return cloudflare(args)
         raise DNSError('Commande DNS inconnue.')
     except KeyboardInterrupt:
         print('\n  ! Opération annulée.')
