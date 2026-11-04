@@ -1,8 +1,13 @@
 from django.urls import path
-from apps.accounts.user import views, github_views
+from apps.accounts.user import views, github_views, browser_views
 
 app_name = 'client_accounts'
 urlpatterns = [
+    path('browser/csrf/', browser_views.BrowserCSRFAPIView.as_view(), name='browser-csrf'),
+    path('browser/login/', browser_views.BrowserLoginAPIView.as_view(), name='browser-login'),
+    path('browser/refresh/', browser_views.BrowserRefreshAPIView.as_view(), name='browser-refresh'),
+    path('browser/logout/', browser_views.BrowserLogoutAPIView.as_view(), name='browser-logout'),
+    path('browser/github/exchange/', browser_views.BrowserGitHubExchangeAPIView.as_view(), name='browser-github-exchange'),
     path('github/start/', github_views.GitHubLoginStartAPIView.as_view(), name='github-login-start'),
     path('github/link/start/', github_views.GitHubLinkStartAPIView.as_view(), name='github-link-start'),
     path('github/callback/', github_views.GitHubLoginCallbackAPIView.as_view(), name='github-login-callback'),

@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
 import { ArrowRight, Check, Eye, EyeOff } from 'lucide-react'
 import AuthFrame from '../components/AuthFrame.jsx'
+import { API_AVAILABLE } from '../config/runtime.js'
+import { authApi } from '../services/authApi.js'
 import '../styles/auth.css'
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -11,6 +13,7 @@ export default function Register({ navigate, theme, onToggleTheme }) {
   const [visible, setVisible] = useState(false)
   const [touched, setTouched] = useState({})
   const [notice, setNotice] = useState('')
+  const [busy, setBusy] = useState(false)
   const checks = useMemo(() => [
     { label: '12 caractères', ok: form.password.length >= 12 },
     { label: 'Majuscule et minuscule', ok: /[A-Z]/.test(form.password) && /[a-z]/.test(form.password) },
@@ -30,20 +33,29 @@ export default function Register({ navigate, theme, onToggleTheme }) {
     setNotice('')
   }
   function blur(key) { setTouched(current => ({ ...current, [key]: true })) }
-  function submit(event) {
+  async function submit(event) {
     event.preventDefault()
     setTouched({ name: true, email: true, password: true, confirm: true, consent: true })
     if (Object.values(errors).some(Boolean)) {
       setNotice('Vérifiez les champs signalés avant de continuer.')
       return
     }
-    setForm(current => ({ ...current, password: '', confirm: '' }))
-    navigate('/deploy')
+    if (!API_AVAILABLE) {
+      setForm(current => ({ ...current, password: '', confirm: '' }))
+      navigate('/deploy')
+      return
+    }
+    setBusy(true)
+    try {
+      await authApi.register({ fullName: form.name.trim(), email: form.email.trim(), password: form.password, passwordConfirm: form.confirm })
+      setNotice('Compte créé. Consultez votre e-mail pour vérifier votre adresse, puis connectez-vous.')
+    } catch (error) { setNotice(error?.message || 'Inscription impossible.') }
+    finally { setForm(current => ({ ...current, password: '', confirm: '' })); setBusy(false) }
   }
 
   return (
     <AuthFrame kind="register" navigate={navigate} theme={theme} onToggleTheme={onToggleTheme}
-      title="Créer un compte." subtitle="Testez le formulaire et continuez vers les projets, sans création de compte réel.">
+      title="Créer un compte." subtitle={API_AVAILABLE ? 'Créez votre compte et confirmez votre adresse e-mail.' : 'Testez le formulaire et continuez vers les projets, sans création de compte réel.'}>
       <form className="auth-ui-form auth-ui-register-form" onSubmit={submit} noValidate>
         <label className="auth-ui-field">
           <span>Nom complet</span>
@@ -93,10 +105,10 @@ export default function Register({ navigate, theme, onToggleTheme }) {
         </label>
         {touched.consent && errors.consent && <p className="auth-ui-error auth-ui-full">{errors.consent}</p>}
         {notice && <p className="auth-ui-notice auth-ui-full" role="status">{notice}</p>}
-        <button type="submit" className="auth-ui-primary auth-ui-full" >Créer mon compte <ArrowRight size={19}/></button>
+        <button type="submit" className="auth-ui-primary auth-ui-full" disabled={busy}>Créer mon compte <ArrowRight size={19}/></button>
       </form>
       <p className="auth-ui-switch">Vous avez déjà un compte ? <button type="button" onClick={() => navigate('/login')}>Se connecter</button></p>
-      <button type="button" className="auth-ui-explore" onClick={() => navigate('/deploy')}>Configurer un projet <ArrowRight size={15}/></button>
+      <button type="button" className="auth-ui-explore" onClick={() => navigate(API_AVAILABLE ? '/login' : '/deploy')}>Configurer un projet <ArrowRight size={15}/></button>
     </AuthFrame>
   )
 }

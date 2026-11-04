@@ -28,7 +28,12 @@ class FrontendManagerTests(unittest.TestCase):
         self.assertIn('proxy_pass http://127.0.0.1:8172;', text)
         self.assertIn('proxy_set_header Host backend.auto.ik0m.tech;', text)
         self.assertNotIn('proxy_pass http://56.', text)
-        self.assertIn('/var/www/autokom/frontend/current', text)
+        self.assertNotIn('/var/www/', text)
+        self.assertEqual(fm.RELEASES, Path('/opt/autokom/frontend/releases'))
+        self.assertIn('proxy_no_cache 1;', text)
+        self.assertIn('location ^~ /api/internal/ { return 404; }', text)
+        self.assertIn('Content-Security-Policy', text)
+        self.assertIn('/opt/autokom/frontend/current', text)
 
     def test_setup_check_no_writes(self):
         args = __import__('argparse').Namespace(domain='auto.ik0m.tech', backend_domain='backend.auto.ik0m.tech',
@@ -50,6 +55,18 @@ class FrontendManagerTests(unittest.TestCase):
     def test_release_id_restricted(self):
         for value in ('../../root', '20261104T142200Z-12345678/../', 'abcdef'):
             self.assertIsNone(fm.RELEASE_ID.fullmatch(value))
+
+    def test_default_cookie_auth_env_remains_valid_for_old_env_files(self):
+        import types
+        import sys
+        old = {'VITE_AUTOKOM_API_BASE': '/api',
+               'VITE_AUTOKOM_FRONTEND_ONLY': 'false',
+               'VITE_AUTOKOM_API_ENABLED': 'true',
+               'VITE_AUTOKOM_GITHUB_ENABLED': 'false'}
+        env_module = types.SimpleNamespace(read_env=lambda _: old)
+        with mock.patch.dict(sys.modules, {'autokom_env_manager': env_module}):
+            result = fm.build_environment(fm.FRONTEND)
+        self.assertEqual(result['VITE_AUTOKOM_AUTH_MODE'], 'cookie')
 
     def test_source_and_lock_consistent(self):
         fm.ensure_source()

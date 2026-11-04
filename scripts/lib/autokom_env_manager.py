@@ -28,7 +28,7 @@ SAFE_KEYS = {
     'cloudflare': ('CLOUDFLARE_ZONE_ID', 'CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ZONE_NAME'),
     'frontend': ('FRONTEND_URL', 'BACKEND_URL', 'VITE_AUTOKOM_API_BASE',
                  'VITE_AUTOKOM_FRONTEND_ONLY', 'VITE_AUTOKOM_API_ENABLED',
-                 'VITE_AUTOKOM_GITHUB_ENABLED'),
+                 'VITE_AUTOKOM_GITHUB_ENABLED', 'VITE_AUTOKOM_AUTH_MODE'),
 }
 SENSITIVE = re.compile(r'(PASSWORD|SECRET|TOKEN|KEY|PASS|PRIVATE|CREDENTIAL|AUTH)', re.I)
 _KEY = re.compile(r'^[A-Z][A-Z0-9_]{1,90}$')
@@ -155,10 +155,15 @@ def discover():
     return found
 
 
+def _is_sensitive(key):
+    return key != 'VITE_AUTOKOM_AUTH_MODE' and bool(SENSITIVE.search(key))
+
+
 def _default(kind,key,existing):
     if key in existing:return existing[key]
     found=discover()
     if key in found:return found[key]
+    if key=='VITE_AUTOKOM_AUTH_MODE':return 'cookie'
     if key=='AUTOKOM_MANAGED_DOMAIN_SUFFIX': return 'apps.ikom.mg'
     if key=='AUTOKOM_ACME_EMAIL':return ''
     if key=='CLOUDFLARE_ZONE_NAME':return 'ikom.mg'
@@ -166,7 +171,7 @@ def _default(kind,key,existing):
 
 
 def _prompt(key, default=''):
-    if SENSITIVE.search(key):
+    if _is_sensitive(key):
         entered=getpass.getpass('  🔒 '+key+' (masqué, Entrée pour conserver) : ')
         return entered or default
     visible='[détecté]' if default else '[à renseigner]'
@@ -192,6 +197,8 @@ def _validate(kind,values):
         for name in ('VITE_AUTOKOM_FRONTEND_ONLY','VITE_AUTOKOM_API_ENABLED','VITE_AUTOKOM_GITHUB_ENABLED'):
             if name in values and values[name] not in ('true','false'):
                 raise EnvError('Valeur booléenne invalide : '+name)
+        if values.get('VITE_AUTOKOM_AUTH_MODE', 'cookie') not in ('cookie', 'bearer'):
+            raise EnvError('Mode authentification frontend invalide (cookie ou bearer).')
         if values.get('VITE_AUTOKOM_API_BASE', '/api') != '/api':
             raise EnvError('La base API doit être /api (proxy Nginx).')
         if values.get('VITE_AUTOKOM_GITHUB_ENABLED','false') == 'true':
@@ -259,7 +266,7 @@ def show(kind):
     print('  › Fichier :',file_path(kind))
     if not data:print('  › Non configuré · utiliser « setup ».');return 0
     for k,v in sorted(data.items()):
-        state='•••••• (configuré)' if SENSITIVE.search(k) and v else ('vide' if not v else v[:95])
+        state='•••••• (configuré)' if _is_sensitive(k) and v else ('vide' if not v else v[:95])
         print(f'  \033[32m✓\033[0m {k:<36} {state}')
     return 0
 

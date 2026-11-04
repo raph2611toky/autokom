@@ -15,6 +15,7 @@ pipeline {
     VITE_AUTOKOM_FRONTEND_ONLY = 'false'
     VITE_AUTOKOM_API_ENABLED = 'true'
     VITE_AUTOKOM_GITHUB_ENABLED = 'false'
+    VITE_AUTOKOM_AUTH_MODE = 'cookie'
   }
   stages {
     stage('Source contrôlée') {

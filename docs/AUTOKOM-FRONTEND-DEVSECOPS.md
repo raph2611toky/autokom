@@ -1,107 +1,126 @@
-# AUTOKOM — Frontend React/Vite, reverse proxy et publication DevSecOps
+# AUTOKOM — Frontend React/Vite et authentification par cookies (novembre 2026)
 
-**État :** correctif préparé à partir de l'archive du 04/11/2026, non déployé sur AWS.
-Le code des pages, composants, styles, ressources et arborescence React est conservé tel quel.
+**État : patch à intégrer après le commit `c35fd0a` sur Kali. Ne rien appliquer sur AWS avant revue.** Le visuel du frontend statique reste inchangé : `src/styles/**`, les illustrations et les composants métier du pipeline ne sont pas remplacés. Les nouveaux écrans de validation de compte / récupération de mot de passe utilisent `AuthFrame` et les classes CSS existantes.
 
-## 1. Avant toute application
+## 1. Arborescence AUTOKOM (pas de /var/www)
 
-1. Sauvegarder les fichiers Nginx existants et les éventuelles releases du site `auto.ik0m.tech`.
-2. Vérifier `nginx -T` et relever tout `server_name auto.ik0m.tech`. Le setup **refuse tout écrasement d'un vhost tiers**.
-3. Vérifier que `backend.auto.ik0m.tech` est servi par Django, idéalement sur le même hôte, et que `backend.env` contient les bonnes valeurs `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`, `FRONTEND_URL`.
-4. Avoir Node.js >=20.19 ou >=22.12, npm, Nginx, Certbot (si mode certbot), Semgrep, Trivy. Node/npm doivent être disponibles dans le `PATH` système pour le compte builder (ex. `/usr/bin`), pas uniquement dans un nvm root inaccessible.
-5. Un agent Jenkins `linux-devsecops` doit exister avec Node, npm, Semgrep et Trivy, mais **sans accès root ni écriture au vhost**.
-6. Mettre le code dans une branche de revue, lancer tests et pipeline, puis approuver la PR avant `autokom update`.
+```text
+/opt/autokom/source/                 source du logiciel et de la CLI existante
+/opt/autokom/frontend/
+  releases/                          builds Vite versionnés, sans code source
+  current -> releases/<ID_RELEASE>    lien atomique publié par Nginx
+/var/lib/autokom/frontend/builds/    compilations éphémères non privilégiées
+/var/lib/autokom/frontend/npm-cache/ cache npm du builder
+/etc/autokom/secrets/frontend.env     options publiques du build (fichier root 0600)
+/etc/autokom/secrets/backend.env      secrets Django inchangés (root 0600)
+```
 
-## 2. Configuration / prévisualisation
+Nginx `root /opt/autokom/frontend/current;`, `location /api/` relaie vers Gunicorn `127.0.0.1:<port>` avec `Host: backend.auto.ik0m.tech`, `X-Forwarded-Proto` et cookies HTTP ordinaires (pas de réécriture de cookie Domain/Path). Le site React est exposé en HTTPS sous `auto.ik0m.tech`. Les cookies sans `Domain` appartiennent au domaine du navigateur qui reçoit la réponse proxifiée ; **ne pas faire appeler directement `backend.auto.ik0m.tech` depuis React**.
 
-Sur AWS, après intégration du patch :
+Le setup refuse les configurations Nginx étrangères et les anciens vhosts HTTPS contenant une racine différente. **Ne jamais remplacer un vhost existant sans vérification de `nginx -T`.** Si un site a déjà été déployé sous `/var/www/autokom/frontend`, migrer son vhost et ses releases dans une fenêtre de maintenance, avec sauvegarde et rollback, sans écraser les fichiers.
+
+## 2. Sessions navigateur : contrat réel Django
+
+| Méthode | Endpoint vu par React | But | Secrets dans la réponse JSON ? |
+|---|---|---|---|
+| GET | `/api/auth/browser/csrf/` | Délivrer le cookie `csrftoken` | Non |
+| POST | `/api/auth/browser/login/` | Identifiants, émission des cookies | Non |
+| GET | `/api/auth/me/` | Restaurer la session et le profil | Non |
+| POST | `/api/auth/browser/refresh/` | Rotation du refresh en cookie | Non |
+| POST | `/api/auth/browser/logout/` | Révoquer session active + supprimer cookies | Non |
+| POST | `/api/auth/logout-all/` | Révoquer toutes les sessions | Non |
+| POST | `/api/auth/register/` | Créer le compte | Non |
+| POST | `/api/auth/email/verify/` | Activer le compte après e-mail | Non |
+| POST | `/api/auth/password/forgot/` | Demande non énumérante de lien de récupération | Non |
+| POST | `/api/auth/password/reset/` | Changer mot de passe depuis lien signé | Non |
+
+Deux cookies de session sont posés **par Django** : `autokom_access` (`Path=/api/`, 15 min par défaut) et `autokom_refresh` (`Path=/api/auth/browser/`, 7 jours par défaut). Attributs : `HttpOnly`, `Secure` en production, `SameSite=Lax`, aucun `Domain`. Le cookie `csrftoken` est distinct, `Secure` en production, sans `HttpOnly` pour autoriser `X-CSRFToken` dans les requêtes de modification. **JavaScript ne lit aucun JWT.**
+
+Le client `src/services/api.js` applique `credentials: 'same-origin'`, le `X-CSRFToken`, les erreurs API, un seul renouvellement pour 401 et un mécanisme de coordination des refresh entre onglets via Web Locks lorsqu'il est disponible. Sur navigateur sans Web Locks, seule la synchronisation des requêtes d'un même onglet est garantie : tester les sessions multi-onglets avant ouverture au public.
+
+La couche Django `ClientCookieJWTAuthentication` accepte les cookies sur tous les endpoints client qui demandent une authentification et applique CSRF **même aux écritures**. Les endpoints `/browser/login/`, `/browser/refresh/`, `/browser/logout/`, `/browser/github/exchange/` exigent le CSRF même anonymes. Les endpoints JWT Bearer historiques sont conservés : `/api/auth/login/`, `/api/auth/token/refresh/` et `Authorization: Bearer` continuent de fonctionner, sans définir de cookies.
+
+### Configuration backend (déjà en place, à vérifier)
+
+```text
+DEBUG=False
+ALLOWED_HOSTS=backend.auto.ik0m.tech,127.0.0.1,localhost,...
+FRONTEND_URL=https://auto.ik0m.tech
+CSRF_TRUSTED_ORIGINS=https://auto.ik0m.tech,https://backend.auto.ik0m.tech,...
+TRUST_PROXY_SSL_HEADER=true
+SECURE_SSL_REDIRECT=true
+```
+
+Les clés JWT et Django restent exclusivement dans `backend.env`. Ne pas mettre `CLIENT_JWT_SIGNING_KEY`, `DJANGO_SECRET_KEY`, `GITHUB_APP_CLIENT_SECRET`, la clé Jenkins ou Cloudflare dans le frontend.
+
+## 3. Mode démonstration et mode API
+
+| Variable `/etc/autokom/secrets/frontend.env` | Production | Fonction |
+|---|---|---|
+| `FRONTEND_URL` | `https://auto.ik0m.tech` | Domaine public React |
+| `BACKEND_URL` | `https://backend.auto.ik0m.tech` | Hôte logique Django (proxy loopback) |
+| `VITE_AUTOKOM_API_BASE` | `/api` | Chemins relatifs uniquement |
+| `VITE_AUTOKOM_FRONTEND_ONLY` | `false` | `true` conserve la présentation statique |
+| `VITE_AUTOKOM_API_ENABLED` | `true` | `false` désactive le parcours réel |
+| `VITE_AUTOKOM_AUTH_MODE` | `cookie` | `cookie` recommandé ; `bearer` pour compatibilité |
+| `VITE_AUTOKOM_GITHUB_ENABLED` | `false` | Le sélecteur GitHub actuel reste de démonstration |
+
+Le mode **frontend-only** conserve le login fictif, les brouillons locaux, le simulateur de pipeline, les modes DevOps et DevSecOps et le thème. En mode **API**, Login/Register appellent Django ; le profil est chargé au rechargement, les pages projets/déploiement nécessitent une session. **Les dépôts GitHub simulés et le parcours de pipeline statique ne déclenchent toujours pas de déploiement réel.** Le branchement métier à GitHub App et aux déploiements doit être fait séparément, écran par écran, sans confondre maquette et production.
+
+Dossiers/API ajoutés sans modifier les CSS existants : `src/services/api.js`, `authApi.js`, `projectsApi.js`, `deploymentsApi.js` et `src/context/AuthContext.jsx`. Les nouvelles pages utilisent `AuthFrame` sans nouveau système de styles.
+
+Le module hérité `src/config/projectAnalysisApi.js` contient des routes fantômes non implémentées dans Django et n'est pas appelé par l'interface actuelle. Ne pas l'utiliser pour lancer un vrai déploiement ; la liaison effective devra utiliser les APIs projet/environnement/déploiement existantes (création puis `GET deployments/preview/`, puis `POST deployments/launch/` avec `Idempotency-Key`). Le fichier `supabaseClient.js` est lui aussi hérité, non importé par l'application actuelle ; il ne doit pas être réintroduit comme mécanisme d'auth concurrent.
+
+## 4. Préparation locale et tests AVANT le serveur
+
+```bash
+cd ~/SOUTENANCE/AUTOKOM
+git status --short
+# À partir du commit c35fd0a et d'un worktree propre :
+git apply --check ~/Downloads/AUTOKOM_Frontend_Cookies_Opt_2026-11-04.patch
+git apply ~/Downloads/AUTOKOM_Frontend_Cookies_Opt_2026-11-04.patch
+npm --prefix platform/frontend test
+PYTHONPATH=scripts/lib python3 -m unittest discover -s tests -p test_autokom_frontend_manager.py -v
+python3 -m compileall -q platform/backend/apps/accounts/user scripts/lib
+npm --prefix platform/frontend ci --ignore-scripts
+npm --prefix platform/frontend run build
+# Django test DB isolée, avec dépendances + MySQL de test configurés :
+cd platform/backend && python manage.py test apps.accounts.user.test_browser_auth
+```
+
+Ne pas activer ce mode tant que les tests Django avec CSRF `enforce_csrf_checks` et les tests d'intégration HTTPS ne passent pas. Le pipeline Jenkins backend actuel exécute déjà `python manage.py test` avec une base MySQL dédiée ; le pipeline frontend inclut le mode cookie dans le build, tests Node, npm audit, Semgrep, Trivy.
+
+## 5. Après revue et seulement ensuite sur AWS
 
 ```bash
 sudo autokom update
+sudo autokom app frontend env show
 sudo autokom app frontend setup \
   --domain auto.ik0m.tech \
   --backend-domain backend.auto.ik0m.tech \
-  --nginx-mode managed \
-  --tls-mode certbot \
-  --email exemple@domaine.tld \
-  --check
+  --nginx-mode managed --tls-mode certbot \
+  --email VOTRE_EMAIL --check
+# Après contrôle Nginx, DNS, Certbot et sauvegarde :
+sudo autokom app frontend setup --domain auto.ik0m.tech \
+  --backend-domain backend.auto.ik0m.tech --nginx-mode managed \
+  --tls-mode certbot --email VOTRE_EMAIL --apply
+sudo autokom app frontend deploy --check
+sudo autokom app frontend deploy --apply
+sudo autokom app frontend status
 ```
 
-Si `auto.ik0m.tech` est **déjà** desservi par un vhost Nginx non géré, choisir `--nginx-mode existing --tls-mode existing` et préparer **manuellement** le root `/var/www/autokom/frontend/current` ainsi que le proxy `location /api/` dans ce vhost. La commande ne l'écrase pas et ne promet pas de faire le routage à sa place. Pour migrer un site déjà actif vers un vhost géré, faire une revue de configuration et une bascule planifiée : ne pas supprimer le vhost existant à l'aveugle.
+Si le vhost `auto.ik0m.tech` est déjà géré manuellement, utiliser `--nginx-mode existing --tls-mode existing` après revue manuelle du vhost et des permissions `/opt/autokom/frontend`. L'option `existing` ne modifie pas le vhost.
 
-En mode géré, vérifier DNS A/AAAA, ports 80/443, et accès ACME ; Certbot modifie exclusivement le vhost dédié frontend. Le TLS de l'origine doit rester valide même avec Cloudflare en mode Full (strict).
-
-Pour appliquer, remplacer `--check` par `--apply`. Ne jamais utiliser `--tls-mode existing` avec un vhost HTTP géré comme substitut silencieux à HTTPS.
-
-Le setup crée `/etc/autokom/secrets/frontend.env` (0600 root) en préservant les autres variables, provisionne un compte Linux **sans privilège** `autokom-frontend-builder`, prépare les répertoires des releases et, en mode géré, écrit le vhost isolé.
-
-## 3. Variables d'environnement
-
-`sudo autokom app frontend env show` affiche la configuration ; `sudo autokom app frontend env edit` permet de la modifier. Fichier : `/etc/autokom/secrets/frontend.env`.
-
-| Variable | Valeur attendue | Rôle |
-|---|---|---|
-| `FRONTEND_URL` | `https://auto.ik0m.tech` | Domaine public React |
-| `BACKEND_URL` | `https://backend.auto.ik0m.tech` | Nom d'hôte de Django |
-| `VITE_AUTOKOM_API_BASE` | `/api` | API relative, même origine via Nginx |
-| `VITE_AUTOKOM_FRONTEND_ONLY` | `false` | Déclare que le backend existe |
-| `VITE_AUTOKOM_API_ENABLED` | `true` | Active les fondations API |
-| `VITE_AUTOKOM_GITHUB_ENABLED` | `false` | Reste désactivé tant que GitHubConnector est simulé |
-
-**Interdit dans `VITE_*` :** secrets Django, clés AES, tokens GitHub/Jenkins/Cloudflare, SMTP, mots de passe MySQL. Les variables `VITE_*` sont intégrées dans `dist/assets/*.js` et donc publiques.
-
-La configuration backend **n'est pas déplacée** dans le frontend. Les jetons clients JWT sont passés en Bearer via `src/services/api.js`, stockés uniquement en mémoire. Il n'y a pas encore de persistance/session durable : à traiter à l'intégration des formulaires réels (stratégie BFF ou cookies HttpOnly côté serveur). Aucun faux login n'est transformé en authentification réelle dans ce patch.
-
-## 4. Tests et déploiement
+### Smoke tests après publication
 
 ```bash
-sudo autokom app frontend deploy --check  # npm ci + tests + npm audit + Semgrep + Trivy + Vite
-sudo autokom app frontend deploy --apply  # même contrôles, puis bascule atomique
-sudo autokom app frontend status
-sudo autokom app frontend logs --source error --lines 50
-curl -i https://auto.ik0m.tech/__autokom/health
+curl -I https://auto.ik0m.tech/
 curl -i https://auto.ik0m.tech/api/health/
-```
-
-Le contrôle `--check` crée des fichiers **temporaires de build**, mais ne publie pas de release et ne modifie pas le vhost actif. Le `--apply` installe un artefact versionné puis change `current` par remplacement atomique. Les sorties de `npm audit`, Semgrep et Trivy bloquent le déploiement sur échec. Si les scans réclament une connexion Internet, le réseau sortant du builder doit permettre les endpoints de confiance ; on ne désactive pas les scans pour contourner une panne réseau.
-
-La commande `sudo autokom app frontend status` vérifie la cohérence du symlink et du fichier index, mais ne remplace pas un test public HTTP/TLS ni un smoke test fonctionnel.
-
-Pour revenir à la dernière release connue :
-
-```bash
-sudo autokom app frontend rollback --check
-sudo autokom app frontend rollback --apply
-```
-
-On peut aussi choisir un identifiant de release autorisé via `--to ID`. Le rollback concerne uniquement l'artefact React ; il **n'annule pas** les migrations MySQL ni un déploiement backend.
-
-## 5. Jenkins / DevSecOps
-
-Pipeline défini par `pipelines/autokom-frontend/Jenkinsfile` :
-checkout revu → `npm ci --ignore-scripts` → tests → `npm audit` → Semgrep → Trivy → build Vite → contrôle d'artefact → archivage du build.
-
-Ce pipeline **ne publie pas directement** sur `/var/www` et n'a pas de secret privilégié. La mise en production est commandée explicitement par AUTOKOM après approbation. Pour atteindre la provenance complète, ajouter ultérieurement attestations SBOM et signatures des artefacts, ainsi qu'un lien vérifié entre commit CI approuvé et code que `autokom app frontend deploy` reconstruit.
-
-## 6. Frontend actuel / fonctionnalités à connecter ensuite
-
-- `Login.jsx`, `Register.jsx`, `GitHubConnector.jsx`, `Deploy.jsx` : parcours de démonstration inchangé.
-- `src/services/api.js` : client JSON central, base `/api`, Bearer JWT non persistant, gestion d'erreurs.
-- `src/services/authApi.js` : fonctions disponibles pour `/api/auth/register/`, `/api/auth/login/`, `/api/auth/me/` et `/api/auth/logout-all/`. Les composants ne les appellent pas encore.
-- `src/config/githubApi.js` : module de compatibilité ; **ne représente pas** une connexion GitHub achevée.
-- `src/config/projectAnalysisApi.js` contient encore des routes `/api/v1` et des endpoints non implémentés par le backend courant ; il n'est pas utilisé dans le parcours actuel. Le migrer lors du raccordement métier, sans inventer d'endpoint.
-- `src/services/supabaseClient.js` est un fichier hérité non importé par le bundle actuel ; aucune dépendance Supabase n'a été ajoutée, car l'authentification de référence est le backend Django. Sa migration/suppression est à décider séparément.
-
-## 7. Contrôles utiles avant mise en production
-
-```bash
+curl -i -c /tmp/autokom-csrf.cookies https://auto.ik0m.tech/api/auth/browser/csrf/
 sudo nginx -t
-sudo nginx -T | grep -n -E 'server_name (auto\.ik0m\.tech|backend\.auto\.ik0m\.tech)'
-node --version
-npm --version
-semgrep --version
-trivy --version
 sudo autokom app frontend status
 ```
 
-**Points non démontrés localement :** installation npm complète, qualité des scanners sur toutes les dépendances, validité ACME, routage Cloudflare, healthcheck Django distant, cohérence de l'agent Jenkins et cohérence des permissions AWS. Effectuer le pilote avant utilisation client réelle.
+Vérifier via DevTools que le CSRF apparaît et que **les JWT sont uniquement dans les cookies HttpOnly**, jamais dans `Local Storage`, `Session Storage`, les réponses JSON de connexion ou les URL. Exercer inscription, lien e-mail, connexion, rechargement, expiration access/refresh, changement de mot de passe, déconnexion, navigation directe `/projects`, rollback.
+
+**Limites de ce patch :** aucun déploiement AWS réalisé ; le cycle frontend React n'a pas été raccordé aux vrais dépôts GitHub ni à l'action Jenkins. Les tests Django dépendent de l'environnement Python/MySQL et doivent être validés en CI avant mise en production. Les tests Node de logique et les tests de CLI peuvent s'exécuter sans AWS.

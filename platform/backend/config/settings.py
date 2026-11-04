@@ -117,7 +117,10 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': ['apps.accounts.user.authentication.ClientJWTAuthentication'],
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'apps.accounts.user.authentication.ClientJWTAuthentication',
+        'apps.accounts.user.authentication.ClientCookieJWTAuthentication',
+    ],
     'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
     'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
     'EXCEPTION_HANDLER': 'helpers.errors.global_api_exception_handler',
@@ -184,6 +187,9 @@ SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SECURE = not DEBUG
 SESSION_COOKIE_SAMESITE = 'Lax'
 CSRF_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_HTTPONLY = False  # CSRF double-submit via X-CSRFToken, jamais le JWT.
+CSRF_COOKIE_SAMESITE = 'Lax'
+CLIENT_BROWSER_COOKIE_SECURE = not DEBUG
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
 SECURE_REFERRER_POLICY = 'strict-origin-when-cross-origin'

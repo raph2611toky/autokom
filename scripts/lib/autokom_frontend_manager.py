@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FRONTEND = ROOT / 'platform/frontend'
 SECRETS = Path('/etc/autokom/secrets/frontend.env')
 STATE = Path('/etc/autokom/frontend-deployment.json')
-RELEASES = Path('/var/www/autokom/frontend/releases')
+RELEASES = Path('/opt/autokom/frontend/releases')
 CURRENT = RELEASES.parent / 'current'
 BUILDS = Path('/var/lib/autokom/frontend/builds')
 NPM_CACHE = Path('/var/lib/autokom/frontend/npm-cache')
@@ -130,7 +130,7 @@ server {{
     listen 80;
     listen [::]:80;
     server_name {front};
-    root /var/www/autokom/frontend/current;
+    root /opt/autokom/frontend/current;
     index index.html;
     server_tokens off;
     access_log /var/log/nginx/autokom-frontend.access.log;
@@ -139,7 +139,10 @@ server {{
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header X-Frame-Options "DENY" always;
     location = /__autokom/health {{ access_log off; add_header Cache-Control "no-store"; return 200 "autokom-frontend-ok\\n"; }}
+    # La console frontend n'expose pas le manifeste interne du runner.
+    location ^~ /api/internal/ {{ return 404; }}
     location ^~ /api/ {{
+        client_max_body_size 16m;
         proxy_pass http://127.0.0.1:{port};
         proxy_set_header Host {back};
         proxy_set_header X-Real-IP $remote_addr;
@@ -150,6 +153,10 @@ server {{
         proxy_read_timeout 90s;
         proxy_redirect off;
         add_header Cache-Control "no-store" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
     }}
     location ~* \\.(?:js|css|webp|png|jpg|jpeg|svg|ico|woff2?)$ {{
         try_files $uri =404;
@@ -158,7 +165,12 @@ server {{
     }}
     location / {{
         try_files $uri $uri/ /index.html;
-        add_header Cache-Control "no-cache";
+        add_header Cache-Control "no-cache" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header X-Frame-Options "DENY" always;
+        # Les polices Google sont déjà présentes dans les styles actuels.
+        add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com" always;
     }}
     location ~ /\\. {{ deny all; }}
 }}
@@ -215,7 +227,7 @@ def setup(args):
         if VHOST.exists() and 'listen 443 ssl' in VHOST.read_text(encoding='utf-8'):
             current = VHOST.read_text(encoding='utf-8')
             if (f'server_name {front};' not in current or
-                '/var/www/autokom/frontend/current' not in current or
+                '/opt/autokom/frontend/current' not in current or
                 'location ^~ /api/' not in current):
                 raise FrontendError('Vhost TLS géré différent : corriger manuellement avant setup.')
     if not args.apply:
@@ -228,11 +240,13 @@ def setup(args):
         raise FrontendError('Certbot indisponible.')
     builder_prepare()
     RELEASES.mkdir(parents=True, exist_ok=True)
+    RELEASES.parent.chmod(0o755)
     RELEASES.chmod(0o755)
     from autokom_env_manager import read_env, write_env, backup, _validate
     values = read_env(SECRETS)
     values.update({'FRONTEND_URL': f'https://{front}', 'BACKEND_URL': f'https://{back}'})
     values.setdefault('VITE_AUTOKOM_API_BASE', '/api')
+    values.setdefault('VITE_AUTOKOM_AUTH_MODE', 'cookie')
     values.setdefault('VITE_AUTOKOM_FRONTEND_ONLY', 'false')
     values.setdefault('VITE_AUTOKOM_API_ENABLED', 'true')
     values.setdefault('VITE_AUTOKOM_GITHUB_ENABLED', 'false')  # le sélecteur GitHub est simulé
@@ -279,10 +293,12 @@ def build_environment(source):
     allowed = {'VITE_AUTOKOM_FRONTEND_ONLY': {'true', 'false'},
                'VITE_AUTOKOM_API_ENABLED': {'true', 'false'},
                'VITE_AUTOKOM_GITHUB_ENABLED': {'true', 'false'},
-               'VITE_AUTOKOM_API_BASE': {'/api'}}
+               'VITE_AUTOKOM_API_BASE': {'/api'},
+               'VITE_AUTOKOM_AUTH_MODE': {'cookie', 'bearer'}}
     public = {}
     for key, accepted in allowed.items():
-        value = values.get(key, '/api' if key.endswith('_BASE') else 'false')
+        defaults = {'VITE_AUTOKOM_API_BASE': '/api', 'VITE_AUTOKOM_AUTH_MODE': 'cookie'}
+        value = values.get(key, defaults.get(key, 'false'))
         if value not in accepted:
             raise FrontendError('Configuration Vite invalide : '+key)
         public[key] = value

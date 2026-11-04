@@ -1,5 +1,7 @@
 import { BadgePercent, FolderKanban, Globe2, LogOut, Rocket } from 'lucide-react'
 import ThemeToggle from './ThemeToggle.jsx'
+import { API_AVAILABLE } from '../config/runtime.js'
+import { useAuth } from '../context/AuthContext.jsx'
 
 const TABS = [
   { path: '/projects', label: 'Mes projets', icon: FolderKanban },
@@ -9,6 +11,13 @@ const TABS = [
 ]
 
 export default function Header({ route, navigate, theme, onToggleTheme }) {
+  const { logout } = useAuth()
+  async function leave() {
+    if (API_AVAILABLE) {
+      try { await logout() } catch { return }
+    }
+    navigate('/login')
+  }
   return (
     <header className="site-header">
       <div className="container nav-inner">
@@ -24,7 +33,7 @@ export default function Header({ route, navigate, theme, onToggleTheme }) {
         </nav>
         <div className="ak-header-actions">
           <ThemeToggle theme={theme} onToggle={onToggleTheme} />
-          <button type="button" className="icon-button" title="Retour à la connexion" aria-label="Retour à la connexion" onClick={() => navigate('/login')}><LogOut size={17} /></button>
+          <button type="button" className="icon-button" title="Retour à la connexion" aria-label="Retour à la connexion" onClick={leave}><LogOut size={17} /></button>
         </div>
       </div>
       <div className="header-hairline" aria-hidden="true" />

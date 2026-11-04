@@ -3,12 +3,17 @@ import Header from './components/Header.jsx'
 import Landing from './pages/Landing.jsx'
 import Login from './pages/Login.jsx'
 import Register from './pages/Register.jsx'
+import VerifyEmail from './pages/VerifyEmail.jsx'
+import ForgotPassword from './pages/ForgotPassword.jsx'
+import ResetPassword from './pages/ResetPassword.jsx'
 import Deploy from './pages/Deploy.jsx'
 import Sites from './pages/Sites.jsx'
 import Projects from './pages/Projects.jsx'
 import Pricing from './pages/Pricing.jsx'
+import { API_AVAILABLE } from './config/runtime.js'
+import { useAuth } from './context/AuthContext.jsx'
 
-const ROUTES = ['/', '/login', '/register', '/deploy', '/sites', '/projects', '/pricing']
+const ROUTES = ['/', '/login', '/register', '/deploy', '/sites', '/projects', '/pricing', '/verify-email', '/forgot-password', '/reset-password']
 
 function validRoute(path) {
   return ROUTES.includes(path) || /^\/(?:sites|projects)\/[^/]+$/.test(path)
@@ -33,6 +38,7 @@ function initialTheme() {
 
 export default function App() {
   const [route, setRoute] = useState(locationRoute)
+  const { status } = useAuth()
   const [theme, setTheme] = useState(initialTheme)
 
   useEffect(() => {
@@ -54,12 +60,25 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'instant' })
   }
 
+  useEffect(() => {
+    if (API_AVAILABLE && status === 'anonymous' && /^\/(?:deploy|projects|sites)(?:\/|$)/.test(route)) {
+      navigate('/login')
+    }
+  }, [route, status])
+
   const toggleTheme = () => setTheme(current => current === 'dark' ? 'light' : 'dark')
   const commonProps = { navigate, theme, onToggleTheme: toggleTheme }
+
+  if (API_AVAILABLE && /^\/(?:deploy|projects|sites)(?:\/|$)/.test(route) && status !== 'authenticated') {
+    return <div className="app-shell"><main className="container workspace" role="status">Vérification de votre session…</main></div>
+  }
 
   if (route === '/') return <Landing {...commonProps} />
   if (route === '/login') return <Login {...commonProps} />
   if (route === '/register') return <Register {...commonProps} />
+  if (route === '/verify-email') return <VerifyEmail {...commonProps} />
+  if (route === '/forgot-password') return <ForgotPassword {...commonProps} />
+  if (route === '/reset-password') return <ResetPassword {...commonProps} />
 
   return (
     <div className="app-shell">

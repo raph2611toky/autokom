@@ -18,3 +18,27 @@ class ClientJWTAuthentication(BaseAuthentication):
 
     def authenticate_header(self, request):
         return 'Bearer realm="autokom-clients"'
+
+
+class ClientCookieJWTAuthentication(BaseAuthentication):
+    """Authenticate SPA HttpOnly access cookie and ALWAYS enforce CSRF on writes.
+
+    Bearer authentication has priority; public endpoints explicitly disable
+    authentication and the separate browser login/refresh endpoints use
+    csrf_protect even for unauthenticated requests.
+    """
+    def authenticate(self, request):
+        # Never silently fall back from an invalid Authorization header to cookies.
+        if request.headers.get('Authorization'):
+            return None
+        from apps.accounts.user.browser_views import ACCESS_COOKIE
+        raw = request.COOKIES.get(ACCESS_COOKIE)
+        if not raw:
+            return None
+        user, claims = decode_token(raw, expected_kind='access')
+        validate_active_session(user, claims)
+        from rest_framework.authentication import SessionAuthentication
+        SessionAuthentication().enforce_csrf(request)
+        request.client_user = user
+        request.client_claims = claims
+        return (user, claims)
