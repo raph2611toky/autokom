@@ -256,6 +256,58 @@ def apply_one(source,host_data,ip,cf,acme_email):
     return 'verified'
 
 
+
+def audit_reasons(host_data):
+    """Explain conservative Nginx migration refusal without exposing config contents.
+
+    An audit is informational only. It never reclassifies a vhost as safe.
+    """
+    reasons=[]
+    files=host_data.get('sources') or []
+    for filename in files:
+        try:
+            raw=Path(filename).read_text(encoding='utf-8')
+        except (OSError, UnicodeError):
+            reasons.append('fichier Nginx non lisible')
+            continue
+        # Comments are not effective Nginx directives.
+        text='\n'.join(line.split('#', 1)[0] for line in raw.splitlines())
+        proxies=re.findall(r'\bproxy_pass\s+([^;]+);',text)
+        local=re.findall(r'\bproxy_pass\s+http://127\.0\.0\.1:(\d+)\s*;',text)
+        if not proxies:
+            reasons.append('aucun proxy HTTP local (site statique ou simple redirection)')
+        if len(set(local))>1:
+            reasons.append('plusieurs ports de service détectés')
+        if any(not re.fullmatch(r'http://127\.0\.0\.1:\d+',x.strip()) for x in proxies):
+            reasons.append('proxy non local ou dynamique (Docker/upstream/localhost/HTTPS)')
+        if re.search(r'\b(?:root|alias)\s',text):
+            reasons.append('directives root/alias (contenu statique ou ACME spécifique)')
+        if re.search(r'\b(?:fastcgi_pass|uwsgi_pass)\s',text):
+            reasons.append('backend FastCGI/uWSGI')
+        if not proxies and re.search(r'\b(?:return|rewrite)\s',text):
+            reasons.append('redirection ou réécriture HTTP')
+    port=int(host_data.get('port') or 0)
+    if port and not 1024<=port<=65535:
+        reasons.append('port local hors plage autorisée')
+    if not port:
+        reasons.append('port applicatif local non identifié')
+    if not host_data.get('supported') and not reasons:
+        reasons.append('structure Nginx non reconnue (relecture obligatoire)')
+    return list(dict.fromkeys(reasons))
+
+
+def print_audit(found):
+    """Short source-specific diagnostics, no secrets or Nginx config copied."""
+    for source,item in found.items():
+        print('  ◈ '+source+' → '+destination(source))
+        print('    › Vhost : '+', '.join(item.get('sources') or ['introuvable']))
+        if item.get('supported'):
+            print('    ✓ Proxy local unique : 127.0.0.1:'+str(item['port']))
+        else:
+            for reason in audit_reasons(item):
+                print('    ! '+reason)
+            print('    › Non éligible à --apply. Ancien site conservé.')
+
 def main(argv=None):
     p=argparse.ArgumentParser(prog='autokom domains',description='Migration progressive des domaines vers ikom.mg')
     sub=p.add_subparsers(dest='action')
@@ -263,9 +315,10 @@ def main(argv=None):
     m.add_argument('--source',help='Un domaine existant précis, ex. dia.ik0m.tech')
     group=m.add_mutually_exclusive_group()
     group.add_argument('--check',action='store_true',help='Inventaire uniquement')
+    group.add_argument('--audit',action='store_true',help='Expliquer chaque blocage Nginx sans modification')
     group.add_argument('--apply',action='store_true',help='Migration parallèle avec confirmation')
     args=p.parse_args(argv)
-    if not args.action:args.action='migrate';args.check=True;args.source=None;args.apply=False
+    if not args.action:args.action='migrate';args.check=True;args.source=None;args.apply=False;args.audit=False
     if args.action!='migrate':raise MigrationError('Action inconnue.')
     found=discover_nginx()
     if args.source:
@@ -281,7 +334,14 @@ def main(argv=None):
     print('  › Délégation DNS actuelle :','NS trouvés' if ok else 'non confirmée')
     if ns:print('  › Vérifier chez dot.mg :',', '.join(ns[:4]))
     print('  › Ancien DNS/vhost conservés. Aucun DNS BIND infra.ikom.mg modifié.')
+    if args.audit or (args.check and not any(x['supported'] for x in found.values())):
+        print('  ◈ AUDIT NGINX · lecture seule')
+        print_audit(found)
     if not args.apply:return 0
+    if not any(x['supported'] for x in found.values()):
+        print('  ✗ Aucun vhost automatiquement éligible : --apply n’a rien modifié.')
+        print('  › Utiliser « autokom domains migrate --audit », puis adapter les vhosts par service.')
+        return 2
     if os.geteuid()!=0:raise MigrationError('Exécuter sudo autokom domains migrate --apply.')
     if not os.isatty(0):raise MigrationError('Confirmation interactive obligatoire.')
     from autokom_env_manager import select,read_env,file_path
