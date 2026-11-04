@@ -34,15 +34,22 @@ def free_entitlement(environment):
 def reserve_domain(project, environment, selected=''):
     hostname = validate_hostname(selected) if selected else validate_hostname(default_hostname(project.slug))
     from django.conf import settings
-    if selected and (hostname == settings.AUTOKOM_BASE_DOMAIN or hostname.endswith('.' + settings.AUTOKOM_BASE_DOMAIN)):
+    reserved_suffixes = (settings.AUTOKOM_BASE_DOMAIN, settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX)
+    if selected and any(hostname == suffix or hostname.endswith('.' + suffix) for suffix in reserved_suffixes):
         raise ValidationError({'domain': 'Choisir le sous-domaine automatique, pas un domaine AUTOKOM personnalisé.'})
     if Domain.objects.filter(hostname=hostname).exists():
         raise ValidationError({'domain': 'Ce nom de domaine est déjà réservé.'})
-    return Domain.objects.create(
+    domain = Domain.objects.create(
         organization=project.organization, environment=environment, hostname=hostname,
         domain_type=Domain.Type.CUSTOM if selected else Domain.Type.SUBDOMAIN,
         status=Domain.Status.PENDING,
     )
+    # All project-created domains must carry the same proof as DomainCreateAPIView.
+    import hashlib
+    from apps.deployments.domains.services import _challenge
+    domain.verification_token_hash = hashlib.sha256(_challenge(domain).encode()).hexdigest()
+    domain.save(update_fields=['verification_token_hash'])
+    return domain
 
 
 @transaction.atomic

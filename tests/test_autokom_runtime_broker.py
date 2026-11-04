@@ -74,6 +74,21 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(role.count('check_mode: false'),3)
         self.assertNotIn('{{ item }} --version',role)
 
+    def test_runtime_preview_does_not_start_uninstalled_systemd_units(self):
+        role=(ROOT/'ansible/roles/platform_runtime/tasks/main.yml').read_text()
+        self.assertEqual(role.count('when: not ansible_check_mode'), 2)
+
+    def test_backend_runtime_contract_has_shared_runner_key_and_managed_suffix(self):
+        settings=(ROOT/'platform/backend/config/settings.py').read_text()
+        manager=(ROOT/'scripts/lib/autokom_app_manager.py').read_text()
+        project=(ROOT/'platform/backend/apps/projects/project/services.py').read_text()
+        domain=(ROOT/'platform/backend/apps/deployments/domains/services.py').read_text()
+        self.assertIn('AUTOKOM_RUNNER_SHARED_KEY',manager)
+        self.assertIn('AUTOKOM_MANAGED_DOMAIN_SUFFIX',manager)
+        self.assertIn('AUTOKOM_MANAGED_DOMAIN_SUFFIX',settings)
+        self.assertIn('domain.verification_token_hash =',project)
+        self.assertIn('settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX',domain)
+
     def test_runtime_setup_check_runs_ansible_check_mode(self):
         from unittest.mock import Mock
         with patch.object(admin.subprocess,'run',return_value=Mock(returncode=0,stderr='')) as syntax:

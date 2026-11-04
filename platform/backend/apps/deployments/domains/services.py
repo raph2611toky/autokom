@@ -18,7 +18,7 @@ def _challenge(domain):
 
 
 def _managed(name):
-    suffix=settings.AUTOKOM_BASE_DOMAIN.lower().strip('.')
+    suffix=settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX.lower().strip('.')
     return bool(suffix and name.endswith('.'+suffix) and name!=suffix)
 
 
@@ -59,7 +59,13 @@ def verify_and_activate(user,project_id,environment_id,domain_id):
     domain=Domain.objects.filter(environment=env,id=domain_id).first()
     if not domain:raise ValidationError({'domain':'Domaine absent ou accès refusé.'})
     token=_challenge(domain)
-    if hashlib.sha256(token.encode()).hexdigest()!=domain.verification_token_hash:
+    expected_hash=hashlib.sha256(token.encode()).hexdigest()
+    # Repair legacy project-created domains that were never initialized.
+    # Never repair domains that were already verified or activated.
+    if not domain.verification_token_hash and domain.status==Domain.Status.PENDING and domain.verified_at is None:
+        domain.verification_token_hash=expected_hash
+        domain.save(update_fields=['verification_token_hash'])
+    if not hmac.compare_digest(expected_hash,domain.verification_token_hash):
         raise PermissionDenied('Preuve DNS invalide ou clé serveur modifiée.')
     managed=domain.domain_type==Domain.Type.SUBDOMAIN
     if managed:

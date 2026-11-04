@@ -72,9 +72,11 @@
     name: autokom-platform-broker
     enabled: true
     state: restarted
+  when: not ansible_check_mode
 
 - name: Démarrer le worker des exécutions
   ansible.builtin.systemd_service:
     name: autokom-deployment-worker
     enabled: true
     state: restarted
+  when: not ansible_check_mode

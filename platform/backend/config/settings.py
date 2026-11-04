@@ -202,6 +202,8 @@ GITHUB_APP_CALLBACK_URL = os.getenv('GITHUB_APP_CALLBACK_URL', '').strip()
 GITHUB_WEBHOOK_SECRET = os.getenv('GITHUB_WEBHOOK_SECRET', '').strip()
 AUTOKOM_FIELD_ENCRYPTION_KEY = os.getenv('AUTOKOM_FIELD_ENCRYPTION_KEY', '').strip()
 AUTOKOM_BASE_DOMAIN = os.getenv('AUTOKOM_BASE_DOMAIN', 'apps.autokom.example').lower().strip('.')
+# Client apps may use a different managed suffix than the AUTOKOM control plane.
+AUTOKOM_MANAGED_DOMAIN_SUFFIX = os.getenv('AUTOKOM_MANAGED_DOMAIN_SUFFIX', AUTOKOM_BASE_DOMAIN).lower().strip('.')
 GITHUB_API_VERSION = os.getenv('GITHUB_API_VERSION', '2026-03-10')
 
 # Callback autonome pour connexion/inscription clients, distinct du callback

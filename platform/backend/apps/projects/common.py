@@ -72,7 +72,7 @@ def safe_relative_path(value, *, allow_empty=True):
 
 
 def default_hostname(project_slug):
-    return f'{project_slug}.{settings.AUTOKOM_BASE_DOMAIN}'.lower()
+    return f'{project_slug}.{settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX}'.lower()
 
 
 def validate_hostname(hostname):
