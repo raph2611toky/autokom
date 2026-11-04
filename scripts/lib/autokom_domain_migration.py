@@ -27,8 +27,49 @@ ACME=Path('/var/lib/autokom/acme')
 HOST_RE=re.compile(r'^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$')
 class MigrationError(RuntimeError):pass
 
+_LIVE=None
+_STAGE='Vérification'
+
+def stage(label,fn,*args,**kwargs):
+    global _STAGE
+    old=_STAGE
+    _STAGE=label
+    start=time.monotonic()
+    if _LIVE:
+        _LIVE.label=label
+        _LIVE.note('ÉTAPE · '+label)
+        _LIVE.preview_start=_LIVE.log_path.stat().st_size
+        _LIVE.paint()
+    try:
+        # Cloudflare calls may spend several seconds in HTTPS I/O. Keep the
+        # loader animated while the network request is in flight; there is
+        # still exactly one synchronous operation, never a detached job.
+        # Do not thread commands touching the subprocess progress renderer.
+        if _LIVE and label.startswith('Cloudflare'):
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future=pool.submit(fn,*args,**kwargs)
+                while not future.done():
+                    _LIVE.paint()
+                    time.sleep(0.14)
+                result=future.result()
+        else:
+            result=fn(*args,**kwargs)
+    except Exception:
+        if _LIVE:_LIVE.clear()
+        print(f'  ✗ {label} ({int(time.monotonic()-start)}s)')
+        raise
+    else:
+        if _LIVE:_LIVE.clear()
+        print(f'  \033[32m✓\033[0m {label} ({int(time.monotonic()-start)}s)')
+        return result
+    finally:
+        _STAGE=old
+
+
 
 def run(args,timeout=30):
+    if _LIVE is not None:return _LIVE.call(args,timeout=timeout)
     try:return subprocess.run(args,capture_output=True,text=True,timeout=timeout,check=False)
     except (OSError,subprocess.TimeoutExpired) as exc:raise MigrationError('Commande système indisponible : '+args[0]) from exc
 
@@ -310,7 +351,7 @@ def _assert_destination_unclaimed(host):
                         raise MigrationError('Nom DNS déjà défini dans un autre vhost Nginx : '+host)
 
 
-def _dns_authoritative_ready(dest, ip, nameservers, origin=None):
+def _dns_authoritative_ready(dest, ip, nameservers, origin=None, proxied=False):
     """Query actual Cloudflare authoritative servers, not a stale local resolver.
 
     Responses with a CNAME followed by an A are supported; no proxy mode
@@ -326,6 +367,10 @@ def _dns_authoritative_ready(dest, ip, nameservers, origin=None):
         answers=[v.strip().rstrip('.') for v in result.stdout.splitlines() if v.strip()]
         if ip in answers:
             continue
+        # CNAME → proxied apex: Cloudflare intentionally publishes anycast IPv4
+        # rather than the origin IP. Plan() has checked the root A via its API.
+        if proxied and any(_public_ipv4(answer) for answer in answers):
+            continue
         # An authoritative server may answer with only the CNAME (no A in the
         # additional section). Resolve the controlled origin independently.
         if origin and origin in answers:
@@ -336,14 +381,22 @@ def _dns_authoritative_ready(dest, ip, nameservers, origin=None):
     return True
 
 
-def _wait_dns(dest, ip, nameservers, attempts=4, origin=None):
+def _public_ipv4(value):
+    try:return ipaddress.IPv4Address(value).is_global
+    except ValueError:return False
+
+def _wait_dns(dest, ip, nameservers, attempts=4, origin=None, proxied=False):
     for i in range(attempts):
-        if _dns_authoritative_ready(dest, ip, nameservers, origin=origin):
+        if _dns_authoritative_ready(dest, ip, nameservers, origin=origin, proxied=proxied):
             print('  \033[32m✓\033[0m DNS autoritaire vérifié :',dest)
             return True
         if i+1 < attempts:
-            print('  \033[32m↻\033[0m DNS · vérification des serveurs autoritaires…',f'{i+1}/{attempts}',end='\r',flush=True)
-            time.sleep(2)
+            if _LIVE:_LIVE.note('DNS · contrôle '+str(i+1)+'/'+str(attempts));_LIVE.paint()
+            if _LIVE:
+                for _ in range(13):
+                    _LIVE.paint()
+                    time.sleep(0.15)
+            else:time.sleep(2)
     print('  › DNS autoritaire en attente. Le reverse proxy HTTP est déjà préparé.')
     return False
 
@@ -368,37 +421,35 @@ def apply_one(source,host_data,ip,cf,acme_email, *, target=None, zone=NEW_SUFFIX
         raise MigrationError('Service source indisponible sur 127.0.0.1:'+str(port)) from exc
     _assert_destination_unclaimed(dest)
     try:
-        dns=plan(cf,zone,dest,ip)
+        dns=stage('Cloudflare · analyse du domaine',plan,cf,zone,dest,ip)
     except DNSMigrationError as exc:
         raise MigrationError(str(exc)) from exc
     print(f'  › Service : {source} → {dest} · port local {port}')
-    print(f'  › DNS : {dest} CNAME {dns.origin}' if dns.site_mode=='new' else
+    print(f'  › DNS prévu : {dest} CNAME {dns.zone} (racine @)' if dns.site_mode=='new' else
           f'  › DNS existant : {dns.site_mode} (aucune suppression automatique)')
+    if dns.site_proxied:print('  › Cloudflare Proxied : le CNAME vers la racine hérite du proxy.')
     # IMPORTANT: ensure the reverse proxy exists BEFORE publishing a new name.
-    _commit_nginx(dest,port,ssl=False)
-    print('  \033[32m✓\033[0m Reverse proxy Nginx HTTP prêt :',dest)
+    stage('Nginx · reverse proxy HTTP',_commit_nginx,dest,port,ssl=False)
     try:
-        ensure(cf,dns)
+        stage('Cloudflare · enregistrement DNS',ensure,cf,dns)
     except DNSMigrationError as exc:
         raise MigrationError(str(exc)) from exc
     except Exception as exc:
         raise MigrationError('Cloudflare a refusé la configuration DNS : vérifier le token et les droits Zone DNS Edit.') from exc
     if dns.site_mode=='legacy_a':
-        print('  \033[32m✓\033[0m DNS A existant conservé :',dest,'· point central prêt :',dns.origin)
+        print('  \033[32m✓\033[0m DNS A existant conservé :',dest,'· racine @ :',dns.zone)
     else:
-        print('  \033[32m✓\033[0m DNS CNAME Cloudflare prêt :',dest,'→',dns.origin)
-    if not _wait_dns(dest,ip,nameservers,origin=dns.origin):
+        print('  \033[32m✓\033[0m DNS CNAME Cloudflare prêt :',dest,'→',dns.zone)
+    if not stage('DNS · résolution autoritaire',_wait_dns,dest,ip,nameservers,origin=dns.origin,proxied=(dns.site_mode=='cname' or dns.site_mode=='new') and dns.site_proxied):
         return 'dns_pending'
     cert=Path('/etc/letsencrypt/live')/dest/'fullchain.pem'
     if not cert.is_file():
-        print('  \033[32m↻\033[0m Certbot · émission HTTPS…',flush=True)
-        p=run(['certbot','certonly','--webroot','-w',str(ACME),'-d',dest,
+        p=stage('Certbot · certificat HTTPS',run,['certbot','certonly','--webroot','-w',str(ACME),'-d',dest,
                '--non-interactive','--agree-tos','--email',acme_email,'--keep-until-expiring'],timeout=180)
         if p.returncode or not cert.is_file():
             print('  › Certificat en attente : HTTP prêt, ancien domaine inchangé. Consulter /var/log/letsencrypt/letsencrypt.log.')
             return 'tls_pending'
-    _commit_nginx(dest,port,ssl=True)
-    print('  \033[32m✓\033[0m Nginx HTTPS activé :',dest)
+    stage('Nginx · activation HTTPS',_commit_nginx,dest,port,ssl=True)
     if _needs_backend_settings(dest) or source=='auto.ik0m.tech':
         from autokom_env_manager import write_env,file_path
         before=_append_backend_hosts(dest,frontend=(source=='auto.ik0m.tech'))
@@ -409,24 +460,31 @@ def apply_one(source,host_data,ip,cf,acme_email, *, target=None, zone=NEW_SUFFIX
                 run(['systemctl','restart','autokom-backend.service'],timeout=40)
                 raise MigrationError('Redémarrage Django refusé, configuration backend restaurée.')
     # Check origin TLS with proper SNI / Host and without relying on local DNS cache.
-    probe=run(['curl','--silent','--output','/dev/null','--write-out','%{http_code}',
-               '--resolve',dest+':443:'+ip,
+    probe=stage('HTTPS · test local TLS/SNI',run,
+              ['curl','--noproxy','*','--silent','--show-error','--output','/dev/null',
+               '--write-out','%{http_code}', '--resolve',dest+':443:127.0.0.1',
                '--connect-timeout','5','--max-time','12','https://'+dest+'/'],timeout=15)
-    if probe.returncode or probe.stdout not in ('200','301','302','303','307','308','401','403','404'):
-        print('  › HTTPS non encore validé : vérifier application, CORS ou callbacks. Ancien domaine conservé.')
+    if probe.returncode or probe.stdout not in ('200','201','202','204','301','302','303','307','308','401','403'):
+        print('  › HTTPS non validé (HTTP '+probe.stdout.strip()[:8]+', curl '+str(probe.returncode)+'). Ancien domaine conservé.')
+        print('  › Diagnostic local : curl --noproxy ALL -Iv --resolve '+dest+':443:127.0.0.1 https://'+dest+'/')
         return 'verify_pending'
     dns_mode='legacy_a' if dns.site_mode=='legacy_a' else 'cname'
     if convert and dns.site_mode=='legacy_a':
         try:
-            convert_legacy_a(cf,dns)
+            stage('Cloudflare · conversion A → CNAME',convert_legacy_a,cf,dns)
             dns_mode='cname'
             print('  \033[32m✓\033[0m Ancien DNS A converti en CNAME :',dest)
+            if not stage('DNS · contrôle CNAME après conversion',_wait_dns,dest,ip,nameservers,origin=dns.zone,proxied=dns.site_proxied):
+                print('  › CNAME créé mais propagation publique incomplète ; ancien domaine toujours actif.')
+                return 'dns_pending'
         except DNSMigrationError as exc:
             print('  ! Migration HTTPS réussie, mais conversion DNS à vérifier :',str(exc))
     STATE.mkdir(parents=True,exist_ok=True,mode=0o700);os.chmod(STATE,0o700)
     atomic_text(STATE/(dest+'.json'),json.dumps({'source':source,'destination':dest,
-                     'port':port,'verified':True,'dns_alias':dns.origin,'dns_mode':dns_mode},indent=2)+'\n',0o600)
-    print('  \033[32m✓\033[0m Nouveau domaine accessible : https://'+dest)
+                     'port':port,'verified':True,'origin_https_verified':True,
+                     'public_https_verified':False,'dns_alias':dns.zone,'dns_mode':dns_mode},indent=2)+'\n',0o600)
+    print('  \033[32m✓\033[0m HTTPS Nginx local validé : https://'+dest)
+    print('  › Vérifier aussi depuis un autre réseau : curl -I https://'+dest+'/')
     return 'verified'
 
 
@@ -481,6 +539,10 @@ def main(argv=None):
     p=argparse.ArgumentParser(prog='autokom domains',description='Migration progressive, interactive et réversible de domaines')
     sub=p.add_subparsers(dest='action')
     m=sub.add_parser('migrate',help='Découvrir, auditer et migrer un service HTTPS en parallèle')
+    old=sub.add_parser('prune-origin',help='Vérifier et retirer l’ancien A origin.ikom.mg s’il est inutilisé')
+    origin_mode=old.add_mutually_exclusive_group()
+    origin_mode.add_argument('--check',action='store_true',help='Lecture seule (défaut)')
+    origin_mode.add_argument('--apply',action='store_true',help='Suppression explicite après audit et confirmation')
     m.add_argument('--source',help='Service existant (facultatif : sélecteur interactif)')
     m.add_argument('--target',help='Nom DNS final dans la zone Cloudflare (avec --source)')
     m.add_argument('--from-zone',dest='from_zone',help='Zone source à découvrir dans Nginx (défaut ik0m.tech)')
@@ -492,6 +554,27 @@ def main(argv=None):
     args=p.parse_args(argv)
     if not args.action:
         args.action='migrate';args.check=True;args.source=None;args.target=None;args.from_zone=None;args.to_zone=None;args.apply=False;args.audit=False
+    if args.action=='prune-origin':
+        from autokom_env_manager import read_env,file_path
+        from autokom_domain_dns import inspect_obsolete_origin,DNSMigrationError
+        zone=check_hostname(read_env(file_path('cloudflare')).get('CLOUDFLARE_ZONE_NAME') or NEW_SUFFIX)
+        ip=local_ip()
+        cf=cloudflare(zone)
+        old_record,refs=inspect_obsolete_origin(cf,zone,ip)
+        print('  ◈ AUTOKOM · NETTOYAGE DNS · origin.'+zone)
+        print('  › Enregistrement :', 'présent' if old_record else 'absent')
+        if refs:
+            print('  ✗ Utilisé par des CNAME : '+', '.join(refs[:10]))
+            print('  › Aucune suppression.');return 2
+        if not old_record:return 0
+        print('  › Aucun CNAME Cloudflare ne référence origin. Vérifier aussi les usages externes.')
+        if not args.apply:
+            print('  ✓ Audit uniquement : aucune suppression.');return 0
+        if os.geteuid()!=0 or not os.isatty(0):raise MigrationError('sudo et terminal interactif requis.')
+        if input('  Saisir SUPPRIMER-ORIGIN pour confirmer : ').strip()!='SUPPRIMER-ORIGIN':
+            print('  › Annulé.');return 0
+        cf.delete(old_record['id'])
+        print('  ✓ Ancien enregistrement origin retiré. Le A racine reste intact.');return 0
     if args.action!='migrate':raise MigrationError('Action inconnue.')
     old_zone,new_zone=_migration_zones(args)
     if args.target and not args.source:
@@ -566,8 +649,9 @@ def main(argv=None):
     print('  ◈ PLAN DE MIGRATION · '+source)
     print('  › Reverse proxy local : 127.0.0.1:'+str(item['port']))
     print('  › Nouveau site : https://'+target)
-    print('  › DNS central : origin.'+new_zone+' → '+ip)
-    print('  › DNS destination :', 'CNAME → '+dns_plan.origin if dns_plan.site_mode=='new' else dns_plan.site_mode)
+    print('  › Point d’entrée : @ ('+new_zone+') A '+ip+' · enregistrement préservé')
+    if dns_plan.site_proxied:print('  › Cloudflare : racine Proxied ⇒ CNAME également proxifié')
+    print('  › DNS destination :', 'CNAME → '+new_zone if dns_plan.site_mode=='new' else dns_plan.site_mode)
     print('  › Nginx HTTP → validation DNS → Certbot → HTTPS → healthcheck')
     print('  › Ancien domaine conservé, Nginx testé avant chaque rechargement.')
     choice=select('Migrer '+source, ['Annuler · aucun changement', 'Créer le domaine en parallèle'],default=2)
@@ -576,7 +660,7 @@ def main(argv=None):
     convert=False
     if dns_plan.site_mode=='legacy_a':
         choice=select('Ancien enregistrement A détecté pour '+target,
-            ['Conserver le A existant', 'Convertir en CNAME après validation HTTPS'], default=1)
+            ['Conserver le A existant', 'Convertir en CNAME vers '+new_zone+' après validation HTTPS'], default=1)
         convert=choice.startswith('Convertir')
     if input('  Saisir MIGRER pour confirmer : ').strip()!='MIGRER':
         print('  › Migration annulée.');return 0
@@ -586,12 +670,20 @@ def main(argv=None):
             print('  › Le A existant sera conservé.')
     ACME.mkdir(parents=True,exist_ok=True)
     try:
-        result=apply_one(source,item,ip,cf,email,target=target,zone=new_zone,nameservers=ns,convert=convert)
+        from autokom_domain_progress import LiveDomainProgress
+        global _LIVE
+        with LiveDomainProgress() as live:
+            _LIVE=live
+            try:
+                result=apply_one(source,item,ip,cf,email,target=target,zone=new_zone,nameservers=ns,convert=convert)
+            finally:
+                _LIVE=None
     except MigrationError as exc:
         print('  ✗',exc)
         return 1
     if result!='verified':
-        print('  › Pour reprendre : autokom domains migrate --source '+source+' --target '+target+' --apply')
+        print('  › Pour reprendre : sudo autokom domains migrate --source '+source+' --target '+target+' --apply')
+        return 2
     return 0
 
 if __name__=='__main__':

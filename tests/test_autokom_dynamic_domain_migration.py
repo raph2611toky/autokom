@@ -17,11 +17,11 @@ import autokom_domain_dns as dns
 IP='56.228.86.160'
 ZONE='ikom.mg'
 HOST='dia.ikom.mg'
-ORIGIN='origin.ikom.mg'
+ORIGIN=ZONE
 
 class FakeCF:
     def __init__(self,records=()):
-        self.items=[dict(r) for r in records]
+        self.items=[{'id':'root','name':ZONE,'type':'A','content':IP,'proxied':True,'ttl':1}] + [dict(r) for r in records]
         self.events=[]
         self.fail_cname_once=False
         self.zone_id='z'*32
@@ -48,13 +48,13 @@ class DNSPlanner(unittest.TestCase):
         self.assertEqual(p.site_mode,'new')
         dns.ensure(cf,p)
         self.assertEqual([(x['type'],x['name'],x['content']) for x in cf.items],
-                         [('A',ORIGIN,IP),('CNAME',HOST,ORIGIN)])
-        self.assertTrue(all(not x['proxied'] for x in cf.items))
+                         [('A',ZONE,IP),('CNAME',HOST,ZONE)])
+        self.assertTrue(all(x['proxied'] for x in cf.items))
     def test_repeated_dns_plan_does_not_duplicate(self):
         cf=FakeCF();dns.ensure(cf,dns.plan(cf,ZONE,HOST,IP))
         self.assertEqual(dns.plan(cf,ZONE,HOST,IP).site_mode,'cname')
         dns.ensure(cf,dns.plan(cf,ZONE,HOST,IP))
-        self.assertEqual(len(cf.events),2)
+        self.assertEqual(len(cf.events),1)
     def test_existing_legacy_a_can_be_reused(self):
         cf=FakeCF([{'id':'a1','name':HOST,'type':'A','content':IP,'proxied':False,'ttl':120}])
         p=dns.plan(cf,ZONE,HOST,IP)
@@ -80,7 +80,6 @@ class DNSPlanner(unittest.TestCase):
                 dns.plan(FakeCF(),ZONE,hostname,IP)
     def test_refuse_existing_proxied_alias_or_mismatched_a(self):
         for record in (
-            {'id':'2','name':ORIGIN,'type':'A','content':IP,'proxied':True},
             {'id':'3','name':ORIGIN,'type':'A','content':'1.1.1.1','proxied':False},
             {'id':'4','name':HOST,'type':'A','content':'1.1.1.1','proxied':False},
             {'id':'5','name':HOST,'type':'CNAME','content':'other.ikom.mg','proxied':False},
@@ -111,7 +110,7 @@ class Orchestration(unittest.TestCase):
             rc=m.apply_one('dia.ik0m.tech',{'port':8464,'supported':True},IP,cf,'ops@example.com',target=HOST,zone=ZONE,nameservers=['kallie.ns.cloudflare.com'])
         self.assertEqual(rc,'verified')
         self.assertEqual(events[0][0],'nginx_http')
-        self.assertEqual([e for e in events if e[0]=='cloudflare'][0][1],'A')
+        self.assertEqual([e for e in events if e[0]=='cloudflare'][0][1],'CNAME')
         self.assertEqual(events[-1][0],'nginx_https')
         self.assertTrue((self.root/'state'/f'{HOST}.json').is_file())
     def test_dns_pending_keeps_nginx_http_and_no_certbot(self):
@@ -127,12 +126,12 @@ class Orchestration(unittest.TestCase):
         with patch.object(m.socket,'create_connection',side_effect=OSError('offline')),patch.object(m,'_commit_nginx',side_effect=AssertionError('should not write')):
             with self.assertRaisesRegex(m.MigrationError,'indisponible'):
                 m.apply_one('dia.ik0m.tech',{'port':8464,'supported':True},IP,cf,'ops@example.com',target=HOST,zone=ZONE)
-        self.assertEqual(cf.items,[])
+        self.assertEqual(len(cf.items),1)  # root A only
     def test_authoritative_cname_may_return_only_name(self):
         def fake_run(args,timeout=5):
             return SimpleNamespace(returncode=0,stdout=ORIGIN+'\n' if args[-1]==HOST else IP+'\n')
         with patch.object(m,'run',side_effect=fake_run):
-            self.assertTrue(m._dns_authoritative_ready(HOST,IP,['kallie.ns.cloudflare.com'],ORIGIN))
+            self.assertTrue(m._dns_authoritative_ready(HOST,IP,['kallie.ns.cloudflare.com'],ORIGIN,proxied=True))
     def test_dynamic_mapping_without_static_service_names(self):
         self.assertEqual(m.destination('api.old.example','old.example','new.example'),'api.new.example')
         self.assertEqual(m.destination('dashboard.api.old.example','old.example','new.example'),'dashboard.api.new.example')
@@ -170,7 +169,7 @@ class GuidedCLI(unittest.TestCase):
              patch('autokom_env_manager.select',side_effect=choose),\
              patch('autokom_env_manager.read_env',side_effect=lambda p: {'AUTOKOM_ACME_EMAIL':'ops@example.com'} if 'runtime' in str(p) else {'CLOUDFLARE_ZONE_NAME':ZONE}),\
              patch.object(m,'apply_one',side_effect=lambda *a,**kw:calls.append(kw) or 'verified'),\
-             patch.object(m,'ACME',Path(tempfile.mkdtemp())),\
+             patch.object(m,'ACME',Path(tempfile.mkdtemp())),patch('autokom_domain_progress.LOG_DIR',Path(tempfile.mkdtemp())),\
              patch('builtins.input',side_effect=['','MIGRER']):
             self.assertEqual(m.main(['migrate','--apply']),0)
         self.assertEqual(calls[0]['target'],HOST)
@@ -182,14 +181,14 @@ class GuidedCLI(unittest.TestCase):
         opts=[]
         def choose(title,choices,default=1):
             if title.startswith('Migrer '):return 'Créer le domaine en parallèle'
-            if title.startswith('Ancien '):return 'Convertir en CNAME après validation HTTPS'
+            if title.startswith('Ancien '):return 'Convertir en CNAME vers '+ZONE+' après validation HTTPS'
             return choices[0]
         with patch.object(m,'discover_nginx',return_value=site),patch.object(m,'authoritative_ns_ok',return_value=(True,['kallie.ns.cloudflare.com.','justin.ns.cloudflare.com.'])),\
              patch.object(m,'cloudflare',return_value=cf),patch.object(m,'_assert_destination_unclaimed'),patch.object(m,'local_ip',return_value=IP),\
              patch.object(m.os,'geteuid',return_value=0),patch.object(m.os,'isatty',return_value=True),\
              patch('autokom_env_manager.select',side_effect=choose),\
              patch('autokom_env_manager.read_env',side_effect=lambda p: {'AUTOKOM_ACME_EMAIL':'ops@example.com'} if 'runtime' in str(p) else {'CLOUDFLARE_ZONE_NAME':ZONE}),\
-             patch.object(m,'apply_one',side_effect=lambda *a,**kw:opts.append(kw) or 'verified'),patch.object(m,'ACME',Path(tempfile.mkdtemp())),\
+             patch.object(m,'apply_one',side_effect=lambda *a,**kw:opts.append(kw) or 'verified'),patch.object(m,'ACME',Path(tempfile.mkdtemp())),patch('autokom_domain_progress.LOG_DIR',Path(tempfile.mkdtemp())),\
              patch('builtins.input',side_effect=['','MIGRER','CONVERTIR']):
             self.assertEqual(m.main(['migrate','--source','dia.ik0m.tech','--apply']),0)
         self.assertTrue(opts[0]['convert'])
