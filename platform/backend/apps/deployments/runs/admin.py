@@ -1,5 +1,5 @@
 from django.contrib import admin
-from apps.deployments.runs.models import DeploymentRun, PipelineStageRun, PipelineFinding
+from apps.deployments.runs.models import DeploymentRun, PipelineStageRun, PipelineFinding, DeploymentLogEntry
 
 @admin.register(DeploymentRun)
 class DeploymentRunAdmin(admin.ModelAdmin):
@@ -13,3 +13,11 @@ class PipelineStageRunAdmin(admin.ModelAdmin):
 class PipelineFindingAdmin(admin.ModelAdmin):
     list_per_page = 30
 
+
+
+@admin.register(DeploymentLogEntry)
+class DeploymentLogEntryAdmin(admin.ModelAdmin):
+    list_display = ('deployment', 'sequence', 'level', 'created_at')
+    readonly_fields = ('deployment','sequence','level','message','created_at')
+    def has_add_permission(self, request):
+        return False

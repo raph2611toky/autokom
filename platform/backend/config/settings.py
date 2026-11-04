@@ -210,3 +210,22 @@ GITHUB_AUTH_CALLBACK_URL = os.getenv('GITHUB_AUTH_CALLBACK_URL', '').strip()
 # Sans clé dédiée, helpers.secure_actions réutilise AES_KEY (déjà configurée)
 # avec dérivation distincte; la clé ne doit jamais être commitée dans Git.
 TOKEN_ENCRYPTION_KEY = os.getenv('TOKEN_ENCRYPTION_KEY', '').strip()
+
+
+# Deployment control plane (all credentials remain in server-only root:0600 .env).
+AUTOKOM_JENKINS_URL = os.getenv('AUTOKOM_JENKINS_URL','').strip()
+AUTOKOM_JENKINS_JOB = os.getenv('AUTOKOM_JENKINS_JOB','autokom-client-deploy').strip()
+AUTOKOM_JENKINS_USER = os.getenv('AUTOKOM_JENKINS_USER','').strip()
+AUTOKOM_JENKINS_API_TOKEN = os.getenv('AUTOKOM_JENKINS_API_TOKEN','').strip()
+AUTOKOM_RUNNER_SHARED_KEY = os.getenv('AUTOKOM_RUNNER_SHARED_KEY','').strip()
+AUTOKOM_IMAGE_REGISTRY = os.getenv('AUTOKOM_IMAGE_REGISTRY','').strip()
+AUTOKOM_HA_CLUSTER_READY = env_bool('AUTOKOM_HA_CLUSTER_READY', False)
+REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'].update({
+    'deploy': '12/hour', 'deploy_logs': '120/min', 'runner_manifest': '240/min',
+})
+
+# Runtime logs: optional scoped Loki stream (requires Alloy label mapping).
+AUTOKOM_LOKI_URL = os.getenv('AUTOKOM_LOKI_URL', '').strip()
+AUTOKOM_RUNTIME_LOGS_ENABLED = env_bool('AUTOKOM_RUNTIME_LOGS_ENABLED', False)
+
+AUTOKOM_PROMETHEUS_URL = os.getenv('AUTOKOM_PROMETHEUS_URL','').strip()

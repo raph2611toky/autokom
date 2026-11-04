@@ -41,3 +41,37 @@ class ApplicationEntitlement(models.Model):
 
     class Meta:
         db_table = 'plans_applicationentitlement'
+
+
+class HighAvailabilityOption(models.Model):
+    """Paid feature REQUEST, never proof of payment or right to provision replicas."""
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'En attente de validation commerciale'
+        ACTIVE = 'ACTIVE', 'Activée après validation'
+        REJECTED = 'REJECTED', 'Refusée'
+        EXPIRED = 'EXPIRED', 'Expirée'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    environment = models.OneToOneField('environments.Environment', on_delete=models.PROTECT, related_name='ha_option')
+    desired_replicas = models.PositiveSmallIntegerField(default=2)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING)
+    approved_by = models.ForeignKey('administrators.Administrator', on_delete=models.SET_NULL, null=True,
+                                    blank=True, related_name='approved_ha_options')
+    billing_reference = models.CharField(max_length=120, blank=True,
+                                         help_text='Référence de facturation vérifiée hors API client.')
+    activated_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if not 2 <= self.desired_replicas <= 20:
+            raise ValidationError({'desired_replicas': 'Entre 2 et 20 réplicas.'})
+        if self.status == self.Status.ACTIVE and (
+            not self.approved_by_id or not self.billing_reference or not self.activated_at
+        ):
+            raise ValidationError('La HA exige une approbation admin et une facturation vérifiée.')
+
+    class Meta:
+        db_table = 'plans_highavailabilityoption'

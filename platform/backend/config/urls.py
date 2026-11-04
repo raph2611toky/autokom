@@ -11,6 +11,7 @@ from rest_framework.permissions import IsAdminUser
 
 from config.views import SwaggerLoginPageAPIView, SwaggerLoginSubmitAPIView, SwaggerLogoutAPIView
 from config.health import PlatformHealthAPIView
+from apps.deployments.runs.views import RunnerManifestAPIView
 
 # Only client APIs enter the generated schema; no internal/admin endpoints.
 client_api_patterns = [
@@ -21,6 +22,7 @@ client_api_patterns = [
     path('api/projects/', include('apps.projects.configurations.urls')),
     path('api/projects/', include('apps.projects.secrets.urls')),
     path('api/projects/', include('apps.projects.project.urls')),
+    path('api/projects/', include('apps.deployments.runs.urls')),
 ]
 schema_view = get_schema_view(
     openapi.Info(
@@ -43,6 +45,9 @@ urlpatterns = [
     path('docs/login/submit/', SwaggerLoginSubmitAPIView.as_view(), name='swagger-login-submit'),
     path('docs/logout/', SwaggerLogoutAPIView.as_view(), name='swagger-logout'),
     *client_api_patterns,
+    path('api/internal/runner/deployments/<uuid:run_id>/manifest/',
+         RunnerManifestAPIView.as_view(),
+         name='internal-runner-manifest'),
     path('api/docs/', admin_documentation(schema_view.with_ui('swagger', cache_timeout=0)), name='swagger-ui'),
     path('api/schema.json', admin_documentation(schema_view.without_ui(cache_timeout=0)), name='swagger-schema'),
     path('api/redoc/', admin_documentation(schema_view.with_ui('redoc', cache_timeout=0)), name='swagger-redoc'),

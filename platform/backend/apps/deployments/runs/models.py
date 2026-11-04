@@ -32,6 +32,10 @@ class DeploymentRun(models.Model):
     branch = models.CharField(max_length=255)
     external_run_id = models.CharField(max_length=180, blank=True)
     ci_provider = models.CharField(max_length=100, blank=True)
+    cancel_requested = models.BooleanField(default=False)
+    next_poll_at = models.DateTimeField(null=True, blank=True)
+    console_offset = models.PositiveBigIntegerField(default=0)
+    console_pending = models.CharField(max_length=2000, blank=True)
     idempotency_key = models.CharField(max_length=150, unique=True)
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.QUEUED)
     error_message = models.TextField(blank=True)
@@ -101,3 +105,18 @@ class PipelineFinding(models.Model):
 
     class Meta:
         db_table = 'deployments_pipelinefinding'
+
+
+class DeploymentLogEntry(models.Model):
+    """Console Jenkins filtrée et bornée; aucun secret en clair dans ce modèle."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deployment = models.ForeignKey('deployments.DeploymentRun', on_delete=models.CASCADE, related_name='log_entries')
+    sequence = models.PositiveIntegerField()
+    level = models.CharField(max_length=10, default='INFO')
+    message = models.CharField(max_length=800)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'deployments_logentry'
+        ordering = ['sequence']
+        constraints = [models.UniqueConstraint(fields=['deployment', 'sequence'], name='unique_deploy_log_sequence')]

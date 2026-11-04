@@ -1,0 +1,27 @@
+[Unit]
+Description=AUTOKOM Platform - Jenkins Deployment Queue Worker
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autokom
+Group=autokom
+WorkingDirectory=/opt/autokom/source/platform/backend
+EnvironmentFile=/etc/autokom/platform-backend.env
+ExecStart=/opt/autokom/venv/bin/python manage.py autokom_deployment_worker --interval 5
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -166,8 +166,9 @@ class GitHubWebhookAPIView(APIView):
             repo = payload.get('repository') or {}
             ref = str(payload.get('ref') or '')
             recorded = 0
+            from apps.deployments.runs.services import queue_verified_push
             for conn in GitConnection.objects.filter(provider='GITHUB', installation_id=installation_id, is_active=True):
-                _, created = GitWebhookEvent.objects.get_or_create(connection=conn, external_event_id=delivery_id, defaults={
+                event, created = GitWebhookEvent.objects.get_or_create(connection=conn, external_event_id=delivery_id, defaults={
                     'repository_external_id': str(repo.get('id') or ''),
                     'repository_full_name': str(repo.get('full_name') or '')[:300],
                     'event_type': event_type, 'branch': ref.replace('refs/heads/', '', 1)[:255],
@@ -176,7 +177,9 @@ class GitHubWebhookAPIView(APIView):
                     'status': 'RECEIVED' if event_type == 'push' else 'IGNORED',
                 })
                 recorded += int(created)
-            # Aucun déploiement lancé ici : consommateur d'événements à intégrer avec deployments plus tard.
-            return api_success({'accepted': True, 'recorded': recorded}, 'Événement GitHub enregistré.')
+                # Queue only after HMAC verification; durable idempotent DB operations, no Jenkins call here.
+                if event_type == 'push' and event.status == GitWebhookEvent.Status.RECEIVED:
+                    queue_verified_push(event)
+            return api_success({'accepted': True, 'recorded': recorded}, 'Push vérifié et synchronisation programmée si activée.')
         except Exception as exc:
             return handle_error(exc, 'github_webhook')
