@@ -68,6 +68,42 @@ class FrontendManagerTests(unittest.TestCase):
             result = fm.build_environment(fm.FRONTEND)
         self.assertEqual(result['VITE_AUTOKOM_AUTH_MODE'], 'cookie')
 
+    def test_certbot_email_is_optional(self):
+        self.assertEqual(fm.certbot_command('auto.ikom.mg', ''), [
+            'certbot', '--nginx', '--non-interactive', '--agree-tos', '--redirect',
+            '--register-unsafely-without-email', '-d', 'auto.ikom.mg'])
+        self.assertEqual(fm.certbot_command('auto.ikom.mg', 'contact@example.org')[-4:],
+                         ['--email', 'contact@example.org', '-d', 'auto.ikom.mg'])
+
+    def test_acme_email_prefers_explicit_then_runtime_fallback(self):
+        import sys
+        import types
+        fake = types.SimpleNamespace(read_env=lambda _: {'AUTOKOM_ACME_EMAIL': 'runtime@example.org'})
+        with mock.patch.dict(sys.modules, {'autokom_env_manager': fake}):
+            self.assertEqual(fm.acme_email('cli@example.org'), 'cli@example.org')
+            self.assertEqual(fm.acme_email(None), 'runtime@example.org')
+            with self.assertRaises(fm.FrontendError):
+                fm.acme_email('bad email')
+        fake = types.SimpleNamespace(read_env=lambda _: {})
+        with mock.patch.dict(sys.modules, {'autokom_env_manager': fake}):
+            self.assertEqual(fm.acme_email(None), '')
+
+    def test_setup_check_accepts_certbot_without_email(self):
+        import sys
+        import types
+        args = __import__('argparse').Namespace(
+            domain='auto.ikom.mg', backend_domain='backend.auto.ikom.mg',
+            tls_mode='certbot', email=None, nginx_mode='managed', apply=False, check=True)
+        fake = types.SimpleNamespace(read_env=lambda _: {})
+        with mock.patch.dict(sys.modules, {'autokom_env_manager': fake}), \
+             mock.patch.object(fm, 'ensure_source'), \
+             mock.patch.object(fm, 'existing_vhost_conflicts'), \
+             mock.patch.object(fm, 'save_state') as save, \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(fm.setup(args), 0)
+        save.assert_not_called()
+        self.assertIn('sans e-mail', output.getvalue())
+
     def test_source_and_lock_consistent(self):
         fm.ensure_source()
 

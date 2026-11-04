@@ -1,6 +1,6 @@
 # AUTOKOM — Frontend React/Vite et authentification par cookies (novembre 2026)
 
-**État : patch à intégrer après le commit `c35fd0a` sur Kali. Ne rien appliquer sur AWS avant revue.** Le visuel du frontend statique reste inchangé : `src/styles/**`, les illustrations et les composants métier du pipeline ne sont pas remplacés. Les nouveaux écrans de validation de compte / récupération de mot de passe utilisent `AuthFrame` et les classes CSS existantes.
+**État : frontend intégré dans `main` au commit `5d8d535`. Appliquer les correctifs CLI supplémentaires avant une nouvelle installation AWS.** Le visuel du frontend statique reste inchangé : `src/styles/**`, les illustrations et les composants métier du pipeline ne sont pas remplacés. Les nouveaux écrans de validation de compte / récupération de mot de passe utilisent `AuthFrame` et les classes CSS existantes.
 
 ## 1. Arborescence AUTOKOM (pas de /var/www)
 
@@ -15,7 +15,7 @@
 /etc/autokom/secrets/backend.env      secrets Django inchangés (root 0600)
 ```
 
-Nginx `root /opt/autokom/frontend/current;`, `location /api/` relaie vers Gunicorn `127.0.0.1:<port>` avec `Host: backend.auto.ik0m.tech`, `X-Forwarded-Proto` et cookies HTTP ordinaires (pas de réécriture de cookie Domain/Path). Le site React est exposé en HTTPS sous `auto.ik0m.tech`. Les cookies sans `Domain` appartiennent au domaine du navigateur qui reçoit la réponse proxifiée ; **ne pas faire appeler directement `backend.auto.ik0m.tech` depuis React**.
+Nginx `root /opt/autokom/frontend/current;`, `location /api/` relaie vers Gunicorn `127.0.0.1:<port>` avec `Host: backend.auto.ikom.mg`, `X-Forwarded-Proto` et cookies HTTP ordinaires (pas de réécriture de cookie Domain/Path). Le site React est exposé en HTTPS sous `auto.ikom.mg`. Les cookies sans `Domain` appartiennent au domaine du navigateur qui reçoit la réponse proxifiée ; **ne pas faire appeler directement `backend.auto.ikom.mg` depuis React**.
 
 Le setup refuse les configurations Nginx étrangères et les anciens vhosts HTTPS contenant une racine différente. **Ne jamais remplacer un vhost existant sans vérification de `nginx -T`.** Si un site a déjà été déployé sous `/var/www/autokom/frontend`, migrer son vhost et ses releases dans une fenêtre de maintenance, avec sauvegarde et rollback, sans écraser les fichiers.
 
@@ -44,9 +44,9 @@ La couche Django `ClientCookieJWTAuthentication` accepte les cookies sur tous le
 
 ```text
 DEBUG=False
-ALLOWED_HOSTS=backend.auto.ik0m.tech,127.0.0.1,localhost,...
-FRONTEND_URL=https://auto.ik0m.tech
-CSRF_TRUSTED_ORIGINS=https://auto.ik0m.tech,https://backend.auto.ik0m.tech,...
+ALLOWED_HOSTS=backend.auto.ikom.mg,127.0.0.1,localhost,...
+FRONTEND_URL=https://auto.ikom.mg
+CSRF_TRUSTED_ORIGINS=https://auto.ikom.mg,https://backend.auto.ikom.mg,...
 TRUST_PROXY_SSL_HEADER=true
 SECURE_SSL_REDIRECT=true
 ```
@@ -57,8 +57,8 @@ Les clés JWT et Django restent exclusivement dans `backend.env`. Ne pas mettre 
 
 | Variable `/etc/autokom/secrets/frontend.env` | Production | Fonction |
 |---|---|---|
-| `FRONTEND_URL` | `https://auto.ik0m.tech` | Domaine public React |
-| `BACKEND_URL` | `https://backend.auto.ik0m.tech` | Hôte logique Django (proxy loopback) |
+| `FRONTEND_URL` | `https://auto.ikom.mg` | Domaine public React |
+| `BACKEND_URL` | `https://backend.auto.ikom.mg` | Hôte logique Django (proxy loopback) |
 | `VITE_AUTOKOM_API_BASE` | `/api` | Chemins relatifs uniquement |
 | `VITE_AUTOKOM_FRONTEND_ONLY` | `false` | `true` conserve la présentation statique |
 | `VITE_AUTOKOM_API_ENABLED` | `true` | `false` désactive le parcours réel |
@@ -74,11 +74,11 @@ Le module hérité `src/config/projectAnalysisApi.js` contient des routes fantô
 ## 4. Préparation locale et tests AVANT le serveur
 
 ```bash
-cd ~/SOUTENANCE/AUTOKOM
+cd /home/raph/SOUTENANCE/AUTOKOM
 git status --short
-# À partir du commit c35fd0a et d'un worktree propre :
-git apply --check ~/Downloads/AUTOKOM_Frontend_Cookies_Opt_2026-11-04.patch
-git apply ~/Downloads/AUTOKOM_Frontend_Cookies_Opt_2026-11-04.patch
+# À partir du commit 5d8d535 et d'un worktree propre :
+git apply --check ~/Downloads/AUTOKOM_CLI_Certbot_EnvMenu_IKOMMG.patch
+git apply ~/Downloads/AUTOKOM_CLI_Certbot_EnvMenu_IKOMMG.patch
 npm --prefix platform/frontend test
 PYTHONPATH=scripts/lib python3 -m unittest discover -s tests -p test_autokom_frontend_manager.py -v
 python3 -m compileall -q platform/backend/apps/accounts/user scripts/lib
@@ -96,27 +96,27 @@ Ne pas activer ce mode tant que les tests Django avec CSRF `enforce_csrf_checks`
 sudo autokom update
 sudo autokom app frontend env show
 sudo autokom app frontend setup \
-  --domain auto.ik0m.tech \
-  --backend-domain backend.auto.ik0m.tech \
+  --domain auto.ikom.mg \
+  --backend-domain backend.auto.ikom.mg \
   --nginx-mode managed --tls-mode certbot \
-  --email VOTRE_EMAIL --check
+  --check
 # Après contrôle Nginx, DNS, Certbot et sauvegarde :
-sudo autokom app frontend setup --domain auto.ik0m.tech \
-  --backend-domain backend.auto.ik0m.tech --nginx-mode managed \
-  --tls-mode certbot --email VOTRE_EMAIL --apply
+sudo autokom app frontend setup --domain auto.ikom.mg \
+  --backend-domain backend.auto.ikom.mg --nginx-mode managed \
+  --tls-mode certbot --apply
 sudo autokom app frontend deploy --check
 sudo autokom app frontend deploy --apply
 sudo autokom app frontend status
 ```
 
-Si le vhost `auto.ik0m.tech` est déjà géré manuellement, utiliser `--nginx-mode existing --tls-mode existing` après revue manuelle du vhost et des permissions `/opt/autokom/frontend`. L'option `existing` ne modifie pas le vhost.
+Le `--email` du setup frontend est facultatif : priorité au `--email` explicite, puis à `AUTOKOM_ACME_EMAIL` dans runtime.env, sinon compte Certbot sans adresse (sans notifications). Si le vhost `auto.ikom.mg` est déjà géré manuellement, utiliser `--nginx-mode existing --tls-mode existing` après revue manuelle du vhost et des permissions `/opt/autokom/frontend`. L'option `existing` ne modifie pas le vhost.
 
 ### Smoke tests après publication
 
 ```bash
-curl -I https://auto.ik0m.tech/
-curl -i https://auto.ik0m.tech/api/health/
-curl -i -c /tmp/autokom-csrf.cookies https://auto.ik0m.tech/api/auth/browser/csrf/
+curl -I https://auto.ikom.mg/
+curl -i https://auto.ikom.mg/api/health/
+curl -i -c /tmp/autokom-csrf.cookies https://auto.ikom.mg/api/auth/browser/csrf/
 sudo nginx -t
 sudo autokom app frontend status
 ```
@@ -124,3 +124,18 @@ sudo autokom app frontend status
 Vérifier via DevTools que le CSRF apparaît et que **les JWT sont uniquement dans les cookies HttpOnly**, jamais dans `Local Storage`, `Session Storage`, les réponses JSON de connexion ou les URL. Exercer inscription, lien e-mail, connexion, rechargement, expiration access/refresh, changement de mot de passe, déconnexion, navigation directe `/projects`, rollback.
 
 **Limites de ce patch :** aucun déploiement AWS réalisé ; le cycle frontend React n'a pas été raccordé aux vrais dépôts GitHub ni à l'action Jenkins. Les tests Django dépendent de l'environnement Python/MySQL et doivent être validés en CI avant mise en production. Les tests Node de logique et les tests de CLI peuvent s'exécuter sans AWS.
+
+## 6. Menu d'édition des environnements (correctif de novembre 2026)
+
+`autokom app backend env edit` affiche un menu paginé lorsque le backend possède plus de huit variables. La navigation utilise ↑/↓, ←/→ et les touches 1–9. Le mode direct évite le menu :
+
+```bash
+sudo autokom app backend env edit FRONTEND_URL
+sudo autokom app backend env edit CORS_ALLOWED_ORIGINS
+sudo autokom app backend env edit CSRF_TRUSTED_ORIGINS
+sudo autokom app backend env edit GITHUB_APP_CALLBACK_URL
+sudo autokom app frontend env edit FRONTEND_URL
+sudo autokom app frontend env edit BACKEND_URL
+```
+
+Important : modifier l'environnement backend ne redémarre pas Gunicorn ; les modifications prennent effet après un redéploiement contrôlé. `autokom app deploy --check` est la prévisualisation backend, non `autokom app backend --check`.

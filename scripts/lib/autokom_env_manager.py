@@ -52,9 +52,12 @@ def tty():
 
 def select(title, choices, default=1):
     tty()
-    from menu import pick
+    from menu import pick, pick_paginated
     try:
-        index=pick('AUTOKOM · '+title, choices, default=default, cancel_label='Annuler')
+        if len(choices) > 8:
+            index=pick_paginated('AUTOKOM · '+title, choices, page_size=9)
+        else:
+            index=pick('AUTOKOM · '+title, choices, default=default, cancel_label='Annuler')
     except (KeyboardInterrupt, EOFError) as exc:
         raise EnvError('Opération annulée.') from exc
     if not index: raise EnvError('Opération annulée.')

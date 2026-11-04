@@ -201,13 +201,36 @@ def backend_port():
     return value
 
 
+def acme_email(explicit=None):
+    """Email facultatif : option CLI > runtime.env > aucune adresse.
+
+    On évite toute obligation de collecter une adresse pour Let's Encrypt.
+    """
+    value = (explicit or '').strip()
+    if not value:
+        from autokom_env_manager import read_env
+        value = read_env(Path('/etc/autokom/secrets/runtime.env')).get('AUTOKOM_ACME_EMAIL', '').strip()
+    if value and (not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', value) or len(value) > 254):
+        raise FrontendError('Adresse ACME invalide : corriger --email ou AUTOKOM_ACME_EMAIL.')
+    return value
+
+
+def certbot_command(front, email):
+    """Arguments non-interactifs, y compris si aucun e-mail n'est fourni."""
+    cmd = ['certbot', '--nginx', '--non-interactive', '--agree-tos', '--redirect']
+    if email:
+        cmd.extend(['--email', email])
+    else:
+        cmd.append('--register-unsafely-without-email')
+    return [*cmd, '-d', front]
+
+
 def setup(args):
     ensure_source()
     front, back = config_urls(args)
     if front == back:
         raise FrontendError('Les domaines frontend et backend doivent être distincts.')
-    if args.tls_mode == 'certbot' and (not args.email or '@' not in args.email):
-        raise FrontendError('Ajouter --email pour Let’s Encrypt.')
+    email = acme_email(args.email) if args.tls_mode == 'certbot' else ''
     if args.nginx_mode == 'existing' and args.tls_mode == 'certbot':
         raise FrontendError('Avec --nginx-mode existing, les certificats restent gérés par le vhost existant.')
     if args.nginx_mode == 'managed' and args.tls_mode == 'existing':
@@ -220,6 +243,8 @@ def setup(args):
         raise FrontendError('Changement de domaine/mode du site actif : migration manuelle requise.')
     print(f'  Frontend : https://{front} · Backend : https://{back}')
     print(f'  Déploiement : {RELEASES.parent} · Nginx : {args.nginx_mode} · HTTPS : {args.tls_mode}')
+    if args.tls_mode == 'certbot' and not email:
+        print('  › Certbot : enregistrement sans e-mail (notifications indisponibles).')
     if args.nginx_mode == 'managed':
         existing_vhost_conflicts(front)
         if VHOST.exists() and MARKER not in VHOST.read_text(encoding='utf-8'):
@@ -277,8 +302,7 @@ def setup(args):
                 link.unlink(missing_ok=True)
             raise
         if args.tls_mode == 'certbot':
-            run(['certbot', '--nginx', '--non-interactive', '--agree-tos', '--redirect',
-                 '--email', args.email, '-d', front], timeout=300)
+            run(certbot_command(front, email), timeout=300)
     save_state({'domain': front, 'backend_domain': back, 'nginx_mode': args.nginx_mode,
                 'tls_mode': args.tls_mode, 'releases': previous.get('releases', []) if previous else [],
                 'active': previous.get('active') if previous else None})
@@ -472,11 +496,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog='autokom app frontend')
     sub = parser.add_subparsers(dest='command', required=True)
     setup_p = sub.add_parser('setup', help='Préparer le frontend, le domaine, le reverse proxy et HTTPS')
-    setup_p.add_argument('--domain', help='Domaine frontend, ex. auto.ik0m.tech')
-    setup_p.add_argument('--backend-domain', help='Domaine Django, ex. backend.auto.ik0m.tech')
+    setup_p.add_argument('--domain', help='Domaine frontend, ex. auto.ikom.mg')
+    setup_p.add_argument('--backend-domain', help='Domaine Django, ex. backend.auto.ikom.mg')
     setup_p.add_argument('--nginx-mode', choices=('managed', 'existing'), default='managed')
     setup_p.add_argument('--tls-mode', choices=('certbot', 'existing'), default='certbot')
-    setup_p.add_argument('--email', help='Email ACME (nécessaire si --tls-mode certbot)')
+    setup_p.add_argument('--email', help='Email ACME facultatif (sinon runtime.env, ou aucun)')
     setup_p.add_argument('--check', action='store_true', help='Prévisualiser sans modifier')
     setup_p.add_argument('--apply', action='store_true', help='Effectuer explicitement le setup')
     deploy_p = sub.add_parser('deploy', help='Tests, scans, build Vite, publication atomique')
