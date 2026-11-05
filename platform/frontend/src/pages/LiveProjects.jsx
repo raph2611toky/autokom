@@ -20,6 +20,7 @@ export default function LiveProjects({ navigate, projectId = null }) {
   const [filter, setFilter] = useState('all')
   const [busy, setBusy] = useState(false)
   const [logs, setLogs] = useState({})
+  const [openedRun, setOpenedRun] = useState(null)
 
   useEffect(() => {
     let alive = true
@@ -67,13 +68,26 @@ export default function LiveProjects({ navigate, projectId = null }) {
 
   async function loadLogs(run) {
     if (!detail || busy) return
-    setBusy(true); setError('')
+    if (openedRun === run.id) { setOpenedRun(null); return }
+    setOpenedRun(run.id); setBusy(true); setError('')
     try {
       const result = await deploymentsApi.logs(detail.project.id, detail.environment.id, run.id)
       setLogs(current => ({ ...current, [run.id]: result.logs || [] }))
     } catch (err) { setError(errorText(err)) }
     finally { setBusy(false) }
   }
+
+  useEffect(() => {
+    const run = detail?.runs?.find(item => item.id === openedRun)
+    if (!detail || !run || !['QUEUED', 'RUNNING'].includes(run.status)) return
+    let alive = true
+    const timer = window.setInterval(() => {
+      deploymentsApi.logs(detail.project.id, detail.environment.id, run.id)
+        .then(result => { if (alive) setLogs(current => ({ ...current, [run.id]: result.logs || [] })) })
+        .catch(() => { /* Les erreurs réseau n'effacent jamais les journaux déjà affichés. */ })
+    }, 12000)
+    return () => { alive = false; window.clearInterval(timer) }
+  }, [detail?.project?.id, detail?.environment?.id, detail?.runs?.map(run => `${run.id}:${run.status}`).join('|'), openedRun])
 
   if (projectId) {
     if (loading) return <section className="ak-workspace-empty" role="status"><LoaderCircle size={19} className="ak-spin"/> Chargement du projet AUTOKOM…</section>
@@ -109,11 +123,14 @@ export default function LiveProjects({ navigate, projectId = null }) {
         <div className="ak-project-list">{runs.map(run => <div key={run.id} className="ak-project-row" style={{ flexWrap: 'wrap' }}>
           <div className="ak-project-row-symbol"><Workflow size={20}/></div>
           <div className="ak-project-row-main"><strong>Déploiement {String(run.id).slice(0, 8)}</strong><small>{formatDate(run.created_at)} · {run.status}</small></div>
-          <button type="button" className="button-outline" disabled={busy} onClick={() => loadLogs(run)}>Afficher les logs</button>
-          {logs[run.id] && <div style={{ flexBasis: '100%', width: '100%' }}>
-            <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: '0.8rem' }} role="log">
-              {logs[run.id].length ? logs[run.id].map(entry => `${entry.sequence ?? ''} ${entry.level ?? ''} ${entry.message ?? ''}`).join('\n') : 'Aucun journal disponible.'}
-            </pre>
+          <button type="button" className="button-outline" disabled={busy} onClick={() => loadLogs(run)}>{openedRun === run.id ? 'Masquer les logs' : 'Étapes et logs'}</button>
+          {openedRun === run.id && <div className="ak-run-observability" role="region" aria-label="Étapes et journaux de déploiement">
+            <div className="ak-run-stages">{(run.stages || []).map(stage => <div key={stage.stage_key} className="ak-run-stage">
+              <span>{stage.name}</span><strong>{stage.status === 'RUNNING' ? 'En cours' : stage.status === 'SUCCESS' ? 'Terminé' : stage.status === 'FAILED' ? 'Échec' : stage.status === 'SKIPPED' ? 'Ignoré' : 'En attente'}</strong>
+            </div>)}</div>
+            <pre className="ak-run-console" role="log" aria-live="off">{logs[run.id]?.length ? logs[run.id].map(entry => `${entry.sequence ?? ''} ${entry.level ?? ''} ${entry.message ?? ''}`).join('\n') : 'Aucun journal disponible.'}</pre>
+            {['QUEUED','RUNNING'].includes(run.status) && <small className="gh-muted">Statut actualisé automatiquement toutes les 15 s, journaux toutes les 12 s.</small>}
+            {run.error_message && <p className="feedback error" role="alert">{run.error_message}</p>}
           </div>}
         </div>)}</div>
       </section>

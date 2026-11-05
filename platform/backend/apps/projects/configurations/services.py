@@ -81,7 +81,10 @@ def check_entitlement(cfg):
     # Server-side product boundary: free includes only the trusted Vite STATIC recipe.
     # A client must not gain a paid backend runtime by editing request JSON.
     if not entitlement.resource_plan.is_premium and cfg.build_method != DeploymentConfig.BuildMethod.STATIC:
-        raise PermissionDenied('Offre gratuite limitée aux frontends statiques Vite. Applications serveur : offre adaptée requise.')
+        raise PermissionDenied(
+            'L’offre Découverte attend une configuration STATIC (Vite), mais le brouillon actuel est '
+            f'{cfg.build_method}. Revenez à Source GitHub, sélectionnez le dossier contenant package.json '
+            'et package-lock.json, attendez la détection Vite, puis enregistrez de nouveau.')
     if cfg.mode == 'DEVSECOPS' and entitlement.mode_offer.code != 'DEVSECOPS':
         raise PermissionDenied('Le mode DevSecOps nécessite une autorisation premium.')
     chosen = cfg.resource_plan or entitlement.resource_plan

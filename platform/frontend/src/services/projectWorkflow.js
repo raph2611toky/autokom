@@ -14,6 +14,32 @@ export function errorText(error) {
   return error?.message || 'Opération impossible.'
 }
 
+/** Les diagnostics GitHub de la sélection courante ont priorité sur les brouillons UI.
+ * Ne jamais envoyer une configuration DOCKERFILE gratuite par accident.
+ */
+export function verifiedDeploymentForm(form, analysis) {
+  if (!analysis || !analysis.available || analysis.confidence === 'low') {
+    throw new Error('Analyse du dossier GitHub incomplète : sélectionnez le dossier contenant package.json et attendez la détection.');
+  }
+  const selected = {
+    ...form, detectedKind: analysis.applicationType, detectedFramework: analysis.framework,
+    detectedVite: Boolean(analysis.isVite), hasNpmLockfile: Boolean(analysis.hasNpmLockfile),
+    hasDockerfile: Boolean(analysis.hasDockerfile),
+  }
+  const supportedVite = selected.detectedKind === 'static' && selected.detectedVite &&
+    ['React', 'Vue', 'Svelte'].includes(selected.detectedFramework)
+  if (selected.pricingPlan === 'free' && !supportedVite) {
+    throw new Error('Le projet sélectionné n’est pas reconnu comme React/Vue/Svelte + Vite. Choisissez le dossier source contenant package.json ; les applications serveur nécessitent une offre adaptée.');
+  }
+  if (supportedVite && !selected.hasNpmLockfile) {
+    throw new Error('package-lock.json absent du dossier source. La compilation automatique gratuite exige ce fichier.');
+  }
+  if (supportedVite && !analysis.build?.buildCommand) {
+    throw new Error('Le script npm « build » est absent de package.json. Ajoutez-le avant de déployer avec Vite.');
+  }
+  return selected
+}
+
 export function toBackendConfiguration(form) {
   const advanced = form.advancedBuild || {}
   const selectedDirectory = (form.workdir || './').trim()

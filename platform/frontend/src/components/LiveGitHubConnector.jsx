@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, ChevronRight, Folder, LockKeyhole, Search, Unplug } from 'lucide-react'
+import { Check, ChevronRight, ExternalLink, Folder, LoaderCircle, LockKeyhole, Search, Unplug } from 'lucide-react'
 import GitHubMark from './GitHubMark.jsx'
 import { GITHUB_AVAILABLE } from '../config/runtime.js'
 import { projectsApi, gitApi } from '../services/projectsApi.js'
@@ -17,6 +17,7 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
   const [repos, setRepos] = useState([])
   const [branches, setBranches] = useState([])
   const [directories, setDirectories] = useState([])
+  const [foldersLoading, setFoldersLoading] = useState(false)
   const [browsePath, setBrowsePath] = useState('')
   const [search, setSearch] = useState('')
   const [error, setError] = useState('')
@@ -56,7 +57,13 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
         } catch { sessionStorage.removeItem(INSTALL_HANDOFF) }
         const hinted = new URLSearchParams(window.location.search).get('installation_id') || ''
         const chosen = selectAuthorizedInstallation(installed, previous, hinted)
-        if (!form.githubInstallationId && chosen) update({ githubInstallationId: chosen })
+        // Le compte unique est imposé automatiquement ; une ancienne sélection
+        // (désormais révoquée) ne doit pas bloquer le parcours.
+        const currentAuthorized = installed.some(item => String(item.id) === String(form.githubInstallationId))
+        if (chosen && !currentAuthorized) {
+          update({ githubInstallationId: chosen, repository: '', repositorySlug: '',
+            githubRepositoryId: '', branch: '', workdir: './' })
+        }
         // After OAuth, continue the setup flow automatically if there is no installation.
         // GitHub still requires the user to approve its installation UI.
         if (!installed.length && status.installation_url &&
@@ -97,9 +104,11 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
   useEffect(() => {
     if (!GITHUB_AVAILABLE || !form.githubInstallationId || !form.githubRepositoryId || !form.branch) return
     let active = true
+    setFoldersLoading(true); setError(''); setDirectories([])
     gitApi.directories(form.githubInstallationId, form.githubRepositoryId, form.branch, browsePath).then(data => {
       if (active) setDirectories(data?.directories || [])
     }).catch(err => { if (active) { setDirectories([]); setError(errorText(err)) } })
+      .finally(() => { if (active) setFoldersLoading(false) })
     return () => { active = false }
   }, [form.githubInstallationId, form.githubRepositoryId, form.branch, browsePath])
 
@@ -139,7 +148,7 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
   function chooseRepo(repo) {
     setChosenRepo(repo)
     setBrowsePath('')
-    setDirectories([]); setBranches([]); setError('')
+    setDirectories([]); setBranches([]); setFoldersLoading(false); setError('')
     update({ repository: repo.html_url, repositorySlug: repo.full_name, githubRepositoryId: repo.id,
       branch: repo.default_branch, workdir: './', projectName: repo.name })
     onNotice?.(null)
@@ -172,8 +181,8 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
       }}><option value="">Choisir le compte…</option>{installations.map(item => <option key={item.id} value={item.id}>{item.account}</option>)}</select></label>
         : installations.length === 1 ? <p className="ak-simulation-disclosure" role="status">Compte GitHub sélectionné automatiquement : {installations[0].account}</p> :
           <p className="ak-simulation-disclosure">Aucun dépôt autorisé pour ce compte. GitHub demande votre accord avant l’installation.</p>}
-      {installationUrl && <button className="gh-subtle-button ak-gh-install-action" type="button" onClick={configureInstallation}>
-        {installations.length ? 'Gérer les dépôts autorisés' : 'Autoriser des dépôts GitHub'}
+      {installationUrl && <button className="gh-subtle-button ak-gh-install-action" type="button" onClick={configureInstallation} title="Ouvrir GitHub pour gérer les autorisations">
+        {installations.length ? 'Gérer les dépôts autorisés' : 'Autoriser des dépôts GitHub'} <ExternalLink size={15} aria-hidden="true"/>
       </button>}
       {!!form.githubInstallationId && <div className="gh-repo-browser">
         <label className="gh-search"><Search size={17}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Rechercher un dépôt…" aria-label="Rechercher un dépôt"/></label>
@@ -190,8 +199,11 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
         <div className="ak-gh-folders">
           <div className="ak-gh-folders-head"><strong>Dossier du projet (sources, package.json ou Dockerfile) — pas dist/build</strong><span>{form.workdir === './' ? 'Racine' : form.workdir}</span></div>
           <div className="ak-gh-breadcrumb"><button type="button" onClick={() => setBrowsePath('')}>Racine</button>{browsePath.split('/').filter(Boolean).map((part, idx, arr) => <span key={idx}><ChevronRight size={13}/><button type="button" onClick={() => setBrowsePath(arr.slice(0, idx+1).join('/'))}>{part}</button></span>)}</div>
-          <div className="ak-gh-folder-list">{directories.map(item => <button key={item.path} type="button" onClick={() => setBrowsePath(item.path)}><Folder size={17}/>{item.name}<ChevronRight size={15}/></button>)}{!directories.length && <small>Aucun sous-dossier à ce niveau.</small>}</div>
-          <button type="button" className="button-outline ak-gh-use-folder" onClick={() => { update({ workdir: browsePath || './' }); onNotice?.({ type: 'success', text: `Dossier source : ${browsePath || 'racine'}` }) }}><Check size={15}/> Choisir {browsePath || 'la racine'}</button>
+          <div className="ak-gh-folder-list" aria-busy={foldersLoading}>
+            {foldersLoading ? <div className="ak-gh-loading" role="status"><LoaderCircle className="ak-spin" size={17}/> Chargement du dossier GitHub…</div> : directories.map(item => <button key={item.path} type="button" onClick={() => setBrowsePath(item.path)}><Folder size={17}/>{item.name}<ChevronRight size={15}/></button>)}
+            {!foldersLoading && !directories.length && <small>Aucun sous-dossier à ce niveau.</small>}
+          </div>
+          <button type="button" className="button-outline ak-gh-use-folder" disabled={foldersLoading} onClick={() => { update({ workdir: browsePath || './' }); onNotice?.({ type: 'success', text: `Dossier source : ${browsePath || 'racine'}` }) }}><Check size={15}/> Choisir {browsePath || 'la racine'}</button>
         </div>
       </div>}
     </>}

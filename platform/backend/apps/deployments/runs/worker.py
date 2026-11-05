@@ -213,6 +213,13 @@ def poll_one(client, run_id):
                     error_message = ('Docker publié, état MySQL à réconcilier. '
                                      'Ne pas redéployer avant diagnostic.')
 
+        # A terminal Jenkins failure must not leave progress indicators stuck at RUNNING.
+        # Missing stage markers are *never* considered evidence of success.
+        if status in ('FAILED', 'BLOCKED', 'CANCELLED'):
+            PipelineStageRun.objects.filter(deployment=run, status='RUNNING').update(
+                status='FAILED' if status == 'FAILED' else 'SKIPPED', finished_at=timezone.now())
+            PipelineStageRun.objects.filter(deployment=run, status='PENDING').update(
+                status='SKIPPED', finished_at=timezone.now())
         DeploymentRun.objects.filter(pk=run_id, status='RUNNING').update(
             status=status, finished_at=timezone.now(), error_message=error_message)
         add_log(run, 'AUTOKOM_LOG: Exécution terminée : ' + status)

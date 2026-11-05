@@ -8,7 +8,11 @@ export function detectSource(files, packageJson = null) {
   if (has('package.json')) {
     runtime = 'Node.js'
     framework = deps.next ? 'Next.js' : deps.nuxt ? 'Nuxt' : deps['@nestjs/core'] ? 'NestJS' : deps['@angular/core'] ? 'Angular' : deps.vue ? 'Vue' : deps.react ? 'React' : deps.svelte ? 'Svelte' : deps.express ? 'Express / Node.js' : 'Node.js'
-    applicationType = (has('vite.config.js') || has('vite.config.ts') || (scripts.build && !scripts.start && !deps.next && !deps.nuxt)) ? 'static' : 'service'
+    // Vite peut être configuré directement dans package.json, sans vite.config.*.
+    // Ne jamais classer Next/Nuxt/Nest/Express comme site statique par simple présence d'un script build.
+    const viteCandidate = Boolean(has('vite.config.js') || has('vite.config.ts') || deps.vite)
+    const serverApp = Boolean(deps.next || deps.nuxt || deps['@nestjs/core'] || deps.express)
+    applicationType = (viteCandidate && !serverApp) || (scripts.build && !scripts.start && !serverApp) ? 'static' : 'service'
     build = { installCommand: has('pnpm-lock.yaml') ? 'pnpm install --frozen-lockfile' : has('yarn.lock') ? 'yarn install --frozen-lockfile' : 'npm ci', buildCommand: scripts.build ? 'npm run build' : '', testCommand: scripts.test ? 'npm test' : '', outputDir: deps.next || deps.nuxt ? '' : has('vite.config.js') || has('vite.config.ts') ? 'dist' : '', startCommand: scripts.start ? 'npm start' : '', appPort: deps.next ? '3000' : '' }
     confidence = deps.react || deps.vue || deps.next || deps.nuxt || deps.svelte ? 'high' : 'medium'
   } else if (has('manage.py') || has('requirements.txt') || has('pyproject.toml')) {
@@ -23,5 +27,6 @@ export function detectSource(files, packageJson = null) {
   else if (has('dockerfile')) { runtime = 'Docker'; framework = 'Docker'; applicationType = 'container'; build = { dockerfile: 'Dockerfile' } }
   else { confidence = 'low' }
   if (has('dockerfile')) build.dockerfile = 'Dockerfile'
-  return { framework, runtime, applicationType, isVite: Boolean(has('package.json') && (has('vite.config.js') || has('vite.config.ts') || deps.vite)), confidence, build, resources, available: confidence !== 'low', explanation: 'Analyse indicative des fichiers GitHub. Les commandes exactes seront validées lors du déploiement.', warnings: confidence === 'low' ? ['Structure non reconnue : vérifiez les paramètres avancés.'] : [], applications: [] }
+  return { framework, runtime, applicationType, hasNpmLockfile: has('package-lock.json'), hasDockerfile: has('dockerfile'),
+    isVite: Boolean(has('package.json') && (has('vite.config.js') || has('vite.config.ts') || deps.vite)), confidence, build, resources, available: confidence !== 'low', explanation: 'Analyse indicative des fichiers GitHub. Les commandes exactes seront validées lors du déploiement.', warnings: confidence === 'low' ? ['Structure non reconnue : vérifiez les paramètres avancés.'] : [], applications: [] }
 }

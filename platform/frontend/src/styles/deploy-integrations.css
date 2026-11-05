@@ -104,3 +104,17 @@
 /* Installation GitHub : action lisible en thèmes sombre et clair. */
 .ak-gh-workspace .ak-gh-install-action { color: var(--ak-accent); background: var(--ak-accent-soft); border: 1px solid var(--ak-accent-border); padding: 11px 13px; margin-top: 9px; }
 .ak-gh-workspace .ak-gh-install-action:hover { color: var(--ak-accent-hover); border-color: var(--ak-accent); }
+
+/* Retour de déploiement : durée gérée par React, respiration avant les étapes. */
+.ak-deploy-notice { margin-bottom: 24px; }
+/* Actions GitHub explicites et accessibles même sans survol. */
+.ak-gh-workspace .ak-gh-install-action { display:inline-flex; align-items:center; gap:8px; font-weight:700; text-decoration:underline; text-underline-offset:3px; }
+.ak-gh-workspace .ak-gh-install-action:focus-visible { outline:2px solid var(--ak-accent); outline-offset:3px; }
+.ak-gh-workspace .ak-gh-loading { min-height:54px; padding:12px; }
+
+/* Observabilité Jenkins / BuildKit / Nginx, dans les cartes Mes projets existantes. */
+.ak-run-observability { flex-basis:100%; min-width:0; width:100%; margin-top:10px; border-top:1px solid var(--ak-border); padding-top:14px; }
+.ak-run-stages { display:grid; grid-template-columns:repeat(auto-fit,minmax(175px,1fr)); gap:7px; margin-bottom:14px; }
+.ak-run-stage { display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; border:1px solid var(--ak-border); background:var(--ak-surface-2); padding:10px 12px; font-size:11px; }
+.ak-run-stage strong { color:var(--ak-accent); }
+.ak-run-console { white-space:pre-wrap; overflow-wrap:anywhere; max-height:300px; overflow:auto; font-size:11px; line-height:1.6; padding:14px; border:1px solid var(--ak-border); background:var(--ak-surface-2); color:var(--ak-text); }
