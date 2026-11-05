@@ -5,6 +5,11 @@ import { projectsApi } from './projectsApi.js'
 import { deploymentsApi } from './deploymentsApi.js'
 
 export function errorText(error) {
+  const raw = String(error?.message || '')
+  if (/Service de contrôle AUTOKOM indisponible|Jenkins ou AUTOKOM|Compte de service Jenkins/.test(raw)) {
+    return 'La publication est temporairement indisponible. Votre projet est conservé : réessayez plus tard.'
+  }
+
   const errors = error?.errors
   if (errors && typeof errors === 'object') {
     const details = Object.entries(errors).flatMap(([field, value]) =>
@@ -54,8 +59,6 @@ export function toBackendConfiguration(form) {
     throw new Error('Ce framework nécessite un Dockerfile ou une offre backend adaptée. La version gratuite automatique couvre actuellement React/Vue/Svelte avec Vite.')
   }
   const dockerfile = String(advanced.dockerfile || 'Dockerfile').trim()
-  const portValue = viteStatic ? 8080 : Number(advanced.appPort || 8000)
-  if (!Number.isSafeInteger(portValue) || portValue < 1 || portValue > 65535) throw new Error('Port interne invalide.')
   const mode = (form.pipelineMode || 'devops').toUpperCase()
   if (!['DEVOPS', 'DEVSECOPS'].includes(mode)) throw new Error('Mode de pipeline invalide.')
   return {
@@ -64,7 +67,6 @@ export function toBackendConfiguration(form) {
     build_command: viteStatic ? '' : String(advanced.buildCommand || ''),
     start_command: viteStatic ? '' : String(advanced.startCommand || ''),
     output_directory: viteStatic ? 'dist' : String(advanced.outputDir || ''),
-    internal_port: portValue,
     auto_deploy: Boolean(form.autoDeploy), auto_deploy_branch: form.autoDeploy ? form.branch : '',
   }
 }

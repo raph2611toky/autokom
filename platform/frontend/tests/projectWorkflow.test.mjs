@@ -44,11 +44,11 @@ test('format Django : Dockerfile, pas de données UI fictives ni de serveur lanc
   assert.equal(data.dockerfile_path, 'Dockerfile')
   assert.equal(data.root_directory, '')
   assert.equal(data.auto_deploy, true)
-  assert.equal(data.internal_port, 8000)
+  assert.equal(Object.hasOwn(data, 'internal_port'), false)
   assert.equal(data.runtime_type, 'OTHER')
   assert.ok(!Object.hasOwn(data, 'services'))
   assert.throws(() => toBackendConfiguration({ ...baseForm, workdir: '../secrets' }), /Dossier/)
-  assert.throws(() => toBackendConfiguration({ ...baseForm, advancedBuild: { appPort: 90000 } }), /Port/)
+  assert.equal(Object.hasOwn(toBackendConfiguration({ ...baseForm, advancedBuild: { appPort: 90000 } }), 'internal_port'), false)
   assert.match(errorText({ errors: { branch: ['Branche Git invalide.'] } }), /branch : Branche Git invalide/)
 })
 

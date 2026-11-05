@@ -105,10 +105,10 @@ def _create_run(env, cfg, resources, *, actor, trigger, sha, idem, event=None):
         mode_snapshot=cfg.mode, resources_snapshot=resources,
         commit_sha=sha, branch=cfg.branch, idempotency_key=idem,
         ci_provider='JENKINS', status=DeploymentRun.Status.QUEUED)
-    stage_specs = [('source','Récupération GitHub','git'), ('sast','SAST / Semgrep','semgrep'),
-                   ('sca','SCA / Trivy','trivy'), ('build','Build isolé','buildkit'),
-                   ('release','Docker privé · AUTOKOM','docker'),
-                   ('health','Healthcheck & Nginx TLS','nginx')]
+    stage_specs = [('source','Récupération du projet','git'), ('sast','Analyse du code','semgrep'),
+                   ('sca','Vérification des dépendances','trivy'), ('build','Création de votre application','buildkit'),
+                   ('release','Mise en ligne','docker'),
+                   ('health','Vérification du site','nginx')]
     if cfg.mode == 'DEVOPS':
         stage_specs = [st for st in stage_specs if st[0] not in ('sast', 'sca')]
     PipelineStageRun.objects.bulk_create([

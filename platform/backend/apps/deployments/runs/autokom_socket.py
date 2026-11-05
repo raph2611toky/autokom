@@ -3,6 +3,9 @@
 No subprocess, Docker SDK, Nginx/Certbot writes, SSH or shell in backend.
 """
 import json
+import logging
+
+logger = logging.getLogger("autokom.runtime.control")
 import socket
 from django.conf import settings
 from rest_framework.exceptions import APIException
@@ -37,9 +40,12 @@ def request_control(action, params=None, *, timeout=30):
         reply=json.loads(buffer)
         if not reply.get('ok'):
             # Error text is generic, never reveal socket path, process args or secrets.
-            raise AutokomControlUnavailable(str(reply.get('error','Opération refusée.'))[:230])
+            logger.warning('Broker refuse %s (category=broker_refusal)', action)
+            raise AutokomControlUnavailable()
         return reply['result']
     except AutokomControlUnavailable:
         raise
     except (OSError,ValueError,KeyError,TypeError,TimeoutError) as exc:
+        # No exception text: paths, credentials and command output are never logged.
+        logger.warning('Broker injoignable action=%s cause=%s', action, type(exc).__name__)
         raise AutokomControlUnavailable() from exc

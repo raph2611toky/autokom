@@ -31,7 +31,7 @@ test('React et Vue sous Vite = sources, dist est produit au build', () => {
   assert.equal(cfg.build_method,'STATIC')
   assert.equal(cfg.runtime_type,'STATIC')
   assert.equal(cfg.output_directory,'dist')
-  assert.equal(cfg.internal_port,8080)
+  assert.equal(Object.hasOwn(cfg, 'internal_port'), false)
   assert.equal(cfg.root_directory,'portfolio-app')
 })
 

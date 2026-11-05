@@ -197,7 +197,7 @@ def poll_one(client, run_id):
                 logger.warning('Publication AUTOKOM refusée pour %s (%s)',
                                run.pk, type(exc).__name__)
                 status = 'FAILED'
-                error_message = 'Activation Docker, Nginx ou commit AUTOKOM impossible.'
+                error_message = 'La mise en ligne a échoué. La version précédente est conservée.'
                 PipelineStageRun.objects.filter(deployment=run,
                     stage_key__in=('release', 'health')).update(
                         status='FAILED', finished_at=timezone.now())

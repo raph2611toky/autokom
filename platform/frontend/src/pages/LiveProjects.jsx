@@ -10,7 +10,7 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? 'Non renseignée' : new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium' }).format(date)
 }
 
-/** Même composants visuels que Projects.jsx, sources exclusivement Django. */
+/** Même composants visuels que Projects.jsx, sources exclusivement AUTOKOM. */
 export default function LiveProjects({ navigate, projectId = null }) {
   const [projects, setProjects] = useState([])
   const [detail, setDetail] = useState(null)
@@ -101,7 +101,7 @@ export default function LiveProjects({ navigate, projectId = null }) {
         <button className="button-primary" type="button" onClick={() => editProject(project)} disabled={project.status === 'ARCHIVED'}><Settings2 size={17}/> Modifier</button></section>
       {error && <p className="feedback error" role="alert">{error}</p>}
       <section className="ak-workspace-sheet">
-        <div className="ak-workspace-sheet-heading"><h2>Configuration du projet</h2><span className="ak-project-state">{cfg?.is_draft ? 'Brouillon Django' : cfg ? 'Configuration finalisée' : 'Sans configuration'}</span></div>
+        <div className="ak-workspace-sheet-heading"><h2>Configuration du projet</h2><span className="ak-project-state">{cfg?.is_draft ? 'Brouillon' : cfg ? 'Configuration finalisée' : 'Sans configuration'}</span></div>
         <dl className="ak-site-info-grid ak-workspace-details">
           <div><dt>Dépôt GitHub</dt><dd>{project.repository_name}</dd></div>
           <div><dt>Branche</dt><dd>{cfg?.branch || project.default_branch}</dd></div>
@@ -118,17 +118,17 @@ export default function LiveProjects({ navigate, projectId = null }) {
         </div>
       </section>
       <section className="ak-workspace-sheet">
-        <div className="ak-workspace-sheet-heading"><h2>Déploiements et logs</h2><span className="ak-project-state">{runs.length} exécution(s)</span></div>
-        {runs.length === 0 && <p className="gh-muted">Aucun pipeline Jenkins lancé pour cet environnement.</p>}
+        <div className="ak-workspace-sheet-heading"><h2>Historique des publications</h2><span className="ak-project-state">{runs.length} exécution(s)</span></div>
+        {runs.length === 0 && <p className="gh-muted">Aucune publication pour le moment.</p>}
         <div className="ak-project-list">{runs.map(run => <div key={run.id} className="ak-project-row" style={{ flexWrap: 'wrap' }}>
           <div className="ak-project-row-symbol"><Workflow size={20}/></div>
           <div className="ak-project-row-main"><strong>Déploiement {String(run.id).slice(0, 8)}</strong><small>{formatDate(run.created_at)} · {run.status}</small></div>
-          <button type="button" className="button-outline" disabled={busy} onClick={() => loadLogs(run)}>{openedRun === run.id ? 'Masquer les logs' : 'Étapes et logs'}</button>
-          {openedRun === run.id && <div className="ak-run-observability" role="region" aria-label="Étapes et journaux de déploiement">
+          <button type="button" className="button-outline" disabled={busy} onClick={() => loadLogs(run)}>{openedRun === run.id ? 'Masquer les logs' : 'Suivre la publication'}</button>
+          {openedRun === run.id && <div className="ak-run-observability" role="region" aria-label="Progression de la publication">
             <div className="ak-run-stages">{(run.stages || []).map(stage => <div key={stage.stage_key} className="ak-run-stage">
-              <span>{stage.name}</span><strong>{stage.status === 'RUNNING' ? 'En cours' : stage.status === 'SUCCESS' ? 'Terminé' : stage.status === 'FAILED' ? 'Échec' : stage.status === 'SKIPPED' ? 'Ignoré' : 'En attente'}</strong>
+              <span>{{source:'Récupération du projet',sast:'Analyse du code',sca:'Vérification de sécurité',build:'Préparation du site',release:'Mise en ligne',health:'Vérification du site'}[stage.stage_key] || 'Vérification'}</span><strong>{stage.status === 'RUNNING' ? 'En cours' : stage.status === 'SUCCESS' ? 'Terminé' : stage.status === 'FAILED' ? 'Échec' : stage.status === 'SKIPPED' ? 'Ignoré' : 'En attente'}</strong>
             </div>)}</div>
-            <pre className="ak-run-console" role="log" aria-live="off">{logs[run.id]?.length ? logs[run.id].map(entry => `${entry.sequence ?? ''} ${entry.level ?? ''} ${entry.message ?? ''}`).join('\n') : 'Aucun journal disponible.'}</pre>
+
             {['QUEUED','RUNNING'].includes(run.status) && <small className="gh-muted">Statut actualisé automatiquement toutes les 15 s, journaux toutes les 12 s.</small>}
             {run.error_message && <p className="feedback error" role="alert">{run.error_message}</p>}
           </div>}
@@ -145,7 +145,7 @@ export default function LiveProjects({ navigate, projectId = null }) {
         <div className="search-field"><Search size={17}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Rechercher un projet" aria-label="Rechercher un projet"/></div>
         <div className="ak-workspace-filters" aria-label="Filtrer les projets">{[['all','Tous'], ['active','Actifs'], ['archived','Archivés']].map(([value,label]) => <button key={value} type="button" className={filter === value ? 'active' : ''} aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}</button>)}</div>
       </div>
-      {loading ? <div className="ak-workspace-empty" role="status"><LoaderCircle size={19} className="ak-spin"/> Chargement des projets depuis Django…</div> : visible.length ? <div className="ak-project-list">{visible.map(project => <div className="ak-project-row" key={project.id}>
+      {loading ? <div className="ak-workspace-empty" role="status"><LoaderCircle size={19} className="ak-spin"/> Chargement des projets…</div> : visible.length ? <div className="ak-project-list">{visible.map(project => <div className="ak-project-row" key={project.id}>
         <div className="ak-project-row-symbol"><FolderKanban size={21}/></div>
         <button type="button" className="ak-project-row-main" onClick={() => navigate(`/projects/${project.id}`)}><strong>{project.name}</strong><small><GitBranch size={13}/>{project.repository} · {project.branch}</small></button>
         <span className="ak-project-state">{project.status === 'ARCHIVED' ? 'Archivé' : 'Actif'}</span>

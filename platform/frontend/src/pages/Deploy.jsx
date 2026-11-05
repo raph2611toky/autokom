@@ -17,8 +17,8 @@ const KEY = 'autokom.projects.drafts.v12'
 const INITIAL = { id: '', projectName: '', repository: '', repositorySlug: '', githubRepositoryId: '', githubInstallationId: '', organizationId: '', backendProjectId: '', backendEnvironmentId: '', branch: '', workdir: './',
   pricingPlan: 'free', billingPeriod: 'monthly', resourcePlan: 'free', highAvailability: false, pipelineMode: 'devsecops', environment: 'production',
   domainMode: 'autokom', domain: '', autoDeploy: true, advancedBuild: {}, services: { ...DEFAULT_SERVICES }, updatedAt: '' }
-const STEPS = ['Source GitHub', 'Configuration', 'Vérification']
-const BUILD_FIELDS = [['installCommand','Installation'],['buildCommand','Build'],['testCommand','Tests'],['outputDir','Sortie'],['startCommand','Démarrage'],['appPort','Port'],['dockerfile','Dockerfile']]
+const STEPS = ['Source GitHub', 'Configuration', 'Publication']
+const BUILD_FIELDS = [['installCommand','Installation'],['buildCommand','Build'],['testCommand','Tests'],['outputDir','Sortie'],['startCommand','Démarrage'],['dockerfile','Dockerfile']]
 function readDrafts() { try {
   const current = JSON.parse(localStorage.getItem(KEY) || '[]')
   if (Array.isArray(current) && current.length) return current.map(d => ({ ...d, pricingPlan: inferPricingPlan(d), billingPeriod: d.billingPeriod || 'monthly' }))
@@ -42,7 +42,7 @@ export default function Deploy({ navigate }) {
   const [busy, setBusy] = useState(false)
   const [githubConnected, setGithubConnected] = useState(false)
   const [remoteIds, setRemoteIds] = useState(null)
-  const [serverPreview, setServerPreview] = useState(null)
+  const [, setServerPreview] = useState(null)
   const launchKey = useRef(null)
   useEffect(() => {
     try {
@@ -51,7 +51,7 @@ export default function Deploy({ navigate }) {
         if (ghResult) {
           sessionStorage.removeItem('autokom.githubConnectionNotice')
           setNotice({ type: ghResult === 'connected' ? 'success' : 'error',
-            text: ghResult === 'connected' ? 'GitHub connecté. Choisissez votre installation et votre dépôt.' : ghResult === 'denied' ? 'Autorisation GitHub annulée ou refusée.' : 'Échec technique de connexion GitHub. Consultez les journaux Django avec sudo autokom app backend logs --github.' })
+            text: ghResult === 'connected' ? 'GitHub connecté. Choisissez votre installation et votre dépôt.' : ghResult === 'denied' ? 'Autorisation GitHub annulée ou refusée.' : 'Connexion momentanément indisponible. Réessayez.' })
         }
         const remoteId = sessionStorage.getItem('autokom.ui.editRemoteProject')
         if (remoteId) {
@@ -132,7 +132,7 @@ export default function Deploy({ navigate }) {
         setRemoteIds({ backendProjectId: saved.projectId, backendEnvironmentId: saved.environmentId, configurationId: saved.configurationId })
         setForm(current => ({ ...current, backendProjectId: saved.projectId, backendEnvironmentId: saved.environmentId }))
         setServerPreview(null)
-        setNotice({ type: 'success', text: 'Projet et configuration enregistrés sur AUTOKOM. Aucun déploiement lancé.' })
+        setNotice({ type: 'success', text: 'Votre projet a été enregistré.' })
         return saved
       } catch (error) { setNotice({ type: 'error', text: errorText(error) }); return null }
       finally { setBusy(false) }
@@ -149,7 +149,7 @@ export default function Deploy({ navigate }) {
   function reset(){setForm({...INITIAL, ...planToDeployment(getPreferredPlan()), billingPeriod:getBillingPeriod(), ...(API_AVAILABLE ? {pipelineMode:'devops'} : {})});setStep(0);setAnalysis(null);setNotice(null);setRemoteIds(null);setServerPreview(null);launchKey.current=null}
   async function previewPipeline() {
     if (API_AVAILABLE) {
-      if (serverPreview) { setNotice({ type: 'success', text: 'Prévisualisation déjà validée : vous pouvez lancer Jenkins.' }); return }
+      if (busy) return
       if (busy || projectError) { if (projectError) setNotice({ type: 'error', text: projectError }); return }
       setBusy(true); setNotice(null)
       try {
@@ -163,7 +163,12 @@ export default function Deploy({ navigate }) {
         setForm(current => ({ ...current, backendProjectId: ids.projectId, backendEnvironmentId: ids.environmentId }))
         const preview = await prepareRemoteDeployment(ids)
         setServerPreview(preview)
-        setNotice({ type: 'success', text: 'Prévisualisation validée par Django. Confirmez l’exécution du pipeline Jenkins.' })
+        // Le clic « Déployer » est déjà la confirmation de l’utilisateur.
+        // Le backend vérifie les droits et la disponibilité du service avant de mettre en file.
+        const key = launchKey.current || crypto.randomUUID()
+        launchKey.current = key
+        const response = await deploymentsApi.launch(ids.projectId, ids.environmentId, key)
+        navigate(`/projects/${ids.projectId}`)
       } catch (error) { setNotice({ type: 'error', text: errorText(error) }) }
       finally { setBusy(false) }
       return
@@ -183,30 +188,17 @@ export default function Deploy({ navigate }) {
     } catch { setNotice({type:'error',text:'Le parcours n’a pas pu être enregistré.'}) }
   }
 
-  async function launchRemote() {
-    if (!API_AVAILABLE || !serverPreview || busy || !remoteIds?.backendProjectId || !remoteIds?.backendEnvironmentId) return
-    if (!window.confirm('Lancer réellement le pipeline Jenkins pour ce projet ?')) return
-    const key = launchKey.current || crypto.randomUUID()
-    launchKey.current = key
-    setBusy(true); setNotice(null)
-    try {
-      const response = await deploymentsApi.launch(remoteIds.backendProjectId, remoteIds.backendEnvironmentId, key)
-      setNotice({ type: 'success', text: `Déploiement ${response?.deployment?.id || ''} placé en file Jenkins.` })
-      navigate(`/projects/${remoteIds.backendProjectId}`)
-    } catch (error) { setNotice({ type: 'error', text: errorText(error) }) }
-    finally { setBusy(false) }
-  }
 
   return <>
     <section className="page-hero ak-deploy-hero"><div><h1>Déployer un projet</h1></div><button className="button-quiet new-project" onClick={reset} type="button"><Plus size={17}/> Nouveau projet</button></section>
-    {notice && <div className={`feedback ${notice.type} ak-deploy-notice`} role="status" aria-live="polite">{notice.text}</div>}
-    {API_AVAILABLE && <p className="ak-simulation-disclosure">Mode connecté : les projets, configurations et déploiements sont gérés par Django. Les offres payantes et le mode DevSecOps nécessitent des droits actifs sur le backend.</p>}
+    {!API_AVAILABLE && notice && <div className={`feedback ${notice.type} ak-deploy-notice`} role="status" aria-live="polite">{notice.text}</div>}
+
     <div className="deploy-layout ak-quick-deploy"><div className="deploy-column">
       <div className="step-navigation ak-simple-steps" role="group" aria-label="Étapes">{STEPS.map((s,i)=><button type="button" key={s} className={`step-tab ${i===step?'current':''} ${i<step?'completed':''}`} onClick={()=>{if(i<=step)setStep(i)}}><span className="step-number">{i<step?<Check size={15}/>:i+1}</span><span>{s}</span></button>)}</div>
       <section className="cut-frame main-panel"><div className="cut-body">
         {step===0 && <><div className="panel-heading"><h2>Choisissez votre dépôt</h2></div><GitHubConnector form={form} update={data => {update(data);setAnalysis(null);setServerPreview(null)}} onNotice={setNotice} onConnectionChange={setGithubConnected}/>{form.githubRepositoryId && <label className="field ak-project-name"><span>Nom du projet</span><input value={form.projectName} onChange={e=>update({projectName:e.target.value})} placeholder="Nom de votre application"/></label>}</>}
         {step===1 && <><div className="panel-heading"><h2>Configuration</h2></div><div className={`ak-analysis-state state-${analysisStatus}`} role="status">{analysisStatus==='loading'?<LoaderCircle size={19} className="ak-spin"/>:<Info size={19}/>}<div><strong>{analysisStatus==='loading'?'Analyse du dépôt…':analysis ? `${analysis.framework} · ${analysis.runtime}` : API_AVAILABLE ? 'Configuration du dépôt réel' : 'Analyse du projet'}</strong><small>{analysis ? `Source : ${form.workdir} · Détection ${analysis.confidence === 'high' ? 'élevée' : 'indicative'}` : API_AVAILABLE ? (analysisError || 'Analyse GitHub du dossier source sélectionné, sans build préalable.') : analysisError || 'Lecture des fichiers GitHub.'}</small></div></div>
-          {API_AVAILABLE && analysis && <p className="ak-simulation-disclosure">{analysis.applicationType === 'static' ? 'Projet frontend : sélectionnez le dossier contenant package.json et package-lock.json. Vite créera dist lors du build, sans le demander dans GitHub.' : 'Application serveur : un Dockerfile est actuellement nécessaire et les offres backend sont en préparation.'}</p>}
+
           {API_AVAILABLE && analysis?.applicationType === 'static' && analysis?.isVite && !analysis?.hasNpmLockfile && <p className="feedback error" role="alert">Ajoutez package-lock.json à votre dossier source pour activer la compilation reproductible gratuite.</p>}
           {analysis?.warnings?.length>0 && <div className="ak-analysis-warnings">{analysis.warnings.map(w=><p key={w}><Info size={15}/>{w}</p>)}</div>}
           <div className="ak-offer-header"><h3>Offre d’hébergement</h3><button className="ak-see-prices" type="button" onClick={() => navigate('/pricing')}>Comparer les tarifs <ArrowRight size={15}/></button></div>
@@ -219,12 +211,13 @@ export default function Deploy({ navigate }) {
             </button>)}
           </div>
           {form.pricingPlan === 'pro' && <label className="ak-ha-choice"><span><strong>Haute disponibilité</strong><small>Deux serveurs distincts au maximum, sous réserve de disponibilité.</small></span><input type="checkbox" checked={form.highAvailability} onChange={e => update({highAvailability:e.target.checked})} aria-label="Activer la haute disponibilité"/></label>}
-          <div className="ak-essentials"><label className="field"><span>Pipeline</span><select value={form.pipelineMode} onChange={e=>update({pipelineMode:e.target.value})}><option value="devsecops">DevSecOps</option><option value="devops">DevOps</option></select></label><label className="field"><span>Environnement</span><select value={form.environment} onChange={e=>update({environment:e.target.value})}><option value="development">Développement</option><option value="staging">Préproduction</option><option value="production">Production</option></select></label><label className="field"><span>Domaine</span><select value={form.domainMode} onChange={e=>update({domainMode:e.target.value})}><option value="autokom">Sous-domaine AUTOKOM</option><option value="custom">Domaine personnalisé</option></select></label>{form.domainMode==='custom'&&<label className="field"><span>Nom de domaine</span><input value={form.domain} onChange={e=>update({domain:e.target.value})} placeholder="app.exemple.com"/></label>}</div>
-          <details className="ak-advanced-settings"><summary><Settings2 size={17}/> Paramètres avancés <span>facultatif</span></summary><div className="ak-advanced-grid">{BUILD_FIELDS.map(([key,label])=><label className="field" key={key}><span>{label}</span><input value={form.advancedBuild[key]??''} placeholder={analysis?.build?.[key] || 'Détection automatique'} onChange={e=>updateBuild(key,e.target.value)}/></label>)}</div><label className="ak-simple-checkbox"><input type="checkbox" checked={form.autoDeploy} onChange={e=>update({autoDeploy:e.target.checked})}/> Déploiement automatique sur push</label>{API_AVAILABLE && <p className="ak-simulation-disclosure">Les choix d’outils ci-dessous décrivent les préférences UI ; seuls les paramètres pris en charge par la configuration Django sont enregistrés. Le pipeline Jenkins applique ses contrôles de sécurité côté serveur.</p>}<ServiceCatalog services={form.services || DEFAULT_SERVICES} capabilities={[]} capabilitiesLoaded={false} onChange={(group, choice)=>update({services:{...(form.services || DEFAULT_SERVICES),[group]:choice}})}/></details>
+          <div className="ak-essentials"><label className="field"><span>Type de publication</span><select value={form.pipelineMode} onChange={e=>update({pipelineMode:e.target.value})}><option value="devsecops">Protection renforcée</option><option value="devops">Standard</option></select></label><label className="field"><span>Environnement</span><select value={form.environment} onChange={e=>update({environment:e.target.value})}><option value="development">Développement</option><option value="staging">Préproduction</option><option value="production">Production</option></select></label><label className="field"><span>Domaine</span><select value={form.domainMode} onChange={e=>update({domainMode:e.target.value})}><option value="autokom">Sous-domaine AUTOKOM</option><option value="custom">Domaine personnalisé</option></select></label>{form.domainMode==='custom'&&<label className="field"><span>Nom de domaine</span><input value={form.domain} onChange={e=>update({domain:e.target.value})} placeholder="app.exemple.com"/></label>}</div>
+          <details className="ak-advanced-settings"><summary><Settings2 size={17}/> Paramètres avancés <span>facultatif</span></summary><div className="ak-advanced-grid">{(!API_AVAILABLE ? BUILD_FIELDS : []).map(([key,label])=><label className="field" key={key}><span>{label}</span><input value={form.advancedBuild[key]??''} placeholder={analysis?.build?.[key] || 'Détection automatique'} onChange={e=>updateBuild(key,e.target.value)}/></label>)}</div><label className="ak-simple-checkbox"><input type="checkbox" checked={form.autoDeploy} onChange={e=>update({autoDeploy:e.target.checked})}/> Déploiement automatique sur push</label>{!API_AVAILABLE && <ServiceCatalog services={form.services || DEFAULT_SERVICES} capabilities={[]} capabilitiesLoaded={false} onChange={(group, choice)=>update({services:{...(form.services || DEFAULT_SERVICES),[group]:choice}})}/>}</details>
         </>}
-        {step===2 && <><div className="panel-heading"><h2>Votre projet</h2></div><div className="ak-review-list"><div><GitBranch size={17}/><span>Dépôt</span><strong>{form.repositorySlug}</strong></div><div><Code2 size={17}/><span>Branche et dossier</span><strong>{form.branch} · {form.workdir}</strong></div><div><Code2 size={17}/><span>Framework</span><strong>{analysis?.framework || (API_AVAILABLE ? 'Analyse nécessaire' : 'Non déterminé')}</strong></div><div><Layers3 size={17}/><span>Offre</span><strong>{findPricingPlan(inferPricingPlan(form)).name}</strong></div><div><ShieldCheck size={17}/><span>Pipeline</span><strong>{form.pipelineMode==='devsecops'?'DevSecOps':'DevOps'}</strong></div><div><Server size={17}/><span>HA</span><strong>{form.highAvailability?'2 serveurs demandés':'1 serveur'}</strong></div></div><div className="ak-need-analysis"><Info size={18}/><span>{API_AVAILABLE ? 'La détection du dossier GitHub doit indiquer React, Vue ou Svelte avec Vite et package-lock.json. Cliquez sur Déployer pour valider côté Django, puis confirmez explicitement le lancement de Jenkins.' : 'Vérifiez votre configuration, puis parcourez les étapes du pipeline sans déployer de serveur.'}</span></div></>}
-        <div className="form-actions ak-form-actions"><button type="button" className="button-quiet" onClick={save} disabled={busy}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <Save size={17}/>} {busy ? 'En cours…' : 'Enregistrer'}</button><div className="actions-right">{step>0&&<button className="button-outline" type="button" onClick={()=>setStep(s=>s-1)}><ArrowLeft size={16}/> Retour</button>}{step<2?<button className="button-primary" type="button" onClick={next} disabled={busy || (API_AVAILABLE && step === 0 && (!githubConnected || Boolean(projectError)))}>Continuer <ArrowRight size={16}/></button>:<><button type="button" className="button-outline" onClick={exportProject}><Download size={17}/> Exporter</button>{(!API_AVAILABLE || !serverPreview) && <button type="button" className="button-primary" onClick={previewPipeline} disabled={busy || (API_AVAILABLE && (analysisStatus !== 'ready' || !staticReady))}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <CloudUpload size={17}/>} {busy ? 'Vérification…' : 'Déployer'} <ArrowRight size={16}/></button>}{API_AVAILABLE && serverPreview && <button type="button" className="button-primary" onClick={launchRemote} disabled={busy}><CloudUpload size={17}/> Confirmer et lancer Jenkins <ArrowRight size={16}/></button>}</>}</div></div>
+        {step===2 && <><div className="panel-heading"><h2>Votre projet</h2></div><div className="ak-review-list"><div><GitBranch size={17}/><span>Dépôt</span><strong>{form.repositorySlug}</strong></div><div><Code2 size={17}/><span>Branche et dossier</span><strong>{form.branch} · {form.workdir}</strong></div><div><Code2 size={17}/><span>Framework</span><strong>{analysis?.framework || (API_AVAILABLE ? 'Analyse nécessaire' : 'Non déterminé')}</strong></div><div><Layers3 size={17}/><span>Offre</span><strong>{findPricingPlan(inferPricingPlan(form)).name}</strong></div><div><ShieldCheck size={17}/><span>Publication</span><strong>{form.pipelineMode==='devsecops'?'Protection renforcée':'Standard'}</strong></div><div><Server size={17}/><span>Disponibilité</span><strong>{form.highAvailability?'Redondance demandée':'Standard'}</strong></div></div><div className="ak-need-analysis"><Info size={18}/><span>{API_AVAILABLE ? 'Votre projet sera préparé et mis en ligne automatiquement. Vous pourrez suivre sa progression dans Mes projets.' : 'Vérifiez votre configuration, puis consultez l’aperçu de votre projet.'}</span></div></>}
+        {API_AVAILABLE && notice?.type === 'error' && <div className="feedback error ak-inline-error" role="alert">{notice.text}</div>}
+        <div className="form-actions ak-form-actions"><button type="button" className="button-quiet" onClick={save} disabled={busy}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <Save size={17}/>} {busy ? 'En cours…' : 'Enregistrer'}</button><div className="actions-right">{step>0&&<button className="button-outline" type="button" onClick={()=>setStep(s=>s-1)}><ArrowLeft size={16}/> Retour</button>}{step<2?<button className="button-primary" type="button" onClick={next} disabled={busy || (API_AVAILABLE && step === 0 && (!githubConnected || Boolean(projectError)))}>Continuer <ArrowRight size={16}/></button>:<><button type="button" className="button-outline" onClick={exportProject}><Download size={17}/> Exporter</button><button type="button" className="button-primary" onClick={previewPipeline} disabled={busy || (API_AVAILABLE && (analysisStatus !== 'ready' || !staticReady))}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <CloudUpload size={17}/>} {busy ? 'Préparation…' : 'Déployer'} <ArrowRight size={16}/></button></>}</div></div>
       </div></section>
-    </div><aside className="deploy-aside"><div className="cut-frame side-panel"><div className="cut-body"><h3>{API_AVAILABLE ? 'Espace AUTOKOM' : 'Projets enregistrés'}</h3>{API_AVAILABLE && <p className="gh-muted">Les projets sont enregistrés dans Django/MySQL. Retrouvez-les dans Mes projets.</p>}<div className="ak-drafts-list">{!API_AVAILABLE && (drafts.length?drafts.map(d=><div className="ak-draft-item" key={d.id}><button type="button" onClick={()=>{setForm({...INITIAL,...d});setStep(0);setNotice(null)}}><strong>{d.projectName}</strong><small>{d.repositorySlug} · {d.branch}</small></button><button type="button" aria-label="Supprimer" onClick={()=>{if(confirm('Supprimer ce brouillon ?'))setDrafts(old=>old.filter(v=>v.id!==d.id))}}><Trash2 size={15}/></button></div>):<p className="gh-muted">Aucun projet enregistré.</p>)}</div></div></div></aside></div>
+    </div><aside className="deploy-aside"><div className="cut-frame side-panel"><div className="cut-body"><h3>{API_AVAILABLE ? 'Espace AUTOKOM' : 'Projets enregistrés'}</h3>{API_AVAILABLE && <p className="gh-muted">Retrouvez vos applications et leur progression dans Mes projets.</p>}<div className="ak-drafts-list">{!API_AVAILABLE && (drafts.length?drafts.map(d=><div className="ak-draft-item" key={d.id}><button type="button" onClick={()=>{setForm({...INITIAL,...d});setStep(0);setNotice(null)}}><strong>{d.projectName}</strong><small>{d.repositorySlug} · {d.branch}</small></button><button type="button" aria-label="Supprimer" onClick={()=>{if(confirm('Supprimer ce brouillon ?'))setDrafts(old=>old.filter(v=>v.id!==d.id))}}><Trash2 size={15}/></button></div>):<p className="gh-muted">Aucun projet enregistré.</p>)}</div></div></div></aside></div>
   </>
 }

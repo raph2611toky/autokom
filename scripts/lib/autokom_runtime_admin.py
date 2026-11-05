@@ -209,6 +209,65 @@ def jenkins_sync(*,apply):
     return 0
 
 
+def doctor():
+    """Read-only end-to-end check through the exact Unix identity used by Django."""
+    import shutil
+    import stat
+    import socket
+    sock = Path('/run/autokom/platform-control.sock')
+    print('  ◈ AUTOKOM · Diagnostic de liaison interne')
+    failures=[]
+    for unit in ('autokom-platform-broker.service','autokom-deployment-worker.service','jenkins.service'):
+        state=systemctl_state(unit)
+        print(f'  {"✓" if state == "active" else "✗"} {unit} : {state}')
+        if state != 'active':failures.append(unit)
+    if not sock.exists() or not stat.S_ISSOCK(sock.stat().st_mode):
+        raise SetupError('Le socket de contrôle n’existe pas. Vérifier le service broker.')
+    if not shutil.which('runuser'):
+        raise SetupError('La commande système runuser est absente.')
+    probe = r"""import json,socket,sys
+s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+s.settimeout(4)
+s.connect('/run/autokom/platform-control.sock')
+s.sendall(b'{"action":"ping","params":{}}\n')
+b=b''
+while not b.endswith(b'\n') and len(b)<4096:
+    v=s.recv(4096)
+    if not v:break
+    b+=v
+r=json.loads(b)
+if not r.get('ok') or not isinstance(r.get('result'),dict):sys.exit(3)
+print('jenkins_configured='+str(r['result'].get('jenkins_configured') is True).lower())
+"""
+    try:
+        result=subprocess.run(['runuser','-u','autokom','--','/usr/bin/python3','-c',probe],
+                              capture_output=True,text=True,timeout=9)
+    except (OSError,subprocess.TimeoutExpired):
+        raise SetupError('Impossible de tester la liaison avec le compte Django.')
+    if result.returncode:
+        print('  ✗ Django ne peut pas communiquer avec le broker (sans détails sensibles).')
+        raise SetupError('Vérifier droits /run/autokom, socket, journaux broker et redémarrage de son service.')
+    print('  ✓ Le compte Django communique réellement avec le broker.')
+    if 'jenkins_configured=true' not in result.stdout:
+        raise SetupError('Le broker fonctionne mais sa configuration Jenkins est incomplète.')
+    print('  ✓ Identifiants Jenkins présents dans le broker.')
+    env=load_env()
+    job=env.get('AUTOKOM_JENKINS_JOB','autokom-client-deploy')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',job):
+        raise SetupError('Le job Jenkins configuré porte un nom invalide.')
+    try:
+        from urllib.parse import quote
+        status,_=jenkins_request(env,'GET','/job/'+quote(job,safe='')+'/api/json')
+    except SetupError:
+        raise SetupError('Jenkins refuse la connexion du compte de service ou est injoignable.')
+    if status!=200:
+        raise SetupError('Le job Jenkins n’est pas accessible au compte de service (code HTTP '+str(status)+').')
+    print('  ✓ Job Jenkins accessible avec les identifiants du runtime.')
+    if failures:
+        raise SetupError('Un ou plusieurs services ne sont pas actifs.')
+    return 0
+
+
 def main(argv=None):
     # Delegate nested help and subcommands before the parent parser handles -h.
     raw=list(sys.argv[1:] if argv is None else argv)
@@ -224,6 +283,7 @@ def main(argv=None):
         group.add_argument('--check',action='store_true')
         group.add_argument('--apply',action='store_true')
     sub.add_parser('status')
+    sub.add_parser('doctor', help='Vérifier la liaison Django → socket → broker sans modifier le serveur')
     env_p = sub.add_parser('env', help='Secrets runtime : show, setup, edit, delete',add_help=False)
     env_p.add_argument('env_args', nargs=argparse.REMAINDER)
     opts=parser.parse_args(argv)
@@ -238,6 +298,7 @@ def main(argv=None):
         print('  › Configuration :', 'présente' if RUNTIME_ENV.is_file() else 'à créer')
         return 0
     if os.geteuid():raise SetupError('Utiliser sudo autokom runtime '+opts.action)
+    if opts.action=='doctor':return doctor()
     if opts.action=='setup':return setup(apply=opts.apply)
     return jenkins_sync(apply=opts.apply)
 

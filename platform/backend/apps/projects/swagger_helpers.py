@@ -36,7 +36,7 @@ DOMAIN = obj({'id': U, 'hostname': S, 'domain_type': S, 'status': S, 'tls_status
 CONFIG = obj({'id': U, 'environment': U, 'created_by': U, 'version': I,
     'is_draft': B, 'mode': S, 'resource_plan': openapi.Schema(type='string', format='uuid', x_nullable=True),
     'runtime_type': S, 'build_method': S, 'branch': S, 'root_directory': S, 'dockerfile_path': S,
-    'build_command': S, 'start_command': S, 'output_directory': S, 'internal_port': I,
+    'build_command': S, 'start_command': S, 'output_directory': S,
     'healthcheck_path': S, 'auto_deploy': B, 'auto_deploy_branch': S, 'settings': openapi.Schema(type=openapi.TYPE_OBJECT),
     'created_at': DT})
 SECRET = obj({'id': U, 'project': U, 'environment': openapi.Schema(type='string',format='uuid',x_nullable=True),

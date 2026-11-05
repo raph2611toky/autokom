@@ -4,15 +4,22 @@ from apps.deployments.runs.models import DeploymentRun, PipelineStageRun, Deploy
 class DeploymentStageSerializer(serializers.ModelSerializer):
     class Meta:
         model = PipelineStageRun
-        fields = ('stage_key','name','position','tool_name','status','started_at','finished_at','summary')
+        fields = ('stage_key','name','position','status','started_at','finished_at','summary')
         read_only_fields = fields
 
 class DeploymentRunSerializer(serializers.ModelSerializer):
+    error_message = serializers.SerializerMethodField()
+
+    def get_error_message(self, instance):
+        if not instance.error_message:
+            return ''
+        return 'La publication a rencontré un problème. Réessayez ou contactez le support.'
+
     stages = DeploymentStageSerializer(many=True, read_only=True)
     class Meta:
         model = DeploymentRun
         fields = ('id','environment','configuration','trigger_type','mode_snapshot','resources_snapshot',
-                  'branch','commit_sha','status','ci_provider','created_at','started_at',
+                  'branch','commit_sha','status','created_at','started_at',
                   'finished_at','cancel_requested','error_message','stages')
         read_only_fields = fields
 

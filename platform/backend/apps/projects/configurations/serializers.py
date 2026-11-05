@@ -8,7 +8,7 @@ class DeploymentConfigSerializer(serializers.ModelSerializer):
         model = DeploymentConfig
         fields = ('id', 'environment', 'created_by', 'version', 'is_draft', 'mode', 'resource_plan', 'runtime_type',
                   'build_method', 'branch', 'root_directory', 'dockerfile_path',
-                  'build_command', 'start_command', 'output_directory', 'internal_port',
+                  'build_command', 'start_command', 'output_directory',
                   'healthcheck_path', 'auto_deploy', 'auto_deploy_branch', 'settings', 'created_at')
         read_only_fields = fields
 
@@ -24,13 +24,15 @@ class DeploymentConfigWriteSerializer(serializers.Serializer):
     build_command = serializers.CharField(max_length=500, required=False, allow_blank=True)
     start_command = serializers.CharField(max_length=500, required=False, allow_blank=True)
     output_directory = serializers.CharField(max_length=300, required=False, allow_blank=True)
-    internal_port = serializers.IntegerField(required=False, min_value=1, max_value=65535)
     healthcheck_path = serializers.CharField(max_length=250, required=False)
     auto_deploy = serializers.BooleanField(required=False)
     auto_deploy_branch = serializers.CharField(max_length=255, required=False, allow_blank=True)
     settings = serializers.DictField(required=False)
 
     def validate(self, attrs):
+        # Port listening is a server-side runtime concern, not a public API setting.
+        if attrs.get('build_method') == DeploymentConfig.BuildMethod.STATIC:
+            attrs['internal_port'] = 8080
         for name in ('root_directory', 'output_directory'):
             if name in attrs:
                 attrs[name] = safe_relative_path(attrs[name])

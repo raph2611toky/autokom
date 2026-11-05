@@ -53,7 +53,7 @@ class DeploymentPreviewAPIView(APIView):
                 'build_method': cfg.build_method, 'runtime_type': cfg.runtime_type,
                 'root_directory': cfg.root_directory, 'mode': cfg.mode,
                 'auto_deploy': cfg.auto_deploy, 'resources': resources},
-                'Prévisualisation validée ; aucun build lancé.')
+                'Votre projet est prêt à être publié.')
         except Exception as exc:
             return handle_error(exc, 'deployment_preview')
 
@@ -70,7 +70,7 @@ class DeploymentEnqueueAPIView(APIView):
             key = request.headers.get('Idempotency-Key')
             run, created = queue_manual(request.user, project_id, environment_id, idempotency_key=key)
             return api_success({'deployment': DeploymentRunSerializer(run).data,
-                                 'enqueued': created}, 'Déploiement en file Jenkins.', 202)
+                                 'enqueued': created}, 'Votre mise en ligne a commencé.', 202)
         except Exception as exc:
             return handle_error(exc, 'deployment_enqueue')
 

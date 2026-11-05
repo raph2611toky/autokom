@@ -20,7 +20,7 @@ test('Vite avec package.json et lockfile => STATIC sans Dockerfile client', () =
   assert.equal(config.build_method, 'STATIC')
   assert.equal(config.runtime_type, 'STATIC')
   assert.equal(config.output_directory, 'dist')
-  assert.equal(config.internal_port, 8080)
+  assert.equal(Object.hasOwn(config, 'internal_port'), false)
   assert.equal(config.root_directory, 'portfolio-app')
 })
 
@@ -39,13 +39,15 @@ test('Vite gratuit sans lockfile est refusé avant Django', () => {
   assert.throws(() => verifiedDeploymentForm(base, source), /package-lock.json absent/)
 })
 
-test('notification 5s, loader GitHub, bouton Déployer et confirmation explicite', () => {
+test('publication en un clic, sans confirmation doublonnée ni détails internes', () => {
   const deploy = readFileSync(new URL('../src/pages/Deploy.jsx', import.meta.url), 'utf8')
   const github = readFileSync(new URL('../src/components/LiveGitHubConnector.jsx', import.meta.url), 'utf8')
   const projects = readFileSync(new URL('../src/pages/LiveProjects.jsx', import.meta.url), 'utf8')
   assert.match(deploy, /setTimeout\(\(\) => setNotice\(null\), 5000\)/)
   assert.match(deploy, /'Déployer'/)
-  assert.match(deploy, /window\.confirm\('Lancer réellement le pipeline Jenkins/)
+  assert.doesNotMatch(deploy, /window\.confirm\('Lancer réellement le pipeline Jenkins/)
+  assert.match(deploy, /deploymentsApi\.launch\(ids\.projectId/)
+  assert.doesNotMatch(deploy, /Mode connecté : les projets/)
   assert.match(github, /Chargement du dossier GitHub/)
   assert.match(github, /<ExternalLink size=\{15\}/)
   assert.match(projects, /run\.stages/)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import fcntl
 import ipaddress
 import json
+import logging
 import os
 from pathlib import Path
 import pwd
@@ -28,6 +29,7 @@ from urllib.error import HTTPError, URLError
 import base64
 import urllib.request
 
+logger = logging.getLogger('autokom.runtime.broker')
 SOCKET = Path('/run/autokom/platform-control.sock')
 STATE = Path('/var/lib/autokom/client-runtime')
 IMAGES = Path('/var/lib/autokom/build-artifacts')
@@ -154,14 +156,33 @@ def _safe_env(values):
             raise BrokerError('Valeur de variable refusée (retour ligne non pris en charge).')
     return values
 
-def _port_available():
-    import socket as sock
-    for candidate in range(21000,29000):
-        with sock.socket() as s:
-            try:s.bind(('127.0.0.1',candidate))
-            except OSError:continue
-            return candidate
-    raise BrokerError('Aucun port local disponible.')
+def _docker_loopback_port(container, container_port):
+    """Read the port allocated atomically by Docker; never use a scan-then-bind race."""
+    name = valid_container_name(container)
+    if type(container_port) is not int or not 1 <= container_port <= 65535:
+        raise BrokerError('Port interne du service invalide.')
+    raw = run(['docker', 'container', 'inspect', name,
+               '--format', '{{json .NetworkSettings.Ports}}'], timeout=12, max_output=8192)
+    try:
+        bindings = json.loads(raw)[f'{container_port}/tcp']
+        if not isinstance(bindings, list) or len(bindings) != 1:
+            raise ValueError('Binding multiple')
+        mapping = bindings[0]
+        if mapping['HostIp'] != '127.0.0.1':
+            raise ValueError('Non-loopback binding')
+        selected = int(mapping['HostPort'])
+        if not (1024 <= selected <= 65535):
+            raise ValueError('Invalid allocated port')
+    except (KeyError, ValueError, TypeError, IndexError, AttributeError):
+        raise BrokerError('Publication locale Docker non conforme ; aucun accès public autorisé.')
+    return selected
+
+
+def valid_container_name(name):
+    if not isinstance(name, str) or not re.fullmatch(r'autokom-[a-f0-9]{20}', name):
+        raise BrokerError('Conteneur AUTOKOM invalide.')
+    return name
+
 
 def _env_file(env,run_id,values):
     base=STATE/env
@@ -250,12 +271,11 @@ def _docker_deploy_inner(params):
                 raise BrokerError('Réseau existant non privé : aucune connexion Docker.')
         except (ValueError,TypeError,KeyError) as exc:
             raise BrokerError('Réseau Docker existant non vérifiable.') from exc
-    external_port=_port_available()
     variables=_safe_env(params.get('variables') or {})
     envfile=_env_file(environment,rid,variables)
     # Customer processes run as UID 10001, without extra capabilities, mounts or Docker socket.
     argv=['docker','run','-d','--name',name,'--network',network,
-          '--publish',f'127.0.0.1:{external_port}:{port}',
+          '--publish',f'127.0.0.1::{port}',
           '--cpus',str(cpu/1000),'--memory',f'{mem}m','--memory-swap',f'{mem}m',
           '--pids-limit','128','--cap-drop','ALL','--security-opt','no-new-privileges',
           '--read-only','--tmpfs',f'/tmp:rw,noexec,nosuid,size={min(storage,256)}m',
@@ -267,12 +287,14 @@ def _docker_deploy_inner(params):
             run(argv,timeout=60)
         finally:
             envfile.unlink(missing_ok=True)  # secrets are never kept as host .env files after create
-        from urllib.request import urlopen
+        external_port = _docker_loopback_port(name, port)
+        from urllib.request import build_opener
+        health_opener = build_opener(NoRedirect())
         deadline=time.monotonic()+75
         while time.monotonic()<deadline:
             try:
                 req=Request(f'http://127.0.0.1:{external_port}{health}',headers={'Host':'localhost'})
-                with urlopen(req,timeout=2) as resp:
+                with health_opener.open(req,timeout=2) as resp:
                     if 200<=resp.status<400:break
             except Exception:pass
             time.sleep(2)
@@ -520,6 +542,8 @@ class Handler(socketserver.StreamRequestHandler):
             result=handle(request.get('action',''),request.get('params',{}))
             response={'ok':True,'result':result}
         except Exception as exc:
+            # Only the exception CATEGORY reaches the operator journal. No OAuth, env or args.
+            logger.warning('Broker request denied: %s', type(exc).__name__)
             # No exception traceback, request content or secret values in response.
             response={'ok':False,'error':str(exc) if isinstance(exc,BrokerError) else 'Erreur interne du service AUTOKOM.'}
         self.wfile.write((json.dumps(response,ensure_ascii=False)+'\n').encode())
