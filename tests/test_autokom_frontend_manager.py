@@ -198,3 +198,121 @@ class FrontendNodeProvisionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class FrontendDNSProvisionTests(unittest.TestCase):
+    """No external DNS calls; mock Cloudflare and the recursive resolver."""
+
+    def test_only_ikom_mg_subdomains_are_eligible(self):
+        self.assertEqual(fm.cloudflare_frontend_zone('auto.ikom.mg'), 'ikom.mg')
+        self.assertIsNone(fm.cloudflare_frontend_zone('auto.ik0m.tech'))
+        self.assertIsNone(fm.cloudflare_frontend_zone('customer.ikom.mg'))
+        for reserved in ('ikom.mg', 'ns1.ikom.mg', 'ns2.ikom.mg',
+                         'infra.ikom.mg', 'origin.ikom.mg'):
+            self.assertIsNone(fm.cloudflare_frontend_zone(reserved))
+
+    def test_ingress_ip_read_from_runtime_env_and_is_public(self):
+        import sys
+        from types import SimpleNamespace
+        for raw in ('56.228.86.160', '127.0.0.1', '10.1.1.1', ''):
+            fake = SimpleNamespace(read_env=lambda _: {'AUTOKOM_INGRESS_IPV4': raw})
+            with mock.patch.dict(sys.modules, {'autokom_env_manager': fake}):
+                if raw == '56.228.86.160':
+                    self.assertEqual(fm.frontend_ingress_ip(), raw)
+                else:
+                    with self.assertRaises(fm.FrontendError):
+                        fm.frontend_ingress_ip()
+
+    def test_dns_record_created_only_when_hostname_missing(self):
+        import sys
+        from types import SimpleNamespace
+        cf = mock.Mock()
+        cf.records.return_value = []
+        fake = SimpleNamespace(Cloudflare=lambda: cf, DNSError=Exception)
+        with mock.patch.dict(sys.modules, {'autokom_dns_cloudflare': fake}), \
+             mock.patch.object(fm, 'frontend_ingress_ip', return_value='56.228.86.160'), \
+             contextlib.redirect_stdout(io.StringIO()):
+            result = fm.ensure_frontend_dns('auto.ikom.mg')
+        self.assertEqual(result, '56.228.86.160')
+        cf.create.assert_called_once_with('ikom.mg', 'A', 'auto.ikom.mg',
+                                          '56.228.86.160', ttl=120, proxied=False)
+
+    def test_existing_matching_a_is_not_changed(self):
+        import sys
+        from types import SimpleNamespace
+        cf = mock.Mock()
+        cf.records.return_value = [
+            {'type': 'A', 'name': 'auto.ikom.mg', 'content': '56.228.86.160', 'proxied': True},
+        ]
+        fake = SimpleNamespace(Cloudflare=lambda: cf, DNSError=Exception)
+        with mock.patch.dict(sys.modules, {'autokom_dns_cloudflare': fake}), \
+             mock.patch.object(fm, 'frontend_ingress_ip', return_value='56.228.86.160'), \
+             contextlib.redirect_stdout(io.StringIO()):
+            result = fm.ensure_frontend_dns('auto.ikom.mg')
+        self.assertIsNone(result)
+        cf.create.assert_not_called()
+        cf.delete.assert_not_called()
+
+    def test_conflicting_dns_is_never_modified(self):
+        import sys
+        from types import SimpleNamespace
+        fake = SimpleNamespace(DNSError=Exception)
+        for entries in (
+            [{'type':'A','name':'auto.ikom.mg','content':'203.0.113.10'}],
+            [{'type':'CNAME','name':'auto.ikom.mg','content':'other.example.org'}],
+            [{'type':'AAAA','name':'auto.ikom.mg','content':'2001:db8::1'}],
+            [{'type':'A','name':'auto.ikom.mg','content':'56.228.86.160'},
+             {'type':'A','name':'auto.ikom.mg','content':'56.228.86.161'}],
+        ):
+            cf = mock.Mock()
+            cf.records.return_value = entries
+            fake.Cloudflare = lambda cf=cf: cf
+            with mock.patch.dict(sys.modules, {'autokom_dns_cloudflare': fake}), \
+                 mock.patch.object(fm, 'frontend_ingress_ip', return_value='56.228.86.160'), \
+                 self.assertRaises(fm.FrontendError):
+                fm.ensure_frontend_dns('auto.ikom.mg')
+            cf.create.assert_not_called()
+            cf.delete.assert_not_called()
+
+    def test_dns_timeout_prevents_certbot_and_is_retryable(self):
+        import argparse
+        args = argparse.Namespace(domain='auto.ikom.mg', backend_domain='backend.auto.ikom.mg',
+                                  tls_mode='certbot', email='contact@example.org',
+                                  nginx_mode='managed', apply=True, check=False)
+        with mock.patch.object(fm, 'ensure_source'), mock.patch.object(fm, 'require_root'), \
+             mock.patch.object(fm, 'existing_vhost_conflicts'), \
+             mock.patch.object(fm, 'provision_node_toolchain'), \
+             mock.patch.object(fm, 'ensure_frontend_dns'), \
+             mock.patch.object(fm, 'wait_frontend_dns', side_effect=fm.FrontendError('DNS non visible')), \
+             mock.patch.object(fm, 'builder_prepare') as builder, \
+             mock.patch.object(fm, 'save_state') as state, \
+             mock.patch.object(fm, 'run') as run, \
+             mock.patch.object(fm.shutil, 'which', return_value='/usr/bin/tool'), \
+             mock.patch.object(fm, 'STATE', Path('/nonexistent/frontend-state.json')), \
+             mock.patch.object(fm, 'VHOST', Path('/nonexistent/frontend.conf')), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             self.assertRaises(fm.FrontendError):
+            fm.setup(args)
+        builder.assert_not_called()
+        run.assert_not_called()
+        state.assert_not_called()
+
+    def test_dns_check_displays_plan_but_does_not_write(self):
+        import argparse
+        args = argparse.Namespace(domain='auto.ikom.mg', backend_domain='backend.auto.ikom.mg',
+                                  tls_mode='certbot', email='contact@example.org',
+                                  nginx_mode='managed', apply=False, check=True)
+        with mock.patch.object(fm, 'ensure_source'), mock.patch.object(fm, 'existing_vhost_conflicts'), \
+             mock.patch.object(fm, 'node_toolchain_issue', return_value=None), \
+             mock.patch.object(fm, 'ensure_frontend_dns') as dns, \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(fm.setup(args), 0)
+        dns.assert_not_called()
+        self.assertIn('DNS : contrôle/création idempotente', out.getvalue())
+
+    def test_dns_visibility_requires_origin_ip_for_dns_only(self):
+        import socket
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('198.51.100.8', 80)),
+                     (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('56.228.86.160', 80))]
+        with mock.patch.object(fm.socket, 'getaddrinfo', return_value=addresses):
+            self.assertTrue(fm.dns_ipv4_visible('auto.ikom.mg', '56.228.86.160'))
+            self.assertFalse(fm.dns_ipv4_visible('auto.ikom.mg', '56.228.86.161'))

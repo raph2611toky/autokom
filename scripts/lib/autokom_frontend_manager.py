@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import ipaddress
 import os
+import socket
+import time
 from pathlib import Path
 import pwd
 import re
@@ -127,6 +130,11 @@ def require_root():
 
 def read_state():
     if not STATE.is_file():
+        if VHOST.is_file() and MARKER in VHOST.read_text(encoding='utf-8'):
+            raise FrontendError(
+                'Frontend non configuré : setup interrompu après création du vhost. '
+                'Vérifier le DNS puis relancer autokom app frontend setup --apply.'
+            )
         raise FrontendError('Frontend non configuré. Lancer autokom app frontend setup --check.')
     return json.loads(STATE.read_text(encoding='utf-8'))
 
@@ -290,6 +298,92 @@ def certbot_command(front, email):
     return [*cmd, '-d', front]
 
 
+
+
+def cloudflare_frontend_zone(front):
+    """Only the public AUTOKOM frontend has automatic DNS write authority.
+
+    All other domains (including infrastructure and customer sites) remain
+    managed by their own dedicated AUTOKOM DNS workflows.
+    """
+    return 'ikom.mg' if front == 'auto.ikom.mg' else None
+
+
+def frontend_ingress_ip():
+    """Get the existing, approved public ingress IPv4; never infer from EC2 metadata."""
+    from autokom_env_manager import read_env
+    raw = read_env(Path('/etc/autokom/secrets/runtime.env')).get('AUTOKOM_INGRESS_IPV4', '').strip()
+    try:
+        value = ipaddress.IPv4Address(raw)
+    except ipaddress.AddressValueError as exc:
+        raise FrontendError('AUTOKOM_INGRESS_IPV4 absent/invalide dans runtime.env.') from exc
+    if not value.is_global:
+        raise FrontendError('AUTOKOM_INGRESS_IPV4 doit être une IPv4 publique routable.')
+    return str(value)
+
+
+def ensure_frontend_dns(front):
+    """Reconcile one DNS hostname using AUTOKOM's *existing* Cloudflare client.
+
+    Never delete records or overwrite an existing target. DNS-only is chosen for
+    the initial ACME HTTP-01 validation; proxy policy may be adjusted separately.
+    """
+    zone = cloudflare_frontend_zone(front)
+    if zone is None:
+        print('  › DNS externe : AUTOKOM vérifiera sa résolution, sans créer de zone.')
+        return None
+    ip = frontend_ingress_ip()
+    from autokom_dns_cloudflare import Cloudflare, DNSError
+    try:
+        cf = Cloudflare()
+        entries = [r for r in cf.records(record_name=front)
+                   if r.get('name', '').rstrip('.').lower() == front]
+        routing = [r for r in entries if r.get('type') in ('A', 'AAAA', 'CNAME', 'NS')]
+        if not routing:
+            cf.create(zone, 'A', front, ip, ttl=120, proxied=False)
+            print(f'  ✓ DNS Cloudflare : A {front} créé vers AUTOKOM_INGRESS_IPV4 (DNS only).')
+            return ip
+        elif (len(routing) == 1 and routing[0].get('type') == 'A'
+              and routing[0].get('content') == ip):
+            print(f'  ✓ DNS Cloudflare : A {front} déjà conforme, aucune modification.')
+            return None if routing[0].get('proxied') else ip
+        else:
+            raise FrontendError(
+                f'DNS {front} déjà occupé par un enregistrement différent ou ambigu. '
+                'Refus de modifier un service existant.'
+            )
+    except DNSError as exc:
+        raise FrontendError('DNS Cloudflare : ' + str(exc)) from exc
+
+
+def dns_ipv4_visible(front, expected_ip=None):
+    try:
+        addresses = socket.getaddrinfo(front, 80, family=socket.AF_INET, type=socket.SOCK_STREAM)
+        return any((ipaddress.ip_address(result[4][0]).is_global and
+                    (expected_ip is None or result[4][0] == expected_ip)) for result in addresses)
+    except (socket.gaierror, OSError, ValueError):
+        return False
+
+
+def wait_frontend_dns(front, expected_ip=None, timeout=150, interval=5):
+    """Do not request an ACME certificate until the hostname publicly resolves.
+
+    Cloudflare or an external DNS provider may need time to publish the record;
+    rerunning setup is safe, and a failed lookup cannot trigger a Certbot attempt.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if dns_ipv4_visible(front, expected_ip):
+            print(f'  ✓ DNS public : {front} résolu en IPv4.')
+            return
+        if time.monotonic() >= deadline:
+            raise FrontendError(
+                f'DNS de {front} non visible. Enregistrement conservé ; '
+                'relancer le même setup --apply après propagation DNS.'
+            )
+        time.sleep(min(interval, max(0, deadline - time.monotonic())))
+
+
 def setup(args):
     ensure_source()
     front, back = config_urls(args)
@@ -321,6 +415,11 @@ def setup(args):
                 'location ^~ /api/' not in current):
                 raise FrontendError('Vhost TLS géré différent : corriger manuellement avant setup.')
     if not args.apply:
+        if args.tls_mode == 'certbot':
+            if cloudflare_frontend_zone(front):
+                print(f'  › DNS : contrôle/création idempotente du A {front} via Cloudflare avant Certbot.')
+            else:
+                print(f'  › DNS : résolution publique de {front} exigée avant Certbot.')
         issue = node_toolchain_issue()
         if issue:
             print(f'  › Toolchain : {issue}. Sera provisionnée automatiquement par --apply.')
@@ -335,6 +434,9 @@ def setup(args):
         raise FrontendError('Certbot absent : provisionner la fondation via AUTOKOM install.')
     # Ne modifie ni Nginx ni les secrets si le téléchargement/provisionnement échoue.
     provision_node_toolchain()
+    if args.tls_mode == 'certbot':
+        expected_dns_ip = ensure_frontend_dns(front)
+        wait_frontend_dns(front, expected_dns_ip)
     builder_prepare()
     RELEASES.mkdir(parents=True, exist_ok=True)
     RELEASES.parent.chmod(0o755)
