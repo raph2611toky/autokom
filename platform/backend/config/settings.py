@@ -127,7 +127,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_CLASSES': ['rest_framework.throttling.AnonRateThrottle'],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '60/hour', 'login': '10/hour', 'registration': '5/hour',
-        'reset': '6/hour', 'refresh': '60/hour', 'github_oauth': '20/hour',
+        'reset': '6/hour', 'refresh': '60/hour', 'github_oauth': '20/hour', 'github_browse': '30/min',
     },
 }
 SWAGGER_SETTINGS = {

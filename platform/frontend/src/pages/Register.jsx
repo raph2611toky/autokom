@@ -15,6 +15,8 @@ export default function Register({ navigate, theme, onToggleTheme }) {
   const [touched, setTouched] = useState({})
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
+  const [serverErrors, setServerErrors] = useState({})
+  const [registered, setRegistered] = useState(false)
   const checks = useMemo(() => [
     { label: '12 caractères', ok: form.password.length >= 12 },
     { label: 'Majuscule et minuscule', ok: /[A-Z]/.test(form.password) && /[a-z]/.test(form.password) },
@@ -32,10 +34,12 @@ export default function Register({ navigate, theme, onToggleTheme }) {
   function update(key, value) {
     setForm(current => ({ ...current, [key]: value }))
     setNotice('')
+    setServerErrors(current => ({ ...current, [key]: '' }))
   }
   function blur(key) { setTouched(current => ({ ...current, [key]: true })) }
   async function submit(event) {
     event.preventDefault()
+    if (busy || registered) return
     setTouched({ name: true, email: true, password: true, confirm: true, consent: true })
     if (Object.values(errors).some(Boolean)) {
       setNotice('Vérifiez les champs signalés avant de continuer.')
@@ -48,10 +52,23 @@ export default function Register({ navigate, theme, onToggleTheme }) {
     }
     setBusy(true)
     try {
-      await authApi.register({ fullName: form.name.trim(), email: form.email.trim(), password: form.password, passwordConfirm: form.confirm })
-      setNotice('Compte créé. Consultez votre e-mail pour vérifier votre adresse, puis connectez-vous.')
-    } catch (error) { setNotice(error?.message || 'Inscription impossible.') }
-    finally { setForm(current => ({ ...current, password: '', confirm: '' })); setBusy(false) }
+      const created = await authApi.register({ fullName: form.name.trim(), email: form.email.trim(), password: form.password, passwordConfirm: form.confirm })
+      setRegistered(true)
+      setForm(current => ({ ...current, password: '', confirm: '' }))
+      setTouched({})
+      setServerErrors({})
+      // Une adresse n'est pas un secret ; permet de proposer « renvoyer » après redirection.
+      try { sessionStorage.setItem('autokom.pendingVerificationEmail', form.email.trim()); sessionStorage.setItem('autokom.pendingVerificationMailSent', created?.verification_email_sent === false ? '0' : '1') } catch { /* stockage facultatif */ }
+      navigate('/verify-email')
+    } catch (error) {
+      const fields = error?.errors || {}
+      setServerErrors({
+        name: fields.full_name?.[0] || '', email: fields.email?.[0] || '',
+        password: fields.password?.[0] || '', confirm: fields.password_confirm?.[0] || '',
+      })
+      setNotice(error?.message === 'Données invalides' || error?.message === 'Données invalides.'
+        ? 'Vérifiez les informations indiquées par le serveur.' : (error?.message || 'Inscription impossible.'))
+    } finally { setBusy(false) }
   }
 
   return (
@@ -62,35 +79,35 @@ export default function Register({ navigate, theme, onToggleTheme }) {
           <span>Nom complet</span>
           <input name="name" autoComplete="name" required value={form.name} placeholder="Nom et prénom"
             onChange={event => update('name', event.target.value)} onBlur={() => blur('name')}
-            aria-invalid={!!(touched.name && errors.name)} aria-describedby={touched.name && errors.name ? 'reg-name-error' : undefined} />
-          {touched.name && errors.name && <small className="auth-ui-error" id="reg-name-error">{errors.name}</small>}
+            aria-invalid={!!(serverErrors.name || (touched.name && errors.name))} aria-describedby={(serverErrors.name || (touched.name && errors.name)) ? 'reg-name-error' : undefined} />
+          {(serverErrors.name || (touched.name && errors.name)) && <small className="auth-ui-error" id="reg-name-error">{serverErrors.name || errors.name}</small>}
         </label>
         <label className="auth-ui-field">
           <span>Adresse e-mail</span>
           <input type="email" name="email" autoComplete="email" required value={form.email} placeholder="vous@exemple.com"
             onChange={event => update('email', event.target.value)} onBlur={() => blur('email')}
-            aria-invalid={!!(touched.email && errors.email)} aria-describedby={touched.email && errors.email ? 'reg-email-error' : undefined} />
-          {touched.email && errors.email && <small className="auth-ui-error" id="reg-email-error">{errors.email}</small>}
+            aria-invalid={!!(serverErrors.email || (touched.email && errors.email))} aria-describedby={(serverErrors.email || (touched.email && errors.email)) ? 'reg-email-error' : undefined} />
+          {(serverErrors.email || (touched.email && errors.email)) && <small className="auth-ui-error" id="reg-email-error">{serverErrors.email || errors.email}</small>}
         </label>
         <div className="auth-ui-field">
           <label htmlFor="register-password">Mot de passe</label>
           <div className="auth-ui-password">
             <input id="register-password" name="password" type={visible ? 'text' : 'password'} autoComplete="new-password" required
               value={form.password} onChange={event => update('password', event.target.value)} onBlur={() => blur('password')}
-              aria-invalid={!!(touched.password && errors.password)} aria-describedby="auth-ui-password-rules" placeholder="12 caractères minimum" />
+              aria-invalid={!!(serverErrors.password || (touched.password && errors.password))} aria-describedby="auth-ui-password-rules" placeholder="12 caractères minimum" />
             <button type="button" onClick={() => setVisible(value => !value)} aria-label={visible ? 'Masquer les mots de passe' : 'Afficher les mots de passe'}>
               {visible ? <EyeOff size={18} /> : <Eye size={18} />}
             </button>
           </div>
-          {touched.password && errors.password && <small className="auth-ui-error">{errors.password}</small>}
+          {(serverErrors.password || (touched.password && errors.password)) && <small className="auth-ui-error">{serverErrors.password || errors.password}</small>}
         </div>
         <label className="auth-ui-field">
           <span>Confirmer le mot de passe</span>
           <input name="confirm" type={visible ? 'text' : 'password'} autoComplete="new-password" required
             value={form.confirm} onChange={event => update('confirm', event.target.value)} onBlur={() => blur('confirm')}
-            aria-invalid={!!(touched.confirm && errors.confirm)} aria-describedby={touched.confirm && errors.confirm ? 'reg-confirm-error' : undefined}
+            aria-invalid={!!(serverErrors.confirm || (touched.confirm && errors.confirm))} aria-describedby={(serverErrors.confirm || (touched.confirm && errors.confirm)) ? 'reg-confirm-error' : undefined}
             placeholder="Répétez le mot de passe" />
-          {touched.confirm && errors.confirm && <small className="auth-ui-error" id="reg-confirm-error">{errors.confirm}</small>}
+          {(serverErrors.confirm || (touched.confirm && errors.confirm)) && <small className="auth-ui-error" id="reg-confirm-error">{serverErrors.confirm || errors.confirm}</small>}
         </label>
         <div className="auth-ui-strength auth-ui-full" id="auth-ui-password-rules" aria-label="Critères du mot de passe">
           <div className="auth-ui-strength-bars" role="meter" aria-label="Robustesse du mot de passe" aria-valuemin={0} aria-valuemax={3} aria-valuenow={strength}>
@@ -106,7 +123,7 @@ export default function Register({ navigate, theme, onToggleTheme }) {
         </label>
         {touched.consent && errors.consent && <p className="auth-ui-error auth-ui-full">{errors.consent}</p>}
         {notice && <p className="auth-ui-notice auth-ui-full" role="status">{notice}</p>}
-        <button type="submit" className="auth-ui-primary auth-ui-full" disabled={busy}>Créer mon compte <ArrowRight size={19}/></button>
+        <button type="submit" className="auth-ui-primary auth-ui-full" disabled={busy || registered}>{busy ? 'Création du compte…' : 'Créer mon compte'} <ArrowRight size={19}/></button>
       </form>
       <p className="auth-ui-switch">Vous avez déjà un compte ? <button type="button" onClick={() => navigate('/login')}>Se connecter</button></p>
       <button type="button" className="auth-ui-explore auth-ui-github" onClick={() => {

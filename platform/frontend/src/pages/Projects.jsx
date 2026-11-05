@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react'
 import { ArrowLeft, ArrowRight, FolderKanban, GitBranch, Plus, Search, Settings2, Trash2, Workflow } from 'lucide-react'
 import { findPricingPlan } from '../config/pricing.js'
 import { getProjectRecords, removeProject } from '../services/projectWorkspace.js'
+import { API_AVAILABLE } from '../config/runtime.js'
+import LiveProjects from './LiveProjects.jsx'
 
 function goToConfiguration(project, navigate) {
   if (project.draft) {
@@ -16,7 +18,11 @@ function formatDate(value) {
   return Number.isNaN(parsed.getTime()) ? 'Non renseignée' : new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' }).format(parsed)
 }
 
-export default function Projects({ navigate, projectId = null }) {
+export default function Projects(props) {
+  return API_AVAILABLE ? <LiveProjects {...props}/> : <DemoProjects {...props}/>
+}
+
+function DemoProjects({ navigate, projectId = null }) {
   const [projects, setProjects] = useState(getProjectRecords)
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('all')

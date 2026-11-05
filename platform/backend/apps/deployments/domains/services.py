@@ -29,7 +29,7 @@ def claim_domain(user,project_id,environment_id,hostname,domain_type):
         raise ValidationError({'domain_type':'SUBDOMAIN ou CUSTOM attendu.'})
     if (domain_type==Domain.Type.SUBDOMAIN)!=_managed(host):
         raise ValidationError({'hostname':'Domaine géré AUTOKOM ou externe incohérent.'})
-    if host in ('backend.auto.ik0m.tech','auto.ik0m.tech','ikom.mg','www.ikom.mg'):
+    if host in ('backend.auto.ik0m.tech','auto.ik0m.tech','backend.auto.ikom.mg','auto.ikom.mg','ikom.mg','www.ikom.mg'):
         raise ValidationError({'hostname':'Nom de domaine réservé au service IKOM.'})
     with transaction.atomic():
         if Domain.objects.filter(hostname=host).exists():

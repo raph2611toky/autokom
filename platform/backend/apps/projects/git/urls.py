@@ -2,7 +2,7 @@ from django.urls import path
 from apps.projects.git.views import (
     GitHubStartAPIView, GitHubStatusAPIView, GitHubCallbackAPIView,
     GitHubDisconnectAPIView, GitHubInstallationsAPIView, GitHubRepositoriesAPIView,
-    GitHubBranchesAPIView, GitHubWebhookAPIView,
+    GitHubBranchesAPIView, GitHubDirectoriesAPIView, GitHubWebhookAPIView,
 )
 
 app_name = 'project_git'
@@ -14,5 +14,6 @@ urlpatterns = [
     path('github/installations/', GitHubInstallationsAPIView.as_view(), name='github-installations'),
     path('github/repositories/', GitHubRepositoriesAPIView.as_view(), name='github-repositories'),
     path('github/branches/', GitHubBranchesAPIView.as_view(), name='github-branches'),
+    path('github/directories/', GitHubDirectoriesAPIView.as_view(), name='github-directories'),
     path('github/webhook/', GitHubWebhookAPIView.as_view(), name='github-webhook'),
 ]

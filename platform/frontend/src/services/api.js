@@ -28,7 +28,7 @@ export function setAccessToken(token) {
 export function clearAccessToken() { accessToken = null }
 
 function validatePath(path) {
-  if (typeof path !== 'string' || !/^\/[a-zA-Z0-9/_-]*(?:\?[a-zA-Z0-9_=%&.-]*)?$/.test(path) || path.startsWith('//')) {
+  if (typeof path !== 'string' || !/^\/[a-zA-Z0-9/_-]*(?:\?[a-zA-Z0-9_=%&.+-]*)?$/.test(path) || path.startsWith('//')) {
     throw new TypeError('Chemin API invalide.')
   }
   if ((import.meta.env?.VITE_AUTOKOM_API_BASE || '/api').replace(/\/+$/, '') !== BASE) {

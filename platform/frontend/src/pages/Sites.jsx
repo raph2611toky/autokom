@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ArrowLeft, ArrowRight, CheckCircle2, Circle, FileText, GitBranch, Globe2, Layers3, Pause, Play, RotateCcw, Rocket, Search, Settings2, TerminalSquare } from 'lucide-react'
 import { getProjectRecords } from '../services/projectWorkspace.js'
+import { API_AVAILABLE } from '../config/runtime.js'
+import LiveSites from './LiveSites.jsx'
 
 const TABS = [ ['pipeline','Pipeline',Layers3], ['logs','Journaux',TerminalSquare], ['domains','Domaines',Globe2] ]
 
@@ -55,7 +57,11 @@ function SiteDetail({ project, navigate }) {
   </>
 }
 
-export default function Sites({ navigate, projectId = null }) {
+export default function Sites(props) {
+  return API_AVAILABLE ? <LiveSites {...props}/> : <DemoSites {...props}/>
+}
+
+function DemoSites({ navigate, projectId = null }) {
   const [projects] = useState(getProjectRecords)
   const [query, setQuery] = useState('')
   const selected = projects.find(project => project.id === projectId)

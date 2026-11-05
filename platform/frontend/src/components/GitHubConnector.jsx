@@ -3,9 +3,15 @@ import { Check, ChevronRight, Folder, LockKeyhole, Search, Unplug } from 'lucide
 import { getSampleDirectory, getSampleRepository, SAMPLE_REPOSITORIES } from '../services/simulationData.js'
 import { normalizeDirectoryPath } from '../services/github.js'
 import GitHubMark from './GitHubMark.jsx'
+import LiveGitHubConnector from './LiveGitHubConnector.jsx'
+import { API_AVAILABLE } from '../config/runtime.js'
 
 /** Sélecteur autonome pour évaluer l'ergonomie avant la connexion GitHub réelle. */
-export default function GitHubConnector({ form, update, onNotice }) {
+export default function GitHubConnector(props) {
+  return API_AVAILABLE ? <LiveGitHubConnector {...props}/> : <DemoGitHubConnector {...props}/>
+}
+
+function DemoGitHubConnector({ form, update, onNotice }) {
   const [connected, setConnected] = useState(() => { try { return sessionStorage.getItem('autokom.ui.github') === '1' } catch { return false } })
   const [search, setSearch] = useState('')
   const [browsePath, setBrowsePath] = useState(form.workdir || './')

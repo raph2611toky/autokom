@@ -60,6 +60,7 @@ DATA = {
  'github_installations': obj({'installations': arr(INSTALL)}),
  'github_repositories': obj({'repositories': arr(REPO), 'page': I, 'has_next': B}),
  'github_branches': obj({'repository_id': I, 'page': I, 'branches': arr(BRANCH)}),
+ 'github_directories': obj({'directories': arr(obj({'name': S, 'path': S, 'type': S})), 'path': S}),
  'github_webhook': obj({'accepted': B, 'recorded': I}),
  'organizations': obj({'organizations': arr(ORG)}),
  'project_list': obj({'projects': arr(PROJECT), 'page': I, 'page_size': I, 'total': I}),

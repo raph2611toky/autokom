@@ -1,6 +1,6 @@
 """API GitHub App: chaque classe hérite directement d'APIView et n'a qu'une méthode HTTP."""
 import json
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 from django.conf import settings
 from django.http import HttpResponseRedirect
 from rest_framework.views import APIView
@@ -11,7 +11,7 @@ from rest_framework.exceptions import ValidationError
 from apps.accounts.user.permissions import IsClientUser
 from helpers.responses import api_success
 from helpers.errors import handle_error
-from apps.projects.common import int_param
+from apps.projects.common import int_param, safe_relative_path
 from apps.projects.git.models import GitHubAuthorization, GitConnection, GitWebhookEvent
 from apps.projects.git.services import (require_github_app, authorize_url, installation_url, consume_state,
     exchange_code, save_authorization, get_installations, get_repositories, get_repository, get_branches,
@@ -23,6 +23,7 @@ from apps.projects.git.swagger.github_disconnect import schema as github_disconn
 from apps.projects.git.swagger.github_installations import schema as github_installations_schema
 from apps.projects.git.swagger.github_repositories import schema as github_repositories_schema
 from apps.projects.git.swagger.github_branches import schema as github_branches_schema
+from apps.projects.git.swagger.github_directories import schema as github_directories_schema
 from apps.projects.git.swagger.github_webhook import schema as github_webhook_schema
 
 
@@ -139,6 +140,53 @@ class GitHubBranchesAPIView(APIView):
                 'Branches disponibles pour ce dépôt.')
         except Exception as exc:
             return handle_error(exc, 'github_branches')
+
+
+class GitHubDirectoriesAPIView(APIView):
+    """Parcours de dossiers en lecture seule, limité aux dépôts GitHub autorisés."""
+    parser_classes = [JSONParser]
+    permission_classes = [IsClientUser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'github_browse'
+
+    @github_directories_schema
+    def get(self, request):
+        try:
+            installation_id = int_param(request, 'installation_id', default=0, minimum=1, maximum=999999999999)
+            repository_id = int_param(request, 'repository_id', default=0, minimum=1, maximum=999999999999)
+            branch = str(request.query_params.get('branch') or '').strip()
+            if not branch or len(branch) > 255 or branch.startswith('-') or '..' in branch or any(c in branch for c in ('\\', '\n', '\x00')):
+                raise ValidationError({'branch': 'Branche invalide.'})
+            folder = str(request.query_params.get('path') or '').strip()
+            if len(folder) > 300:
+                raise ValidationError({'path': 'Dossier trop long.'})
+            if folder:
+                folder = safe_relative_path(folder)
+            _, repo = get_repository(request.user, installation_id, repository_id)
+            # La branche doit faire partie de celles autorisées sur ce dépôt.
+            known = False
+            for page in range(1, 21):
+                _, branches = get_branches(request.user, installation_id, repository_id, page)
+                if any(item.get('name') == branch for item in branches):
+                    known = True
+                    break
+                if len(branches) < 100:
+                    break
+            if not known:
+                raise ValidationError({'branch': 'Branche introuvable ou inaccessible.'})
+            owner, name = repo['full_name'].split('/', 1)
+            endpoint = f'/repos/{quote(owner, safe="")}/{quote(name, safe="")}/contents'
+            if folder:
+                endpoint += '/' + '/'.join(quote(part, safe='') for part in folder.split('/'))
+            items = _request('GET', endpoint + '?ref=' + quote(branch, safe=''), token=get_user_token(request.user))
+            if not isinstance(items, list):
+                raise ValidationError({'path': 'Ce chemin n’est pas un dossier.'})
+            directories = [{'name': item['name'], 'path': item['path'], 'type': 'dir'}
+                           for item in items if item.get('type') == 'dir'
+                           and isinstance(item.get('path'), str) and isinstance(item.get('name'), str)]
+            return api_success({'directories': directories, 'path': folder}, 'Dossiers GitHub autorisés.')
+        except Exception as exc:
+            return handle_error(exc, 'github_directories')
 
 
 class GitHubWebhookAPIView(APIView):

@@ -17,7 +17,7 @@ const uuid = value => {
   return value
 }
 export const projectsApi = Object.freeze({
-  list: () => api.get('/projects/'),
+  list: (pageNumber = 1) => api.get(`/projects/?page=${page(pageNumber)}&page_size=50`),
   organizations: () => api.get('/projects/organizations/'),
   create: values => api.post('/projects/create/', values),
   detail: projectId => api.get(`/projects/${uuid(projectId)}/`),
@@ -25,6 +25,12 @@ export const projectsApi = Object.freeze({
   archive: projectId => api.post(`/projects/${uuid(projectId)}/archive/`, {}),
   environments: projectId => api.get(`/projects/${uuid(projectId)}/environments/`),
   createEnvironment: (projectId, values) => api.post(`/projects/${uuid(projectId)}/environments/create/`, values),
+  configurations: (projectId, envId) => api.get(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/configurations/`),
+  createConfiguration: (projectId, envId, values) => api.post(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/configurations/create/`, values),
+  updateConfiguration: (projectId, envId, configId, values) => api.patch(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/configurations/${uuid(configId)}/update/`, values),
+  finalizeConfiguration: (projectId, envId, configId) => api.post(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/configurations/${uuid(configId)}/finalize/`, {}),
+  offers: (projectId, envId) => api.get(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/configurations/offers/`),
+  domains: (projectId, envId) => api.get(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/`),
 })
 export const gitApi = Object.freeze({
   start: () => api.post('/projects/git/github/start/', {}),
@@ -32,5 +38,11 @@ export const gitApi = Object.freeze({
   installations: () => api.get('/projects/git/github/installations/'),
   repositories: (installationId, pageNumber = 1) => api.get(`/projects/git/github/repositories/?installation_id=${positive(installationId)}&page=${page(pageNumber)}`),
   branches: (installationId, repositoryId, pageNumber = 1) => api.get(`/projects/git/github/branches/?installation_id=${positive(installationId)}&repository_id=${positive(repositoryId)}&page=${page(pageNumber)}`),
+  directories: (installationId, repositoryId, branch, directory = '') => {
+    if (typeof branch !== 'string' || !branch || branch.length > 255 || branch.includes('..')) throw new TypeError('Branche invalide.')
+    if (typeof directory !== 'string' || directory.startsWith('/') || directory.includes('..') || directory.includes('\\')) throw new TypeError('Dossier invalide.')
+    const params = new URLSearchParams({ installation_id: String(positive(installationId)), repository_id: String(positive(repositoryId)), branch, path: directory })
+    return api.get(`/projects/git/github/directories/?${params.toString()}`)
+  },
   disconnect: () => api.post('/projects/git/github/disconnect/', {}),
 })
