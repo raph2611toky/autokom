@@ -4,6 +4,7 @@ import AuthFrame from '../components/AuthFrame.jsx'
 import GitHubMark from '../components/GitHubMark.jsx'
 import { API_AVAILABLE, GITHUB_AVAILABLE } from '../config/runtime.js'
 import { useAuth } from '../context/AuthContext.jsx'
+import { startGitHubAccountAuth } from '../services/githubAuthFlow.js'
 import '../styles/auth.css'
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -15,6 +16,15 @@ export default function Login({ navigate, theme, onToggleTheme }) {
   const [password, setPassword] = useState('')
   const [visible, setVisible] = useState(false)
   const [notice, setNotice] = useState(() => new URLSearchParams(window.location.search).get('verified') === '1' ? 'Votre adresse e-mail est vérifiée. Vous pouvez vous connecter.' : '')
+
+  async function connectGithub() {
+    if (!API_AVAILABLE) { navigate('/deploy'); return }
+    if (!GITHUB_AVAILABLE) { setNotice('Connexion GitHub non activée.'); return }
+    if (busy) return
+    setBusy(true); setNotice('')
+    try { await startGitHubAccountAuth('login') }
+    catch (error) { setNotice(error?.message || 'Connexion GitHub indisponible.'); setBusy(false) }
+  }
 
   async function submit(event) {
     event.preventDefault()
@@ -61,10 +71,7 @@ export default function Login({ navigate, theme, onToggleTheme }) {
         <button type="submit" className="auth-ui-primary" disabled={busy} ><LockKeyhole size={18}/> Se connecter <ArrowRight size={19} /></button>
       </form>
       <p className="auth-ui-switch">Vous n'avez pas de compte ? <button type="button" onClick={() => navigate('/register')}>Créer un compte</button></p>
-      <button type="button" className="auth-ui-explore auth-ui-github" onClick={() => {
-        if (API_AVAILABLE) setNotice(GITHUB_AVAILABLE ? 'Connexion GitHub en cours d’intégration.' : 'Connexion GitHub non activée.')
-        else navigate('/deploy')
-      }}><GitHubMark size={17} /> Se connecter avec GitHub</button>
+      <button type="button" className="auth-ui-explore auth-ui-github" onClick={connectGithub} disabled={busy}><GitHubMark size={17} /> Se connecter avec GitHub</button>
     </AuthFrame>
   )
 }

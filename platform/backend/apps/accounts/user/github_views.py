@@ -1,5 +1,6 @@
 """Quatre APIView, une seule méthode par classe, Swagger distinct par endpoint."""
 from urllib.parse import urlencode
+import logging
 from django.conf import settings
 from django.http import HttpResponseRedirect
 from django.utils import timezone
@@ -13,6 +14,8 @@ from apps.accounts.user.permissions import IsClientUser
 from apps.accounts.user.models import User
 from apps.accounts.user.serializers import UserSerializer, GitHubExchangeSerializer
 from apps.accounts.user.tokens import issue_pair
+log = logging.getLogger(__name__)
+
 from apps.accounts.user.github_auth_service import (
     start_oauth, consume_oauth_state, verified_identity, finish_oauth, consume_login_ticket,
 )
@@ -67,16 +70,24 @@ class GitHubLoginCallbackAPIView(APIView):
     def get(self, request):
         # Codes/tokens OAuth jamais présents dans la redirection finale.
         status, ticket = 'error', None
+        stage = 'state'
         try:
             intent, verifier, link_user, browser_binding_hash = consume_oauth_state(request.query_params.get('state', ''))
             if request.query_params.get('error'):
                 status = 'denied'
+                log.warning('AUTOKOM GitHub account OAuth : autorisation refusée par le fournisseur')
             else:
+                stage = 'identity'
                 github_id, login, email, name = verified_identity(request.query_params.get('code', ''), verifier)
+                stage = 'database'
                 status, ticket = finish_oauth(intent=intent, link_user=link_user,
                     github_id=github_id, github_login=login, email=email, full_name=name,
                     browser_binding_hash=browser_binding_hash)
-        except Exception:
+                log.info('AUTOKOM GitHub account OAuth : résultat %s', status)
+        except Exception as exc:
+            # Ne jamais écrire code, state, ticket, e-mail ou les jetons dans les journaux.
+            log.warning('AUTOKOM GitHub account OAuth : échec à l’étape %s (catégorie %s)',
+                        stage, type(exc).__name__)
             status = 'error'
         fragment = urlencode({'status': status, **({'ticket': ticket} if ticket else {})})
         response = HttpResponseRedirect(settings.FRONTEND_URL + '/auth/github/callback#' + fragment)

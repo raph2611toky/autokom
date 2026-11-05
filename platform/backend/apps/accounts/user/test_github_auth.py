@@ -100,6 +100,14 @@ class GitHubAuthDatabaseTests(TestCase):
         with self.assertRaises(ValidationError):
             consume_login_ticket(ticket, binding)
 
+    def test_login_does_not_create_an_unknown_account_implicitly(self):
+        status, ticket = finish_oauth(intent='login', link_user=None, github_id=100401,
+            browser_binding_hash='h' * 64, github_login='github-new-user',
+            email='brand-new-login@example.invalid', full_name='New GitHub User')
+        self.assertEqual(status, 'not_registered')
+        self.assertIsNone(ticket)
+        self.assertFalse(User.objects.filter(email='brand-new-login@example.invalid').exists())
+
     def test_link_from_existing_account_then_login(self):
         user = register_client(email='link@example.invalid', full_name='Existing User',
                                password='correct-local-password-very-long')

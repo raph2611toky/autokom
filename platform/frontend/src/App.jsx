@@ -6,6 +6,7 @@ import Register from './pages/Register.jsx'
 import VerifyEmail from './pages/VerifyEmail.jsx'
 import ForgotPassword from './pages/ForgotPassword.jsx'
 import ResetPassword from './pages/ResetPassword.jsx'
+import GitHubAuthCallback from './pages/GitHubAuthCallback.jsx'
 import Deploy from './pages/Deploy.jsx'
 import Sites from './pages/Sites.jsx'
 import Projects from './pages/Projects.jsx'
@@ -13,7 +14,7 @@ import Pricing from './pages/Pricing.jsx'
 import { API_AVAILABLE } from './config/runtime.js'
 import { useAuth } from './context/AuthContext.jsx'
 
-const ROUTES = ['/', '/login', '/register', '/deploy', '/sites', '/projects', '/pricing', '/verify-email', '/forgot-password', '/reset-password', '/integrations/github']
+const ROUTES = ['/', '/login', '/register', '/deploy', '/sites', '/projects', '/pricing', '/verify-email', '/forgot-password', '/reset-password', '/integrations/github', '/auth/github/callback']
 
 function validRoute(path) {
   return ROUTES.includes(path) || /^\/(?:sites|projects)\/[^/]+$/.test(path)
@@ -85,6 +86,7 @@ export default function App() {
 
   if (route === '/') return <Landing {...commonProps} />
   if (route === '/login') return <Login {...commonProps} />
+  if (route === '/auth/github/callback') return <GitHubAuthCallback {...commonProps} />
   if (route === '/integrations/github') return <div className="app-shell"><main className="container workspace" role="status">Vérification de la connexion GitHub…</main></div>
   if (route === '/register') return <Register {...commonProps} />
   if (route === '/verify-email') return <VerifyEmail {...commonProps} />

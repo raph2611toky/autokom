@@ -4,9 +4,10 @@ import GitHubMark from './GitHubMark.jsx'
 import { GITHUB_AVAILABLE } from '../config/runtime.js'
 import { projectsApi, gitApi } from '../services/projectsApi.js'
 import { errorText } from '../services/projectWorkflow.js'
+import { startGitHubAccountAuth } from '../services/githubAuthFlow.js'
 
 /** Même interface GitHub, données provenant exclusivement de Django/GitHub App. */
-export default function LiveGitHubConnector({ form, update, onNotice }) {
+export default function LiveGitHubConnector({ form, update, onNotice, onConnectionChange }) {
   const [connected, setConnected] = useState(false)
   const [backendConfigured, setBackendConfigured] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -21,6 +22,8 @@ export default function LiveGitHubConnector({ form, update, onNotice }) {
   const [installationUrl, setInstallationUrl] = useState('')
   const [busy, setBusy] = useState(false)
   const [chosenRepo, setChosenRepo] = useState(null)
+
+  useEffect(() => { onConnectionChange?.(Boolean(GITHUB_AVAILABLE && connected)) }, [connected, onConnectionChange])
 
   useEffect(() => {
     if (!GITHUB_AVAILABLE) { setLoading(false); return }
@@ -81,6 +84,12 @@ export default function LiveGitHubConnector({ form, update, onNotice }) {
       window.location.assign(url.href)
     } catch (err) { setError(errorText(err)); setBusy(false) }
   }
+  async function linkForLogin() {
+    if (!GITHUB_AVAILABLE || busy) return
+    setBusy(true); setError('')
+    try { await startGitHubAccountAuth('link') }
+    catch (err) { setError(errorText(err)); setBusy(false) }
+  }
   async function disconnect() {
     if (!window.confirm('Déconnecter la connexion GitHub de ce compte AUTOKOM ?')) return
     setBusy(true)
@@ -117,6 +126,7 @@ export default function LiveGitHubConnector({ form, update, onNotice }) {
     </div>}
     {connected && <>
       <div className="gh-inline"><span className="gh-user">Votre espace GitHub réel</span>
+        <button className="gh-subtle-button" type="button" onClick={linkForLogin} disabled={busy}><GitHubMark size={15}/> Associer au compte AUTOKOM</button>
         <button className="gh-subtle-button" type="button" onClick={disconnect} disabled={busy}><Unplug size={15}/> Déconnecter</button></div>
       {organizations.length > 1 && <label className="field"><span>Organisation AUTOKOM</span><select value={form.organizationId || ''} onChange={event => update({ organizationId: event.target.value })}>
         <option value="">Sélectionner…</option>{organizations.map(org => <option value={org.id} key={org.id}>{org.name}</option>)}

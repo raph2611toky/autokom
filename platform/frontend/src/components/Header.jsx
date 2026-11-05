@@ -33,7 +33,7 @@ export default function Header({ route, navigate, theme, onToggleTheme }) {
         </nav>
         <div className="ak-header-actions">
           <ThemeToggle theme={theme} onToggle={onToggleTheme} />
-          <button type="button" className="icon-button" title="Retour à la connexion" aria-label="Retour à la connexion" onClick={leave}><LogOut size={17} /></button>
+          <button type="button" className="icon-button ak-logout-button" title="Se déconnecter" aria-label="Se déconnecter" onClick={leave}><LogOut size={17} /></button>
         </div>
       </div>
       <div className="header-hairline" aria-hidden="true" />

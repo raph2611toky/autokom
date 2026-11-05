@@ -190,6 +190,10 @@ def finish_oauth(*, intent: str, link_user: User | None, github_id: int, github_
         # local juste parce que l'adresse e-mail est identique.
         if User.objects.filter(email__iexact=email).exists():
             return 'account_exists', None
+        # Ne pas créer implicitement un compte depuis le bouton « se connecter ».
+        # L'utilisateur doit explicitement choisir l'inscription GitHub.
+        if intent == 'login':
+            return 'not_registered', None
 
         # Le GitHub App /user/emails a certifié l'e-mail principal. Mot de passe
         # imprévisible et inconnu de l'utilisateur; récupération par e-mail possible.

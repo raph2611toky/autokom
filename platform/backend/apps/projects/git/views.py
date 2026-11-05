@@ -1,5 +1,6 @@
 """API GitHub App: chaque classe hérite directement d'APIView et n'a qu'une méthode HTTP."""
 import json
+import logging
 from urllib.parse import urlencode, quote
 from django.conf import settings
 from django.http import HttpResponseRedirect
@@ -16,6 +17,8 @@ from apps.projects.git.models import GitHubAuthorization, GitConnection, GitWebh
 from apps.projects.git.services import (require_github_app, authorize_url, installation_url, consume_state,
     exchange_code, save_authorization, get_installations, get_repositories, get_repository, get_branches,
     get_user_token, _request, verify_signature)
+log = logging.getLogger(__name__)
+
 from apps.projects.git.swagger.github_start import schema as github_start_schema
 from apps.projects.git.swagger.github_status import schema as github_status_schema
 from apps.projects.git.swagger.github_callback import schema as github_callback_schema
@@ -66,18 +69,26 @@ class GitHubCallbackAPIView(APIView):
     permission_classes = [AllowAny]
     @github_callback_schema
     def get(self, request):
+        # Ne jamais journaliser la query string OAuth (code et state confidentiels).
+        stage = 'state'
         try:
             user = consume_state(request.query_params.get('state', ''))
             if request.query_params.get('error'):
+                log.warning('AUTOKOM GitHub repositories OAuth : autorisation refusée par le fournisseur')
                 return HttpResponseRedirect(settings.FRONTEND_URL + '/integrations/github?status=denied')
+            stage = 'exchange'
             data = exchange_code(request.query_params.get('code', ''))
+            stage = 'identity'
             profile = _request('GET', '/user', token=data['access_token'])
             if not profile.get('id') or not profile.get('login'):
                 raise ValidationError('Identité GitHub introuvable.')
+            stage = 'database'
             save_authorization(user, data, profile)
+            log.info('AUTOKOM GitHub repositories OAuth : connexion enregistrée')
             return HttpResponseRedirect(settings.FRONTEND_URL + '/integrations/github?status=connected')
-        except Exception:
-            # Ne jamais exposer code, state ou jeton dans le navigateur ni les logs applicatifs.
+        except Exception as exc:
+            log.warning('AUTOKOM GitHub repositories OAuth : échec à l’étape %s (catégorie %s)',
+                        stage, type(exc).__name__)
             return HttpResponseRedirect(settings.FRONTEND_URL + '/integrations/github?status=error')
 
 

@@ -4,6 +4,7 @@ import AuthFrame from '../components/AuthFrame.jsx'
 import GitHubMark from '../components/GitHubMark.jsx'
 import { API_AVAILABLE, GITHUB_AVAILABLE } from '../config/runtime.js'
 import { authApi } from '../services/authApi.js'
+import { startGitHubAccountAuth } from '../services/githubAuthFlow.js'
 import '../styles/auth.css'
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -37,6 +38,15 @@ export default function Register({ navigate, theme, onToggleTheme }) {
     setServerErrors(current => ({ ...current, [key]: '' }))
   }
   function blur(key) { setTouched(current => ({ ...current, [key]: true })) }
+  async function registerWithGithub() {
+    if (!API_AVAILABLE) { navigate('/deploy'); return }
+    if (!GITHUB_AVAILABLE) { setNotice('Inscription GitHub non activée.'); return }
+    if (busy) return
+    setBusy(true); setNotice('')
+    try { await startGitHubAccountAuth('signup') }
+    catch (error) { setNotice(error?.message || 'Inscription GitHub indisponible.'); setBusy(false) }
+  }
+
   async function submit(event) {
     event.preventDefault()
     if (busy || registered) return
@@ -126,10 +136,7 @@ export default function Register({ navigate, theme, onToggleTheme }) {
         <button type="submit" className="auth-ui-primary auth-ui-full" disabled={busy || registered}>{busy ? 'Création du compte…' : 'Créer mon compte'} <ArrowRight size={19}/></button>
       </form>
       <p className="auth-ui-switch">Vous avez déjà un compte ? <button type="button" onClick={() => navigate('/login')}>Se connecter</button></p>
-      <button type="button" className="auth-ui-explore auth-ui-github" onClick={() => {
-        if (API_AVAILABLE) setNotice(GITHUB_AVAILABLE ? 'Inscription GitHub en cours d’intégration.' : 'Inscription GitHub non activée.')
-        else navigate('/deploy')
-      }}><GitHubMark size={17} /> S’inscrire avec GitHub</button>
+      <button type="button" className="auth-ui-explore auth-ui-github" onClick={registerWithGithub} disabled={busy}><GitHubMark size={17} /> S’inscrire avec GitHub</button>
     </AuthFrame>
   )
 }

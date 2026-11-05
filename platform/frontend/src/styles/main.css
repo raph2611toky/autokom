@@ -35,6 +35,9 @@ svg { flex-shrink: 0; }
 .account-chip.preview { color: var(--ak-accent); background: var(--ak-surface); }
 .icon-button { border-radius: var(--ak-control-radius); display: inline-grid; place-items: center; width: 38px; height: 38px; background: var(--ak-surface); border: 1px solid var(--ak-border); color: var(--ak-muted); }
 .icon-button:hover { color: var(--violet); border-color: var(--ak-border); }
+/* Déconnexion : même rouge sémantique en thèmes clair et sombre. */
+.ak-logout-button { color: var(--ak-danger); }
+.ak-logout-button:hover, .ak-logout-button:focus-visible { color: var(--ak-danger); border-color: var(--ak-danger); }
 .workspace { padding-bottom: 44px; }
 .page-hero { display: flex; align-items: end; justify-content: space-between; gap: 22px; padding: 51px 0 37px; }
 .eyebrow { font-size: 10px; color: var(--violet); letter-spacing: .21em; font-weight: 800; text-transform: uppercase; display: flex; align-items: center; gap: 11px; }

@@ -42,8 +42,9 @@ export const authApi = Object.freeze({
     if (!/^[0-9a-f-]{36}$/i.test(id)) throw new TypeError('Identifiant de session invalide.')
     return api.delete(`/auth/sessions/${id}/`)
   },
-  // GitHub App - parcours OAuth réel désactivé tant que l'UI callback n'est pas raccordée.
+  // GitHub App : state/PKCE et ticket à usage unique, puis cookies HttpOnly.
   githubStart: intent => api.get(`/auth/github/start/?intent=${intent === 'signup' ? 'signup' : 'login'}`),
+  githubLinkStart: () => api.post('/auth/github/link/start/', {}),
   githubExchange: ({ ticket, browserBinding }) => cookieAuthEnabled
     ? api.post('/auth/browser/github/exchange/', { ticket, browser_binding: browserBinding })
     : api.post('/auth/github/exchange/', { ticket, browser_binding: browserBinding }),

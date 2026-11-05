@@ -1150,6 +1150,38 @@ def logs(args):
               'logs', '--tail', str(args.lines), 'web'], cwd=BACKEND, timeout=30, env=_compose_env(state))
 
 
+def github_oauth_logs(lines):
+    """Afficher uniquement nos événements structurés OAuth, pas les access logs avec code/state."""
+    if os.geteuid() != 0:
+        raise AppError('Journaux OAuth réservés à root : utiliser sudo.')
+    state = load_state()
+    if state['runtime'] == 'systemd':
+        command = ['journalctl', '-u', SERVICE, '-n', '1500', '--no-pager', '-o', 'cat']
+    else:
+        command = ['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
+                   'logs', '--tail', '1500', 'web']
+    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=30)
+    if result.returncode:
+        raise AppError('Lecture des journaux Django impossible.')
+    # Liste strictement autorisée : aucun texte arbitraire (URL, requête, jeton).
+    safe = re.compile(r'AUTOKOM GitHub (repositories|account) OAuth : '
+                      r'(autorisation refusée par le fournisseur|connexion enregistrée|'
+                      r'résultat (?:ok|created|linked|denied|error|account_exists|already_linked|not_registered)|'
+                      r'échec à l’étape (?:state|exchange|identity|database) '
+                      r'\(catégorie [A-Za-z_]{1,72}\))')
+    events = []
+    for line in result.stdout.splitlines():
+        match = safe.search(line)
+        if match:
+            events.append(match.group(0))
+    print('  ◈ AUTOKOM · GitHub OAuth · Diagnostics sans codes ni jetons')
+    for line in events[-lines:]:
+        print('  ' + line)
+    if not events:
+        print('  › Aucun diagnostic OAuth récent. Relancer une seule connexion GitHub pour le produire.')
+    return 0
+
+
 def main(argv=None):
     if argv and argv[0] == 'frontend' and (len(argv) == 1 or argv[1] in ('-h', '--help')):
         from autokom_frontend_manager import main as frontend_main
@@ -1188,6 +1220,24 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.action in ('backend','frontend'):
         from autokom_env_manager import main as env_main, EnvError
+        if args.action == 'backend' and args.backend_args[:2] == ['github', 'doctor']:
+            from autokom_github_doctor import main as github_doctor
+            return github_doctor()
+        if args.action == 'backend' and args.backend_args and args.backend_args[0] == 'logs':
+            # Alias officiel du journal Django : conserve la même source que `autokom app logs`.
+            # Aucune modification du service et aucune nouvelle permission système.
+            logs_parser = argparse.ArgumentParser(prog='autokom app backend logs')
+            logs_parser.add_argument('--lines', type=int, default=80)
+            logs_parser.add_argument('--source', choices=('service', 'setup', 'deploy'), default='service')
+            logs_parser.add_argument('--github', action='store_true', help='Diagnostics OAuth GitHub filtrés sans secrets')
+            options = logs_parser.parse_args(args.backend_args[1:])
+            if not 1 <= options.lines <= 1000:
+                raise AppError('--lines doit être compris entre 1 et 1000.')
+            if options.github:
+                if options.source != 'service':
+                    raise AppError('--github nécessite --source service.')
+                return github_oauth_logs(options.lines)
+            return logs(options)
         if args.action == 'backend' and args.backend_args and args.backend_args[0] == 'domain':
             from autokom_backend_domain import main as domain_main, DomainError
             from autokom_dns_core import DNSError
@@ -1201,7 +1251,7 @@ def main(argv=None):
             try: return frontend_main(args.backend_args)
             except FrontendError as exc: raise AppError(str(exc)) from exc
         if not args.backend_args or args.backend_args[0] != 'env':
-            raise AppError('Utiliser : autokom app '+args.action+' env [show|setup|edit|delete|sync-runner-key] ou backend domain [--check|--apply|--status]')
+            raise AppError('Utiliser : autokom app '+args.action+' env [show|setup|edit|delete|sync-runner-key], backend logs [--lines N], backend github doctor ou backend domain [--check|--apply|--status]')
         try: return env_main(args.action,args.backend_args[1:])
         except EnvError as exc: raise AppError(str(exc)) from exc
     if args.action == 'setup':
