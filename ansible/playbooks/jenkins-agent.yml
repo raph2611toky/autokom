@@ -1,0 +1,7 @@
+---
+- name: AUTOKOM | Agent Jenkins local et isolé
+  hosts: local
+  become: true
+  gather_facts: true
+  roles:
+    - role: ../roles/jenkins_agent

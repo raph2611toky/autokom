@@ -168,6 +168,7 @@ def isolated_agent_status(env):
         raise SetupError('Inventaire des nœuds Jenkins illisible.')
     if not isinstance(computers, list):
         raise SetupError('Inventaire des nœuds Jenkins invalide.')
+    found = False
     for node in computers:
         if not isinstance(node, dict):
             continue
@@ -177,11 +178,11 @@ def isolated_agent_status(env):
                   if isinstance(label, dict)}
         if 'autokom-isolated' not in labels:
             continue
+        found = True
         if (node.get('offline') is False and node.get('temporarilyOffline') is not True
                 and type(node.get('numExecutors')) is int and node['numExecutors'] > 0):
             return True, 'online'
-        return False, 'offline'
-    return False, 'missing'
+    return False, 'offline' if found else 'missing'
 
 
 def jenkins_view_xml(job):
@@ -395,6 +396,10 @@ def main(argv=None):
         group=p.add_mutually_exclusive_group()
         group.add_argument('--check',action='store_true')
         group.add_argument('--apply',action='store_true')
+    agent=sub.add_parser('agent', help='Provisionner automatiquement un agent Jenkins isolé')
+    group=agent.add_mutually_exclusive_group()
+    group.add_argument('--check',action='store_true')
+    group.add_argument('--apply',action='store_true')
     sub.add_parser('status')
     sub.add_parser('doctor', help='Vérifier la liaison Django → socket → broker sans modifier le serveur')
     env_p = sub.add_parser('env', help='Secrets runtime : show, setup, edit, delete',add_help=False)
@@ -412,6 +417,12 @@ def main(argv=None):
         return 0
     if os.geteuid():raise SetupError('Utiliser sudo autokom runtime '+opts.action)
     if opts.action=='doctor':return doctor()
+    if opts.action=='agent':
+        from autokom_jenkins_agent import provision, AgentError
+        try:
+            if opts.apply: confirm('CONNECTER')
+            return provision(load_env(), apply=opts.apply)
+        except AgentError as exc: raise SetupError(str(exc)) from exc
     if opts.action=='setup':return setup(apply=opts.apply)
     return jenkins_sync(apply=opts.apply)
 

@@ -1,0 +1,77 @@
+---
+- name: Vérifier la plateforme de l’agent
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['os_family'] == 'Debian'
+
+- name: Préparer le runtime Java et les outils nécessaires
+  ansible.builtin.apt:
+    name:
+      - openjdk-21-jre-headless
+      - git
+      - acl
+      - uidmap
+      - slirp4netns
+      - fuse-overlayfs
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Assurer l’identité Unix isolée du builder
+  ansible.builtin.user:
+    name: autokom-builder
+    system: true
+    create_home: true
+    shell: /usr/sbin/nologin
+    groups: []
+    append: false
+
+- name: Préparer les répertoires du builder
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /var/lib/autokom-jenkins-agent-v2, owner: autokom-builder, group: autokom-builder, mode: '0700'}
+    - {path: /var/lib/autokom/build-artifacts, owner: root, group: autokom-builder, mode: '2770'}
+
+- name: Lire les ACL existantes sans les élargir
+  ansible.builtin.command:
+    argv: [getfacl, -cp, /var/lib/autokom]
+  register: autokom_builder_parent_acl
+  changed_when: false
+  check_mode: false
+
+- name: Accorder uniquement la traversée au builder sur le parent des artefacts
+  ansible.builtin.command:
+    argv: [setfacl, -m, 'u:autokom-builder:--x,m::r-x', /var/lib/autokom]
+  when:
+    - not ansible_check_mode
+    - "'user:autokom-builder:--x' not in autokom_builder_parent_acl.stdout or '#effective:---' in autokom_builder_parent_acl.stdout"
+
+- name: Contrôler l’accès effectif du builder à ses artefacts
+  ansible.builtin.command:
+    argv: [runuser, -u, autokom-builder, --, test, -w, /var/lib/autokom/build-artifacts]
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Vérifier que le builder ne peut pas lister les données privées Django
+  ansible.builtin.command:
+    argv: [runuser, -u, autokom-builder, --, test, '!', -r, /var/lib/autokom]
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Vérifier que le builder n’appartient jamais au groupe Docker
+  ansible.builtin.command:
+    argv: [id, -nG, autokom-builder]
+  register: autokom_builder_groups
+  changed_when: false
+  check_mode: false
+
+- name: Refuser tout accès direct au démon Docker
+  ansible.builtin.assert:
+    that:
+      - "'docker' not in autokom_builder_groups.stdout.split()"

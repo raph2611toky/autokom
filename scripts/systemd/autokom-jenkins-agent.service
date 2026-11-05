@@ -1,0 +1,35 @@
+[Unit]
+Description=AUTOKOM - Jenkins inbound builder (isolated loopback WebSocket)
+After=network-online.target jenkins.service
+Wants=network-online.target
+StartLimitBurst=8
+StartLimitIntervalSec=180
+Requires=jenkins.service
+
+[Service]
+Type=simple
+User=autokom-builder
+Group=autokom-builder
+WorkingDirectory=/var/lib/autokom-jenkins-agent-v2
+Environment=HOME=/var/lib/autokom-jenkins-agent-v2
+Environment=AUTOKOM_API_BASE=__AUTOKOM_BACKEND_URL__
+Environment=AUTOKOM_ARTIFACT_DIR=/var/lib/autokom/build-artifacts
+Environment=JAVA_TOOL_OPTIONS=-Djava.awt.headless=true
+ExecStart=/usr/bin/java -jar /var/lib/autokom-jenkins-agent-v2/agent.jar -url http://127.0.0.1:8080/ -secret @/var/lib/autokom-jenkins-agent-v2/.agent-secret -name autokom-builder-01 -webSocket -workDir /var/lib/autokom-jenkins-agent-v2
+Restart=on-failure
+RestartSec=6
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/autokom-jenkins-agent-v2 /var/lib/autokom/build-artifacts
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
