@@ -48,9 +48,14 @@ class GitHubStatusAPIView(APIView):
     def get(self, request):
         try:
             account = GitHubAuthorization.objects.filter(user=request.user, is_active=True).first()
-            return api_success({'connected': bool(account), 'github_login': account.github_login if account else None,
+            # Diagnostic de configuration seulement : aucun secret ni appel externe.
+            configured = all((settings.GITHUB_APP_CLIENT_ID, settings.GITHUB_APP_CLIENT_SECRET,
+                              settings.GITHUB_APP_CALLBACK_URL, settings.GITHUB_APP_SLUG,
+                              settings.AUTOKOM_FIELD_ENCRYPTION_KEY))
+            return api_success({'configured': bool(configured), 'connected': bool(account) and bool(configured),
+                                'github_login': account.github_login if account and configured else None,
                                 'installation_url': installation_url() if settings.GITHUB_APP_SLUG else None},
-                               'État de la connexion GitHub.')
+                               'État local de la connexion GitHub (sans vérification réseau).')
         except Exception as exc:
             return handle_error(exc, 'github_status')
 

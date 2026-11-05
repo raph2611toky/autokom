@@ -693,7 +693,7 @@ def main(argv=None):
             (cmd=='dns' and len(arguments)>=3 and arguments[1:3]==['cloudflare','env'] and
              (len(arguments)==3 or arguments[3] in ('setup','edit','delete'))) or
             (cmd=='app' and len(arguments)>=3 and arguments[1] in ('backend','frontend') and
-             arguments[2]=='env' and (len(arguments)==3 or arguments[3] in ('setup','edit','delete'))))
+             arguments[2]=='env' and (len(arguments)==3 or arguments[3] in ('setup','edit','delete','sync-runner-key'))))
         dns_write = cmd=='dns' and (len(arguments)==1 or
             (len(arguments)==2 and arguments[1] in ('record','tsig','cloudflare')) or (
             len(arguments)>1 and arguments[1] in ('install','setup') and '--check' not in arguments) or

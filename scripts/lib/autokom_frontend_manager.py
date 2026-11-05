@@ -654,7 +654,7 @@ def setup(args):
     values.setdefault('VITE_AUTOKOM_AUTH_MODE', 'cookie')
     values.setdefault('VITE_AUTOKOM_FRONTEND_ONLY', 'false')
     values.setdefault('VITE_AUTOKOM_API_ENABLED', 'true')
-    values.setdefault('VITE_AUTOKOM_GITHUB_ENABLED', 'false')  # le sélecteur GitHub est simulé
+    values.setdefault('VITE_AUTOKOM_GITHUB_ENABLED', 'false')  # activer seulement après configuration GitHub App côté Django
     _validate('frontend', values)
     if SECRETS.exists():
         backup(SECRETS)
@@ -716,9 +716,13 @@ def build_environment(source):
         if value not in accepted:
             raise FrontendError('Configuration Vite invalide : '+key)
         public[key] = value
-    # Pour l'instant GitHub est un composant de démonstration : ne pas l'annoncer connecté.
-    if public['VITE_AUTOKOM_GITHUB_ENABLED'] != 'false':
-        raise FrontendError('L’UI GitHub simulée doit rester désactivée jusqu’à la liaison OAuth réelle.')
+    # Le connecteur réel LiveGitHubConnector utilise exclusivement les API Django.
+    # Refuser toute activation dans le parcours statique/de démonstration.
+    if public['VITE_AUTOKOM_GITHUB_ENABLED'] == 'true' and (
+        public['VITE_AUTOKOM_FRONTEND_ONLY'] != 'false' or
+        public['VITE_AUTOKOM_API_ENABLED'] != 'true'
+    ):
+        raise FrontendError('GitHub réel requiert le frontend en mode API connecté.')
     env = {'HOME': str(BUILD_HOME), 'PATH': BUILD_PATH,
            'XDG_CACHE_HOME': str(BUILD_HOME / '.cache'),
            'XDG_CONFIG_HOME': str(BUILD_HOME / '.config'),

@@ -8,6 +8,7 @@ import { errorText } from '../services/projectWorkflow.js'
 /** Même interface GitHub, données provenant exclusivement de Django/GitHub App. */
 export default function LiveGitHubConnector({ form, update, onNotice }) {
   const [connected, setConnected] = useState(false)
+  const [backendConfigured, setBackendConfigured] = useState(null)
   const [loading, setLoading] = useState(true)
   const [installations, setInstallations] = useState([])
   const [organizations, setOrganizations] = useState([])
@@ -26,12 +27,18 @@ export default function LiveGitHubConnector({ form, update, onNotice }) {
     let alive = true
     Promise.all([gitApi.status(), projectsApi.organizations()]).then(async ([status, org]) => {
       if (!alive) return
-      setConnected(Boolean(status?.connected))
+      setBackendConfigured(status?.configured !== false)
+      setConnected(Boolean(status?.connected) && status?.configured !== false)
       setInstallationUrl(status?.installation_url || '')
       setOrganizations(org?.organizations || [])
       if (!form.organizationId && org?.organizations?.[0]) update({ organizationId: org.organizations[0].id })
       if (status?.connected) setInstallations((await gitApi.installations())?.installations || [])
-    }).catch(err => { if (alive) setError(errorText(err)) }).finally(() => { if (alive) setLoading(false) })
+    }).catch(err => {
+      if (alive) {
+        if (err?.status === 401 || err?.status === 409) setConnected(false)
+        setError(errorText(err))
+      }
+    }).finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
   }, [])
 
@@ -101,10 +108,11 @@ export default function LiveGitHubConnector({ form, update, onNotice }) {
       </span>
     </div>
     {!!form.backendProjectId && <p className="ak-simulation-disclosure">Dépôt déjà lié au projet : {form.repositorySlug}. Vous pouvez modifier la configuration sans reconnecter GitHub.</p>}
-    {!GITHUB_AVAILABLE && <p className="ak-simulation-disclosure">Connexion GitHub App non activée sur AUTOKOM. Aucun dépôt de démonstration n’est utilisé dans ce mode.</p>}
+    {!GITHUB_AVAILABLE && <p className="ak-simulation-disclosure">Connexion aux dépôts GitHub désactivée dans la configuration frontend. Aucun dépôt fictif n’est utilisé.</p>}
+    {GITHUB_AVAILABLE && backendConfigured === false && <p className="ak-simulation-disclosure">GitHub App non configurée côté Django : vérifier Client ID, secret, callback, slug et chiffrement. Aucun dépôt fictif n’est affiché.</p>}
     {loading && <p className="ak-simulation-disclosure" role="status">Connexion à votre espace GitHub…</p>}
     {error && <p className="feedback error" role="alert">{error}</p>}
-    {!loading && GITHUB_AVAILABLE && !connected && <div className="ak-gh-start">
+    {!loading && GITHUB_AVAILABLE && backendConfigured !== false && !connected && <div className="ak-gh-start">
       <button className="button-primary" type="button" disabled={busy} onClick={connect}><GitHubMark size={17}/> Connecter GitHub</button>
     </div>}
     {connected && <>

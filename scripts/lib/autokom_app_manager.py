@@ -288,6 +288,7 @@ ALLOWED_ENV_KEYS = {
     'EMAIL_HOST_PASSWORD', 'DEFAULT_FROM_EMAIL', 'GITHUB_APP_CLIENT_ID',
     'GITHUB_APP_CLIENT_SECRET', 'GITHUB_APP_SLUG', 'GITHUB_APP_CALLBACK_URL',
     'GITHUB_WEBHOOK_SECRET', 'GITHUB_APP_ID', 'GITHUB_APP_PRIVATE_KEY_PATH',
+    'GITHUB_AUTH_CALLBACK_URL',
     'AUTOKOM_FIELD_ENCRYPTION_KEY', 'AUTOKOM_BASE_DOMAIN', 'AUTOKOM_MANAGED_DOMAIN_SUFFIX',
     'AUTOKOM_RUNNER_SHARED_KEY', 'GITHUB_API_VERSION',
     'AUTOKOM_STATIC_ROOT', 'AUTOKOM_MEDIA_ROOT', 'TRUST_PROXY_SSL_HEADER',
@@ -1182,7 +1183,7 @@ def main(argv=None):
     log_p.add_argument('--source', choices=['service', 'setup', 'deploy'], default='service',
                        help='Service Gunicorn ou journal détaillé de setup/deploy')
     for env_kind in ('backend', 'frontend'):
-        env_p = sub.add_parser(env_kind, help='Configuration '+env_kind+' : env show/setup/edit/delete', add_help=False)
+        env_p = sub.add_parser(env_kind, help='Configuration '+env_kind+' : env show/setup/edit/delete/sync-runner-key', add_help=False)
         env_p.add_argument('backend_args', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.action in ('backend','frontend'):
@@ -1200,7 +1201,7 @@ def main(argv=None):
             try: return frontend_main(args.backend_args)
             except FrontendError as exc: raise AppError(str(exc)) from exc
         if not args.backend_args or args.backend_args[0] != 'env':
-            raise AppError('Utiliser : autokom app '+args.action+' env [show|setup|edit|delete] ou backend domain [--check|--apply|--status]')
+            raise AppError('Utiliser : autokom app '+args.action+' env [show|setup|edit|delete|sync-runner-key] ou backend domain [--check|--apply|--status]')
         try: return env_main(args.action,args.backend_args[1:])
         except EnvError as exc: raise AppError(str(exc)) from exc
     if args.action == 'setup':

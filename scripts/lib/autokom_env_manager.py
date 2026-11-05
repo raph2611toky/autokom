@@ -204,8 +204,25 @@ def _validate(kind,values):
             raise EnvError('Mode authentification frontend invalide (cookie ou bearer).')
         if values.get('VITE_AUTOKOM_API_BASE', '/api') != '/api':
             raise EnvError('La base API doit être /api (proxy Nginx).')
-        if values.get('VITE_AUTOKOM_GITHUB_ENABLED','false') == 'true':
-            raise EnvError('La liaison UI GitHub simulée ne peut pas être activée en production.')
+        if values.get('VITE_AUTOKOM_GITHUB_ENABLED','false') == 'true' and (
+            values.get('VITE_AUTOKOM_FRONTEND_ONLY', 'true') != 'false' or
+            values.get('VITE_AUTOKOM_API_ENABLED', 'false') != 'true'
+        ):
+            raise EnvError('GitHub réel nécessite FRONTEND_ONLY=false et API_ENABLED=true.')
+    if kind=='backend':
+        runner = values.get('AUTOKOM_RUNNER_SHARED_KEY', '')
+        if runner and len(runner) < 32:
+            raise EnvError('La clé interne du runner doit contenir au moins 32 caractères.')
+        callback = values.get('GITHUB_AUTH_CALLBACK_URL', '')
+        if callback:
+            from urllib.parse import urlsplit
+            parts = urlsplit(callback)
+            local_dev = (parts.scheme == 'http' and parts.hostname in ('localhost', '127.0.0.1')
+                         and values.get('AUTOKOM_ENV_NAME', '').lower() != 'production')
+            if (not (parts.scheme == 'https' or local_dev) or not parts.hostname or
+                parts.username or parts.password or parts.query or parts.fragment or
+                parts.path != '/api/auth/github/callback/'):
+                raise EnvError('GITHUB_AUTH_CALLBACK_URL doit être HTTPS (HTTP local réservé au développement).')
     if kind=='cloudflare' and values.get('CLOUDFLARE_ZONE_ID') and not re.fullmatch(r'[a-fA-F0-9]{32}',values['CLOUDFLARE_ZONE_ID']):
         raise EnvError('Zone ID Cloudflare invalide (32 caractères hexadécimaux).')
 
@@ -278,7 +295,10 @@ def edit(kind,key=None):
     require_root();tty()
     path=file_path(kind);data=read_env(path)
     candidates=list(dict.fromkeys([*SAFE_KEYS.get(kind,()),*data.keys()]))
-    if kind=='backend':candidates=list(data)
+    if kind=='backend':
+        # Ces clés sont nécessaires aux intégrations réelles, même lorsqu'elles
+        # n'existent pas encore dans un fichier .env hérité.
+        candidates=list(dict.fromkeys([*data, 'AUTOKOM_RUNNER_SHARED_KEY', 'GITHUB_AUTH_CALLBACK_URL']))
     if not candidates: raise EnvError('Aucune clé à modifier : exécuter setup.')
     if key is None:key=select('Modifier une variable '+kind,candidates)
     if key not in candidates:raise EnvError('Variable non autorisée.')
@@ -333,16 +353,47 @@ def setup(kind):
     return 0
 
 
+def sync_runner_key():
+    """Synchroniser la clé HMAC existante, sans la révéler ni écraser un conflit."""
+    require_root()
+    runtime = read_env(file_path('runtime'))
+    key = runtime.get('AUTOKOM_RUNNER_SHARED_KEY', '')
+    if len(key) < 32:
+        raise EnvError('Clé runner absente/invalide dans runtime.env : configuration refusée.')
+    path = file_path('backend')
+    current = read_env(path)
+    existing = current.get('AUTOKOM_RUNNER_SHARED_KEY', '')
+    if existing and not secrets.compare_digest(existing, key):
+        raise EnvError('Clés backend/runtime différentes : résoudre le conflit avant synchronisation.')
+    if existing:
+        print('  ✓ Clé runner déjà identique dans backend.env et runtime.env.')
+        return 0
+    from autokom_app_manager import ALLOWED_ENV_KEYS
+    if 'AUTOKOM_RUNNER_SHARED_KEY' not in ALLOWED_ENV_KEYS:
+        raise EnvError('AUTOKOM ne permet pas encore la clé runner dans le service backend.')
+    updated = {**current, 'AUTOKOM_RUNNER_SHARED_KEY': key}
+    _validate('backend', updated)
+    if path.is_file():
+        backup(path)
+    write_env(path, updated)
+    print('  ✓ Clé HMAC synchronisée sans affichage. Redéployer Django pour la charger.')
+    return 0
+
+
 def main(kind,argv=None):
     p=argparse.ArgumentParser(prog=f'autokom {kind} env',description='Gestion sécurisée des variables AUTOKOM')
     sub=p.add_subparsers(dest='action')
     for name in ('show','setup','edit','delete'):
         item=sub.add_parser(name)
         if name in ('edit','delete'):item.add_argument('key',nargs='?')
+    if kind=='backend':sub.add_parser('sync-runner-key', help='Synchroniser la clé HMAC runtime → backend sans affichage')
     args=p.parse_args(argv)
     if not args.action:
         action=select('Secrets '+kind,['show','setup','edit','delete'])
     else:action=args.action
+    if action=='sync-runner-key':
+        if kind!='backend': raise EnvError('Commande réservée au backend.')
+        return sync_runner_key()
     if action=='show':return show(kind)
     if action=='setup':return setup(kind)
     if action=='edit':return edit(kind,getattr(args,'key',None))
