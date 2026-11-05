@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight, LoaderCircle, FolderKanban, GitBranch, Plus, Sea
 import { projectsApi } from '../services/projectsApi.js'
 import { deploymentsApi } from '../services/deploymentsApi.js'
 import { errorText, listRemoteProjectRecords, getRemoteProjectDetail } from '../services/projectWorkflow.js'
+import { publicationLabel, phaseTitles, phaseOrder, cleanCustomerLog } from '../services/deploymentPresentation.js'
 
 function formatDate(value) {
   if (!value) return 'Non renseignée'
@@ -107,10 +108,10 @@ export default function LiveProjects({ navigate, projectId = null }) {
           <div><dt>Branche</dt><dd>{cfg?.branch || project.default_branch}</dd></div>
           <div><dt>Répertoire source</dt><dd>{cfg?.root_directory || 'Racine'}</dd></div>
           <div><dt>Environnement</dt><dd>{environment.name}</dd></div>
-          <div><dt>Mode du pipeline</dt><dd>{cfg?.mode || 'Non configuré'}</dd></div>
+          <div><dt>Publication</dt><dd>{cfg?.mode === 'DEVSECOPS' ? 'Contrôles renforcés' : cfg ? 'Standard' : 'Non configurée'}</dd></div>
           <div><dt>Statut</dt><dd>{project.status}</dd></div>
           <div><dt>Dernière modification</dt><dd>{formatDate(project.updated_at)}</dd></div>
-          <div><dt>Publication</dt><dd>{runs[0]?.status || 'Aucun déploiement réel'}</dd></div>
+          <div><dt>Publication</dt><dd><span className={`ak-publication-pill state-${publicationLabel(runs[0]?.status)[1]}`}>{runs.length ? publicationLabel(runs[0]?.status)[0] : 'Aucune publication'}</span></dd></div>
         </dl>
         <div className="ak-project-detail-actions">
           <button className="button-outline" type="button" onClick={() => editProject(project)} disabled={busy || project.status === 'ARCHIVED'}><Settings2 size={16}/> Modifier la configuration</button>
@@ -120,19 +121,35 @@ export default function LiveProjects({ navigate, projectId = null }) {
       <section className="ak-workspace-sheet">
         <div className="ak-workspace-sheet-heading"><h2>Historique des publications</h2><span className="ak-project-state">{runs.length} exécution(s)</span></div>
         {runs.length === 0 && <p className="gh-muted">Aucune publication pour le moment.</p>}
-        <div className="ak-project-list">{runs.map(run => <div key={run.id} className="ak-project-row" style={{ flexWrap: 'wrap' }}>
-          <div className="ak-project-row-symbol"><Workflow size={20}/></div>
-          <div className="ak-project-row-main"><strong>Déploiement {String(run.id).slice(0, 8)}</strong><small>{formatDate(run.created_at)} · {run.status}</small></div>
-          <button type="button" className="button-outline" disabled={busy} onClick={() => loadLogs(run)}>{openedRun === run.id ? 'Masquer les logs' : 'Suivre la publication'}</button>
-          {openedRun === run.id && <div className="ak-run-observability" role="region" aria-label="Progression de la publication">
-            <div className="ak-run-stages">{(run.stages || []).map(stage => <div key={stage.stage_key} className="ak-run-stage">
-              <span>{{source:'Récupération du projet',sast:'Analyse du code',sca:'Vérification de sécurité',build:'Préparation du site',release:'Mise en ligne',health:'Vérification du site'}[stage.stage_key] || 'Vérification'}</span><strong>{stage.status === 'RUNNING' ? 'En cours' : stage.status === 'SUCCESS' ? 'Terminé' : stage.status === 'FAILED' ? 'Échec' : stage.status === 'SKIPPED' ? 'Ignoré' : 'En attente'}</strong>
-            </div>)}</div>
-
-            {['QUEUED','RUNNING'].includes(run.status) && <small className="gh-muted">Statut actualisé automatiquement toutes les 15 s, journaux toutes les 12 s.</small>}
-            {run.error_message && <p className="feedback error" role="alert">{run.error_message}</p>}
-          </div>}
-        </div>)}</div>
+        <div className="ak-deployment-list">{runs.map(run => {
+          const [name, tone] = publicationLabel(run.status)
+          const expanded = openedRun === run.id
+          const steps = [...(run.stages || [])].sort((a,b) => phaseOrder.indexOf(a.stage_key) - phaseOrder.indexOf(b.stage_key))
+          const entries = (logs[run.id] || []).map(row => cleanCustomerLog(row.message)).filter(Boolean)
+          return <article key={run.id} className="ak-deployment-card">
+            <div className="ak-deployment-summary">
+              <div className="ak-deployment-symbol"><Workflow size={19}/></div>
+              <div className="ak-deployment-summary-text"><strong>Publication du {formatDate(run.created_at)}</strong><small>Référence {String(run.id).slice(0,8)}</small></div>
+              <span className={`ak-publication-pill state-${tone}`} role="status">{name}</span>
+              <button type="button" className="button-outline ak-deployment-toggle" disabled={busy} onClick={() => loadLogs(run)} aria-expanded={expanded}>{expanded ? 'Masquer les détails' : 'Voir la progression'}</button>
+            </div>
+            {expanded && <div className="ak-deployment-details">
+              <h3>Progression de la mise en ligne</h3>
+              <ol className="ak-publication-timeline">{(steps.length ? steps : [{stage_key:'source',status:'PENDING'}]).map(stage => {
+                const [label, stateTone] = publicationLabel(stage.status)
+                return <li key={stage.stage_key} className={`ak-publication-step state-${stateTone}`}>
+                  <span className="ak-publication-dot" aria-hidden="true"/>
+                  <span className="ak-publication-step-name">{phaseTitles[stage.stage_key] || 'Vérification'}</span>
+                  <span className="ak-publication-step-state">{label}</span>
+                </li>
+              })}</ol>
+              {['QUEUED','RUNNING'].includes(run.status) && <p className="ak-deployment-hint">Mise à jour automatique de la progression.</p>}
+              {run.error_message && <p className="ak-deployment-error" role="alert">{cleanCustomerLog(run.error_message) || "Cette publication nécessite une intervention. Votre précédente version reste inchangée."}</p>}
+              {!!entries.length && <details className="ak-deployment-messages"><summary>Historique des opérations</summary><ol>{entries.map((entry,index) => <li key={index}>{entry}</li>)}</ol></details>}
+              {!entries.length && <p className="ak-deployment-hint">Les informations détaillées apparaîtront dès le démarrage de la préparation.</p>}
+            </div>}
+          </article>
+        })}</div>
       </section>
     </>
   }

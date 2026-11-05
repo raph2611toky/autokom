@@ -104,10 +104,43 @@ def jenkins_http(method, path, data=None):
     except (URLError, TimeoutError, OSError) as exc:
         raise BrokerError('Jenkins injoignable.') from exc
 
+def _isolated_agent_available():
+    """Fail closed before queueing work if the dedicated non-controller agent is offline.
+
+    Read-only Jenkins API. No customer-provided node names and no token in logs.
+    """
+    path = '/computer/api/json?tree=computer%5BdisplayName,offline,temporarilyOffline,numExecutors,assignedLabels%5Bname%5D%5D'
+    code, _, body = jenkins_http('GET', path)
+    if code != 200:
+        raise BrokerError('Impossible de vérifier les agents de construction Jenkins.')
+    try:
+        computers = json.loads(body).get('computer', [])
+    except (ValueError, TypeError):
+        raise BrokerError('État des agents Jenkins illisible.')
+    if not isinstance(computers, list):
+        raise BrokerError('Liste des agents Jenkins invalide.')
+    for computer in computers:
+        if not isinstance(computer, dict):
+            continue
+        name = computer.get('displayName', '')
+        # NEVER schedule untrusted customer code on Jenkins' built-in controller.
+        if name in ('Built-In Node', 'Jenkins', 'master', ''):
+            continue
+        labels = {label.get('name') for label in (computer.get('assignedLabels') or [])
+                  if isinstance(label, dict)}
+        if ('autokom-isolated' in labels and computer.get('offline') is False
+                and computer.get('temporarilyOffline') is not True
+                and type(computer.get('numExecutors')) is int
+                and computer['numExecutors'] >= 1):
+            return True
+    raise BrokerError('Agent de construction isolé indisponible. Aucune exécution envoyée en file.')
+
+
 def jenkins_action(action, params):
     _,job,_,_ = jenkins_config()
     if action == 'jenkins.dispatch':
         rid = valid_id(params.get('run_id'))
+        _isolated_agent_available()
         status,headers,_ = jenkins_http('POST',job+'/buildWithParameters',{'AUTOKOM_RUN_ID':rid})
         if status not in (200,201,202):raise BrokerError('Jenkins a refusé le déploiement.')
         location = headers.get('Location','')

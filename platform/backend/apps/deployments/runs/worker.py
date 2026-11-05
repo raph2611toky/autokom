@@ -130,6 +130,23 @@ def poll_one(client, run_id):
 
         state = client.get_state(run.external_run_id)
         external_id = state['external_id']
+        # A missing/offline Jenkins agent must never leave a client RUNNING forever.
+        # Re-read the queue state immediately before cancelling so a started build
+        # is not treated as a queue timeout. Never retry dispatch automatically.
+        if (run.external_run_id.startswith('Q:') and external_id.startswith('Q:')
+                and run.started_at and now - run.started_at > timedelta(minutes=8)):
+            try:
+                client.cancel(run.external_run_id)
+            except (JenkinsUnavailable, AutokomControlUnavailable):
+                logger.warning('Cancellation of stale queue item not confirmed for %s', run_id)
+                return False
+            DeploymentRun.objects.filter(pk=run_id, status='RUNNING').update(
+                status='BLOCKED', finished_at=timezone.now(),
+                error_message='La préparation n’a pas pu démarrer. Réessayez après rétablissement du service.')
+            PipelineStageRun.objects.filter(deployment=run, status='PENDING').update(
+                status='SKIPPED', finished_at=timezone.now())
+            add_log(run, 'AUTOKOM_LOG: Délai de démarrage dépassé ; exécution annulée.')
+            return True
         terminal = state['status'] != 'RUNNING'
         # Persist the B:... identifier before collecting logs, so a crash can
         # resume from the same build rather than restarting a Jenkins job.

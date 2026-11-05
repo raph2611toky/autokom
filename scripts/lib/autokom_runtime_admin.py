@@ -156,6 +156,68 @@ def jenkins_request(env,method,path,data=None,content_type='application/xml'):
     except (URLError,OSError,TimeoutError) as exc:raise SetupError('Jenkins inaccessible.') from exc
 
 
+def isolated_agent_status(env):
+    """Inspect only an isolated online node; an executor on controller is unsafe."""
+    endpoint = '/computer/api/json?tree=computer%5BdisplayName,offline,temporarilyOffline,numExecutors,assignedLabels%5Bname%5D%5D'
+    status, data = jenkins_request(env, 'GET', endpoint, content_type='application/json')
+    if status != 200:
+        raise SetupError('Impossible de vérifier les nœuds Jenkins avec ce compte de service.')
+    try:
+        computers = json.loads(data).get('computer', [])
+    except (ValueError, TypeError):
+        raise SetupError('Inventaire des nœuds Jenkins illisible.')
+    if not isinstance(computers, list):
+        raise SetupError('Inventaire des nœuds Jenkins invalide.')
+    for node in computers:
+        if not isinstance(node, dict):
+            continue
+        if node.get('displayName') in ('Jenkins', 'Built-In Node', 'master', ''):
+            continue
+        labels = {label.get('name') for label in node.get('assignedLabels', [])
+                  if isinstance(label, dict)}
+        if 'autokom-isolated' not in labels:
+            continue
+        if (node.get('offline') is False and node.get('temporarilyOffline') is not True
+                and type(node.get('numExecutors')) is int and node['numExecutors'] > 0):
+            return True, 'online'
+        return False, 'offline'
+    return False, 'missing'
+
+
+def jenkins_view_xml(job):
+    """Create an optional aggregate List View; never modify other views/jobs."""
+    root = ET.Element('hudson.model.ListView')
+    ET.SubElement(root, 'name').text = 'AUTOKOM-Clients'
+    ET.SubElement(root, 'description').text = 'Exécutions clientes AUTOKOM (job mutualisé)'
+    ET.SubElement(root, 'filterExecutors').text = 'false'
+    ET.SubElement(root, 'filterQueue').text = 'true'
+    ET.SubElement(root, 'properties', {'class': 'hudson.model.View$PropertyList'})
+    ET.SubElement(root, 'jobNames', {'class':'tree-set'})
+    ET.SubElement(root, 'jobFilters')
+    ET.SubElement(root, 'includeRegex').text = '^' + re.escape(job) + '$'
+    ET.SubElement(root, 'recurse').text = 'false'
+    return ET.tostring(root, encoding='utf-8', xml_declaration=True)
+
+
+def jenkins_view_sync(env, job):
+    """Best effort: do not compromise working jobs because a view is unsupported."""
+    from urllib.parse import quote
+    name = 'AUTOKOM-Clients'
+    status, _ = jenkins_request(env, 'GET', '/view/' + name + '/api/json', content_type='application/json')
+    if status == 200:
+        print('  ✓ Vue Jenkins AUTOKOM-Clients déjà présente.')
+        return
+    if status != 404:
+        print('  ! Vue Jenkins : droits de consultation insuffisants (sans impact sur le job).')
+        return
+    code, _ = jenkins_request(env, 'POST', '/createView?' + urlencode({'name':name}),
+                              jenkins_view_xml(job))
+    if code in (200, 201, 202, 302):
+        print('  ✓ Vue Jenkins AUTOKOM-Clients créée.')
+    else:
+        print('  ! Vue Jenkins non créée ; vérifier le droit View/Create (sans impact sur le job).')
+
+
 def pipeline_xml(script):
     root=ET.Element('flow-definition',{'plugin':'workflow-job'})
     ET.SubElement(root,'description').text='AUTOKOM trusted Docker local pipeline · NO REGISTRY · DO NOT CHANGE FROM UI'
@@ -187,7 +249,13 @@ def jenkins_sync(*,apply):
             existing=ET.fromstring(old).findtext('./definition/script') or ''
         except ET.ParseError:raise SetupError('Job Jenkins XML illisible; aucune modification.')
         if existing==source:
-            print('  ✓ Job Jenkins déjà synchronisé.');return 0
+            print('  ✓ Job Jenkins déjà synchronisé.')
+            if apply:
+                jenkins_view_sync(env, job)
+            ready, reason = isolated_agent_status(env)
+            if not ready:
+                print('  ! Agent autokom-isolated non disponible ('+reason+'). Le job ne démarrera pas.')
+            return 0
     print(f"  ◈ Jenkins · {'mise à jour' if status==200 else 'création'} du job {job}")
     print('  › Pipeline approuvé AUTOKOM, image locale, scan DevSecOps, runner rootless')
     print('  › Agent requis : autokom-isolated, sans appartenance au groupe docker')
@@ -206,6 +274,10 @@ def jenkins_sync(*,apply):
     if code not in (200,201,202,302):
         raise SetupError('Synchronisation refusée par Jenkins; sauvegarde conservée.')
     print('  ✓ Jenkins pipeline local synchronisé.')
+    jenkins_view_sync(env, job)
+    ready, reason = isolated_agent_status(env)
+    if not ready:
+        print('  ! Agent autokom-isolated non disponible ('+reason+'). Configuration du nœud requise.')
     return 0
 
 
@@ -299,6 +371,11 @@ except (OSError,ValueError,KeyError,TypeError):
     if status!=200:
         raise SetupError('Le job Jenkins n’est pas accessible au compte de service (code HTTP '+str(status)+').')
     print('  ✓ Job Jenkins accessible avec les identifiants du runtime.')
+    ready, reason = isolated_agent_status(env)
+    if not ready:
+        print('  ✗ Agent autokom-isolated : '+reason)
+        raise SetupError('Agent de compilation isolé absent ou hors ligne. N’ajouter aucun label au contrôleur Jenkins.')
+    print('  ✓ Agent autokom-isolated connecté avec au moins un exécuteur.')
     if failures:
         raise SetupError('Un ou plusieurs services ne sont pas actifs.')
     return 0

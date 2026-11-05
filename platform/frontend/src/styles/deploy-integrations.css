@@ -118,3 +118,32 @@
 .ak-run-stage { display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; border:1px solid var(--ak-border); background:var(--ak-surface-2); padding:10px 12px; font-size:11px; }
 .ak-run-stage strong { color:var(--ak-accent); }
 .ak-run-console { white-space:pre-wrap; overflow-wrap:anywhere; max-height:300px; overflow:auto; font-size:11px; line-height:1.6; padding:14px; border:1px solid var(--ak-border); background:var(--ak-surface-2); color:var(--ak-text); }
+
+/* AUTOKOM : suivi client lisible, sans grille des cartes projets ni détails internes. */
+.ak-deployment-list { display:flex; flex-direction:column; gap:14px; margin-top:18px; min-width:0; }
+.ak-deployment-card { border:1px solid var(--ak-border); background:var(--ak-surface); width:100%; min-width:0; }
+.ak-deployment-summary { display:flex; flex-wrap:wrap; align-items:center; gap:14px; padding:16px 18px; min-width:0; }
+.ak-deployment-symbol { color:var(--ak-accent); display:grid; place-items:center; width:40px; height:40px; border:1px solid var(--ak-border); background:var(--ak-surface-2); }
+.ak-deployment-summary-text { flex:1 1 170px; min-width:0; display:grid; gap:5px; }
+.ak-deployment-summary-text strong { font-size:13px; overflow-wrap:anywhere; }
+.ak-deployment-summary-text small { font-size:11px; color:var(--ak-muted); }
+.ak-deployment-toggle { min-height:39px; }
+.ak-publication-pill { border:1px solid currentColor; padding:6px 11px; font-size:11px; font-weight:700; white-space:nowrap; display:inline-flex; align-items:center; gap:7px; }
+.ak-publication-pill::before { content:''; border-radius:50%; width:7px; height:7px; background:currentColor; }
+.ak-publication-pill.state-success, .ak-publication-step.state-success { color:var(--ak-success); }
+.ak-publication-pill.state-danger, .ak-publication-step.state-danger { color:var(--ak-danger); }
+.ak-publication-pill.state-waiting,.ak-publication-pill.state-running,.ak-publication-step.state-waiting,.ak-publication-step.state-running { color:var(--ak-warning); }
+.ak-publication-pill.state-muted,.ak-publication-step.state-muted { color:var(--ak-muted); }
+.ak-deployment-details { border-top:1px solid var(--ak-border); padding:20px; }
+.ak-deployment-details h3 { font-size:17px; margin:0 0 20px; }
+.ak-publication-timeline { list-style:none; margin:0; padding:0; display:grid; gap:0; width:100%; }
+.ak-publication-step { display:grid; grid-template-columns:24px minmax(0,1fr) auto; gap:10px; align-items:center; padding:13px 0; border-bottom:1px solid var(--ak-border); min-width:0; }
+.ak-publication-dot { width:10px; height:10px; border-radius:50%; background:currentColor; margin-left:5px; }
+.ak-publication-step-name { color:var(--ak-text); font-weight:600; font-size:12px; }
+.ak-publication-step-state { color:inherit; font-weight:700; font-size:11px; text-align:right; }
+.ak-deployment-hint { color:var(--ak-muted); font-size:11px; margin:16px 0 0; }
+.ak-deployment-error { margin:16px 0 0; padding:12px 14px; border-left:3px solid var(--ak-danger); color:var(--ak-danger); background:var(--ak-surface-2); font-size:12px; }
+.ak-deployment-messages { margin-top:20px; border:1px solid var(--ak-border); padding:14px; font-size:12px; }
+.ak-deployment-messages summary { cursor:pointer; font-weight:700; }
+.ak-deployment-messages ol { margin:15px 0 0; padding-left:20px; display:grid; gap:10px; color:var(--ak-muted); overflow-wrap:anywhere; }
+@media(max-width:650px) { .ak-deployment-summary { gap:10px; } .ak-deployment-toggle { width:100%; } .ak-publication-step { grid-template-columns:18px minmax(0,1fr) auto; gap:7px; } }
