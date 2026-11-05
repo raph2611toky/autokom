@@ -8,6 +8,8 @@ Ne touche ni aux vhosts backend, ni à BIND9, Cloudflare, Jenkins ou Docker.
 from __future__ import annotations
 
 import argparse
+import fcntl
+from contextlib import contextmanager
 import json
 import ipaddress
 import os
@@ -32,6 +34,9 @@ CURRENT = RELEASES.parent / 'current'
 BUILDS = Path('/var/lib/autokom/frontend/builds')
 NPM_CACHE = Path('/var/lib/autokom/frontend/npm-cache')
 WORK_ROOT = BUILDS.parent
+BUILD_HOME = WORK_ROOT / 'home'
+SCANNER_CACHE = WORK_ROOT / 'trivy-cache'
+DEPLOY_LOCK = Path('/run/lock/autokom-frontend-deploy.lock')
 FRONTEND_LOGS = Path('/var/log/autokom/frontend')
 BUILDER = 'autokom-frontend-builder'
 VHOST = Path('/etc/nginx/sites-available/autokom-frontend.conf')
@@ -320,49 +325,128 @@ server {{
 ''')
 
 
-def builder_prepare():
-    """Restrict shared parent to traversal by the builder group, not public access.
+def builder_access(flag, path):
+    """Check effective rights with the isolated Unix build account (not root)."""
+    try:
+        result = subprocess.run(
+            ['runuser', '-u', BUILDER, '--', '/usr/bin/test', flag, str(path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise FrontendError('Contrôle des permissions du builder indisponible.') from exc
+    return result.returncode == 0
 
-    The old implementation made BUILDS/npm-cache private but left their parent
-    root:root 0700. runuser then could not resolve its working directory or
-    read package-lock.json; npm misleadingly reported EUSAGE.
+
+def prepare_builder_parent():
+    """Grant *traverse only* on /var/lib/autokom, never read of backend data.
+
+    The Django service deliberately owns the shared parent as autokom:autokom
+    with mode 0750. Changing its Unix group or chmod to 0755 would expose
+    other AUTOKOM state. A named-user ACL gives the separate build account
+    exactly one directory traversal permission and is repeatable.
     """
+    data_root = WORK_ROOT.parent
+    if data_root.is_symlink() or not data_root.is_dir():
+        raise FrontendError('Parent des données AUTOKOM invalide ou symbolique.')
+    trusted = {0}
+    try:
+        trusted.add(pwd.getpwnam('autokom').pw_uid)
+    except KeyError:
+        pass
+    if data_root.stat().st_uid not in trusted:
+        raise FrontendError('Le parent des données AUTOKOM a un propriétaire inattendu.')
+    if builder_access('-x', data_root):
+        return
+    if not shutil.which('setfacl'):
+        # Ubuntu's signed APT repository. This is provisioning by AUTOKOM,
+        # never a manual requirement or a broad permission fallback.
+        run_live(['apt-get', 'install', '-y', 'acl'],
+                 label='AUTOKOM · support des ACL minimales', timeout=900,
+                 env={'PATH': BUILD_PATH, 'DEBIAN_FRONTEND': 'noninteractive', 'LANG': 'C.UTF-8'})
+    if not shutil.which('setfacl'):
+        raise FrontendError('Support ACL introuvable après provisionnement AUTOKOM.')
+    run(['setfacl', '-m', f'u:{BUILDER}:--x', str(data_root)], timeout=30)
+    if not builder_access('-x', data_root):
+        raise FrontendError(
+            f'ACL de traversée inefficace sur {data_root}. '
+            'Contrôler les permissions des parents sans les élargir.')
+    print(f'  ✓ ACL minimale accordée à {BUILDER} sur {data_root} (traversée uniquement).')
+
+
+def builder_prepare():
+    """Provision private build/cache/home paths without sharing backend secrets."""
     require_root()
-    if BUILDER not in [u.pw_name for u in pwd.getpwall()]:
-        run(['useradd', '--system', '--home-dir', str(WORK_ROOT),
+    try:
+        pwd.getpwnam(BUILDER)
+    except KeyError:
+        run(['useradd', '--system', '--home-dir', str(BUILD_HOME),
              '--shell', '/usr/sbin/nologin', '--user-group', BUILDER])
     if WORK_ROOT.is_symlink():
         raise FrontendError('Répertoire de travail frontend symbolique non autorisé.')
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
     if not WORK_ROOT.is_dir() or WORK_ROOT.stat().st_uid not in (0, pwd.getpwnam(BUILDER).pw_uid):
         raise FrontendError('Propriétaire inattendu pour le répertoire de travail frontend.')
-    # Root keeps ownership; only the private builder group can traverse.
+    prepare_builder_parent()
+    # Keep all build files private. Group access on the parent is x-only.
     shutil.chown(WORK_ROOT, user='root', group=BUILDER)
     WORK_ROOT.chmod(0o710)
-    for folder in (BUILDS, NPM_CACHE):
+    for folder in (BUILDS, NPM_CACHE, BUILD_HOME, SCANNER_CACHE):
         if folder.is_symlink():
             raise FrontendError('Lien symbolique interdit dans le répertoire de build.')
         folder.mkdir(parents=True, exist_ok=True)
+        if not folder.is_dir() or folder.stat().st_uid not in (0, pwd.getpwnam(BUILDER).pw_uid):
+            raise FrontendError('Propriétaire inattendu dans les dossiers frontend.')
         shutil.chown(folder, user=BUILDER, group=BUILDER)
         folder.chmod(0o700)
+    for folder in (WORK_ROOT, BUILDS, NPM_CACHE, BUILD_HOME, SCANNER_CACHE):
+        if not builder_access('-x', folder):
+            raise FrontendError(
+                f'Le compte {BUILDER} ne peut pas traverser {folder}. '
+                'Vérifier les ACL de tous les parents.')
 
 
 def verify_build_access(stage):
-    """Prove access *as the real builder*, before invoking npm."""
+    """Validate the entire path *as builder*, before starting any tools."""
     for path, flag, label in (
         (stage / 'package.json', '-r', 'package.json'),
         (stage / 'package-lock.json', '-r', 'package-lock.json'),
         (stage, '-w', 'répertoire de compilation'),
         (NPM_CACHE, '-w', 'cache npm'),
+        (BUILD_HOME, '-w', 'HOME du builder'),
+        (SCANNER_CACHE, '-w', 'cache des scanners'),
     ):
-        check = subprocess.run(['runuser', '-u', BUILDER, '--', '/usr/bin/test',
-                                flag, str(path)], stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, timeout=15, check=False)
-        if check.returncode:
+        if not builder_access(flag, path):
             raise FrontendError(
-                f'Accès refusé à {label} pour {BUILDER}. '
-                'AUTOKOM doit corriger les permissions du répertoire de travail '
-                'avant npm ci (vérifier aussi les répertoires parents).')
+                f'Accès refusé à {label} pour {BUILDER} ({path}). '
+                'Une permission sur un répertoire parent peut manquer.')
+
+
+@contextmanager
+def deployment_guard():
+    """One build/release operation at a time, including checks and rollback."""
+    require_root()
+    DEPLOY_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        fd = os.open(DEPLOY_LOCK, flags, 0o600)
+    except OSError as exc:
+        raise FrontendError('Impossible de sécuriser le verrou de publication frontend.') from exc
+    try:
+        import stat
+        meta = os.fstat(fd)
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != 0 or meta.st_mode & 0o077:
+            raise FrontendError('Verrou de publication frontend non sécurisé.')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise FrontendError('Un autre déploiement AUTOKOM frontend est déjà en cours.') from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def backend_port():
@@ -649,7 +733,11 @@ def build_environment(source):
     # Pour l'instant GitHub est un composant de démonstration : ne pas l'annoncer connecté.
     if public['VITE_AUTOKOM_GITHUB_ENABLED'] != 'false':
         raise FrontendError('L’UI GitHub simulée doit rester désactivée jusqu’à la liaison OAuth réelle.')
-    env = {'HOME': '/var/lib/autokom/frontend', 'PATH': BUILD_PATH,
+    env = {'HOME': str(BUILD_HOME), 'PATH': BUILD_PATH,
+           'XDG_CACHE_HOME': str(BUILD_HOME / '.cache'),
+           'XDG_CONFIG_HOME': str(BUILD_HOME / '.config'),
+           'XDG_DATA_HOME': str(BUILD_HOME / '.local/share'),
+           'TRIVY_CACHE_DIR': str(SCANNER_CACHE),
            'NPM_CONFIG_CACHE': str(NPM_CACHE), 'CI': 'true', **public}
     return env
 
@@ -677,6 +765,11 @@ def builder_run(command, cwd, env, *, label=None):
 
 
 def deploy(args):
+    with deployment_guard():
+        return deploy_locked(args)
+
+
+def deploy_locked(args):
     require_root()
     ensure_source()
     state = read_state()
@@ -773,6 +866,11 @@ def activate(release, state):
 
 
 def rollback(args):
+    with deployment_guard():
+        return rollback_locked(args)
+
+
+def rollback_locked(args):
     require_root()
     state = read_state()
     releases = state.get('releases', [])

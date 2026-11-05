@@ -390,11 +390,14 @@ class FrontendBuilderAccessRegressionTests(unittest.TestCase):
             builds = work / 'builds'
             stage = builds / 'one' / 'source'
             cache = work / 'npm-cache'
+            home = work / 'home'
+            scanner = work / 'trivy-cache'
             stage.mkdir(parents=True)
-            cache.mkdir()
+            for folder in (cache, home, scanner):
+                folder.mkdir()
             for name in ('package.json', 'package-lock.json'):
                 shutil.copy2(fm.FRONTEND / name, stage / name)
-            for folder in (builds, builds / 'one', stage, cache):
+            for folder in (builds, builds / 'one', stage, cache, home, scanner):
                 os.chown(folder, user.pw_uid, user.pw_gid)
                 folder.chmod(0o700)
             for name in ('package.json', 'package-lock.json'):
@@ -402,7 +405,9 @@ class FrontendBuilderAccessRegressionTests(unittest.TestCase):
                 (stage / name).chmod(0o600)
             work.chmod(0o700)   # reproduces AWS issue
             with mock.patch.object(fm, 'BUILDER', account), \
-                 mock.patch.object(fm, 'NPM_CACHE', cache):
+                 mock.patch.object(fm, 'NPM_CACHE', cache), \
+                 mock.patch.object(fm, 'BUILD_HOME', home), \
+                 mock.patch.object(fm, 'SCANNER_CACHE', scanner):
                 with self.assertRaisesRegex(fm.FrontendError, 'Accès refusé'):
                     fm.verify_build_access(stage)
                 os.chown(work, 0, user.pw_gid)
@@ -417,14 +422,20 @@ class FrontendBuilderAccessRegressionTests(unittest.TestCase):
             work = Path(tmp) / 'frontend'
             build = work / 'builds'
             cache = work / 'npm-cache'
+            home = work / 'home'
+            scanner = work / 'trivy-cache'
             with mock.patch.object(fm, 'BUILDS', build), \
                  mock.patch.object(fm, 'NPM_CACHE', cache), \
                  mock.patch.object(fm, 'WORK_ROOT', work), \
+                 mock.patch.object(fm, 'BUILD_HOME', home), \
+                 mock.patch.object(fm, 'SCANNER_CACHE', scanner), \
                  mock.patch.object(fm, 'BUILDER', 'root'):
                 fm.builder_prepare()
             self.assertEqual(stat.S_IMODE(work.stat().st_mode), 0o710)
             self.assertEqual(stat.S_IMODE(build.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(scanner.stat().st_mode), 0o700)
 
     def test_deploy_verifies_permissions_before_npm(self):
         source = (fm.ROOT / 'scripts/lib/autokom_frontend_manager.py').read_text()
@@ -468,3 +479,99 @@ class FrontendTLSIdempotenceTests(unittest.TestCase):
                 self.assertFalse(fm.managed_certificate_installed('evil.example.org', live_root=live))
                 (cert / 'privkey.pem').unlink()
                 self.assertFalse(fm.managed_certificate_installed('auto.ikom.mg', live_root=live))
+
+
+class FrontendBuilderFullPathTests(unittest.TestCase):
+    """Regression: backend's /var/lib/autokom is private (0750)."""
+
+    @unittest.skipUnless(__import__('os').geteuid() == 0, 'needs root for ACL mock')
+    def test_parent_acl_is_traverse_only_and_keeps_backend_mode(self):
+        import os
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            data_root = Path(tmp) / 'autokom'
+            data_root.mkdir(mode=0o750)
+            data_root.chmod(0o750)
+            original = stat.S_IMODE(data_root.stat().st_mode)
+            with mock.patch.object(fm, 'WORK_ROOT', data_root / 'frontend'), \
+                 mock.patch.object(fm, 'BUILDER', 'autokom-frontend-builder'), \
+                 mock.patch.object(fm, 'builder_access', side_effect=[False, True]) as access, \
+                 mock.patch.object(fm.shutil, 'which', return_value='/usr/bin/setfacl'), \
+                 mock.patch.object(fm, 'run') as command, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                fm.prepare_builder_parent()
+            command.assert_called_once_with(
+                ['setfacl', '-m', 'u:autokom-frontend-builder:--x', str(data_root)], timeout=30)
+            self.assertEqual(access.call_count, 2)
+            self.assertEqual(stat.S_IMODE(data_root.stat().st_mode), original)
+
+    @unittest.skipUnless(__import__('os').geteuid() == 0, 'needs root for runuser validation')
+    def test_builder_home_and_scanner_cache_are_private_writable(self):
+        import os
+        import pwd
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            base.chmod(0o711)
+            work = base / 'frontend'
+            stage = work / 'builds' / 'build-one' / 'source'
+            cache = work / 'npm-cache'
+            home = work / 'home'
+            scanner = work / 'trivy-cache'
+            stage.mkdir(parents=True)
+            for folder in (cache, home, scanner):
+                folder.mkdir()
+            for folder in (stage, stage.parent, work / 'builds', cache, home, scanner):
+                folder.chmod(0o700)
+                os.chown(folder, pwd.getpwnam('nobody').pw_uid, pwd.getpwnam('nobody').pw_gid)
+            work.chmod(0o711)
+            for name in ('package.json','package-lock.json'):
+                (stage / name).write_text('{}')
+                os.chown(stage / name, pwd.getpwnam('nobody').pw_uid, pwd.getpwnam('nobody').pw_gid)
+            with mock.patch.object(fm, 'BUILDER', 'nobody'), \
+                 mock.patch.object(fm, 'NPM_CACHE', cache), \
+                 mock.patch.object(fm, 'BUILD_HOME', home), \
+                 mock.patch.object(fm, 'SCANNER_CACHE', scanner):
+                fm.verify_build_access(stage)
+                (scanner).chmod(0o500)
+                with self.assertRaisesRegex(fm.FrontendError, 'cache des scanners'):
+                    fm.verify_build_access(stage)
+
+    def test_build_environment_uses_writable_home_and_scanner_cache(self):
+        import sys
+        from types import SimpleNamespace
+        fake = SimpleNamespace(read_env=lambda _: {})
+        with mock.patch.dict(sys.modules, {'autokom_env_manager': fake}):
+            env = fm.build_environment(fm.FRONTEND)
+        self.assertEqual(env['HOME'], str(fm.BUILD_HOME))
+        self.assertEqual(env['TRIVY_CACHE_DIR'], str(fm.SCANNER_CACHE))
+        self.assertEqual(env['XDG_CACHE_HOME'], str(fm.BUILD_HOME / '.cache'))
+        self.assertEqual(env['NPM_CONFIG_CACHE'], str(fm.NPM_CACHE))
+        self.assertNotIn('DJANGO_SECRET_KEY', env)
+
+    @unittest.skipUnless(__import__('os').geteuid() == 0, 'needs root for locked deploy')
+    def test_publication_lock_rejects_concurrent_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(fm, 'DEPLOY_LOCK', Path(tmp) / 'frontend.lock'):
+                with fm.deployment_guard():
+                    with self.assertRaisesRegex(fm.FrontendError, 'déploiement .* cours'):
+                        with fm.deployment_guard():
+                            pass
+                with fm.deployment_guard():
+                    pass
+
+    def test_setup_includes_user_rights_without_chmod_shared_parent(self):
+        import inspect
+        code = inspect.getsource(fm.prepare_builder_parent)
+        self.assertIn('setfacl', code)
+        self.assertNotIn('chmod(', code)
+        self.assertNotIn('chown(', code)
+
+    def test_deploy_and_rollback_use_the_same_lock(self):
+        with mock.patch.object(fm, 'deployment_guard') as guard, \
+             mock.patch.object(fm, 'deploy_locked', return_value=42) as deploy, \
+             mock.patch.object(fm, 'rollback_locked', return_value=33) as rollback:
+            self.assertEqual(fm.deploy(object()), 42)
+            self.assertEqual(fm.rollback(object()), 33)
+            self.assertEqual(guard.call_count, 2)
+            deploy.assert_called_once()
+            rollback.assert_called_once()
