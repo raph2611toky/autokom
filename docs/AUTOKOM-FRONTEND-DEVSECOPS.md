@@ -139,3 +139,37 @@ sudo autokom app frontend env edit BACKEND_URL
 ```
 
 Important : modifier l'environnement backend ne redémarre pas Gunicorn ; les modifications prennent effet après un redéploiement contrôlé. `autokom app deploy --check` est la prévisualisation backend, non `autokom app backend --check`.
+
+## 7. Provisionnement automatique du toolchain frontend (correctif suivant 5b6d143)
+
+**Aucune commande `apt install nodejs`, `npm install -g vite`, `curl ... | bash` ni installation manuelle sur Ubuntu n'est nécessaire.** Le frontend est un composant intégral du cycle de vie d'AUTOKOM.
+
+`autokom app frontend setup --check` inspecte la version Node/npm accessible avec le **PATH du compte de build** et annonce le provisionnement éventuel. Ce mode n'exécute aucune installation. `sudo autokom app frontend setup --apply`, après contrôle des domaines et vhosts, appelle automatiquement `ansible/playbooks/frontend-node.yml` si Node ou npm sont absents/incompatibles. Ce playbook exécute `ansible/roles/frontend_node/tasks/main.yml` :
+
+1. limite le provisionnement à Ubuntu amd64/arm64 et aux commandes APT signées ;
+2. télécharge la clé publique NodeSource en HTTPS, contrôle l'empreinte primaire `6F71F525282841EEDAF851B42F59B5F99B1BE0B4` avant d'ajouter le dépôt ;
+3. ajoute uniquement le dépôt Node.js **22.x** avec `Signed-By`, sans installer de clé de confiance globale ;
+4. installe le paquet `nodejs`, qui fournit npm, sans mise à niveau générale du système ;
+5. vérifie à nouveau la version de Node et npm et refuse de continuer en cas d'incompatibilité.
+
+La commande est **idempotente** : quand une version compatible est déjà présente et fonctionne pour le compte de build, aucun APT n'est exécuté. Sur un serveur ayant une version Node incompatible, la version système de Node pourra être mise à niveau vers la branche 22.x : prendre en compte cet impact si d'autres services utilisent Node. Nginx/Certbot et les scanners Semgrep/Trivy font partie de la fondation AUTOKOM déjà provisionnée par les rôles généraux. Le frontend ne réinstalle pas ces services lors de la mise en production.
+
+Le rôle Ansible nécessite un accès HTTPS aux dépôts Ubuntu et à `deb.nodesource.com` ; si la connexion ou la signature échoue, AUTOKOM arrête le setup **avant toute modification du vhost et de `frontend.env`**. Aucune exception DevSecOps n'est ajoutée. La compilation Vite reste locale via `npm ci --ignore-scripts` sous `autokom-frontend-builder`; seul `dist/` est publié dans `/opt/autokom/frontend/releases/`.
+
+### Chemin d'exploitation sur AWS
+
+```bash
+sudo autokom update
+sudo autokom app frontend setup \
+  --domain auto.ikom.mg --backend-domain backend.auto.ikom.mg \
+  --nginx-mode managed --tls-mode certbot --check
+# Contrôler le plan, les DNS et l'absence de conflit Nginx, puis :
+sudo autokom app frontend setup \
+  --domain auto.ikom.mg --backend-domain backend.auto.ikom.mg \
+  --nginx-mode managed --tls-mode certbot --apply
+sudo autokom app frontend deploy --check
+sudo autokom app frontend deploy --apply
+sudo autokom app frontend status
+```
+
+`setup --apply` constitue l'unique action d'approvisionnement du toolchain Node/npm. `deploy --check` et `deploy --apply` ne modifient jamais les dépôts APT ; si le toolchain a été retiré après setup, AUTOKOM demande de relancer son setup. Le pipeline Jenkins conserve ses contrôles ; si son agent de build est **un hôte distant différent**, il doit être provisionné par AUTOKOM sur cet hôte, et non par l'agent Jenkins avec des privilèges root.

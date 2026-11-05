@@ -1,0 +1,10 @@
+---
+# Uniquement appelé par AUTOKOM frontend setup --apply avec sudo.
+# Provisionne Node.js sans exécuter un script d'installation distant.
+- name: AUTOKOM | Préparer le toolchain de build frontend
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  become: false
+  roles:
+    - role: frontend_node

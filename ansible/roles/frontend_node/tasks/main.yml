@@ -1,0 +1,101 @@
+---
+- name: Refuser les environnements non pris en charge
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['architecture'] in ['x86_64', 'aarch64']
+      - ansible_facts['os_family'] == 'Debian'
+    fail_msg: "AUTOKOM frontend Node.js 22 : Ubuntu amd64/arm64 uniquement."
+
+- name: Préparer APT et la vérification des signatures
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - gnupg
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Créer le répertoire de clés de dépôts APT
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Récupérer la clé publique du dépôt NodeSource 22 par HTTPS
+  ansible.builtin.get_url:
+    url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+    dest: /etc/apt/keyrings/autokom-frontend-nodesource.asc
+    owner: root
+    group: root
+    mode: '0644'
+    timeout: 30
+    force: true
+
+- name: Extraire l'empreinte de la clé avant de l'autoriser
+  ansible.builtin.command:
+    argv:
+      - gpg
+      - --batch
+      - --show-keys
+      - --with-colons
+      - /etc/apt/keyrings/autokom-frontend-nodesource.asc
+  register: autokom_nodesource_key
+  changed_when: false
+
+- name: Bloquer les clés NodeSource inattendues
+  ansible.builtin.assert:
+    that:
+      - "'fpr:::::::::6F71F525282841EEDAF851B42F59B5F99B1BE0B4:' in autokom_nodesource_key.stdout"
+      - "autokom_nodesource_key.stdout_lines | select('match', '^pub:') | list | length == 1"
+    fail_msg: "Empreinte de signature NodeSource inattendue : installation interrompue avant ajout du dépôt."
+
+- name: Déclarer uniquement le dépôt signé NodeSource 22
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/autokom-frontend-node22.sources
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      Types: deb
+      URIs: https://deb.nodesource.com/node_22.x
+      Suites: nodistro
+      Components: main
+      Architectures: {{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}
+      Signed-By: /etc/apt/keyrings/autokom-frontend-nodesource.asc
+
+- name: Donner priorité à Node.js 22 dans le dépôt signé
+  ansible.builtin.copy:
+    dest: /etc/apt/preferences.d/autokom-frontend-node22
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      Package: nodejs
+      Pin: origin deb.nodesource.com
+      Pin-Priority: 700
+
+- name: Installer uniquement le paquet Node.js et son npm embarqué
+  ansible.builtin.apt:
+    name: nodejs
+    state: latest
+    install_recommends: false
+    update_cache: true
+
+- name: Contrôler la version Node.js installée
+  ansible.builtin.command:
+    argv: [node, --version]
+  register: autokom_node_version
+  changed_when: false
+
+- name: Contrôler la disponibilité npm
+  ansible.builtin.command:
+    argv: [npm, --version]
+  changed_when: false
+
+- name: Afficher la version du toolchain AUTOKOM
+  ansible.builtin.debug:
+    msg: "Toolchain frontend prêt : {{ autokom_node_version.stdout }} et npm."

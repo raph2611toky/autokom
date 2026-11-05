@@ -32,6 +32,9 @@ BUILDER = 'autokom-frontend-builder'
 VHOST = Path('/etc/nginx/sites-available/autokom-frontend.conf')
 MARKER = '# MANAGED BY AUTOKOM FRONTEND'
 RULES = ROOT / 'pipelines/autokom-frontend/semgrep-rules.yml'
+NODE_PLAYBOOK = ROOT / 'ansible/playbooks/frontend-node.yml'
+BUILD_PATH = '/usr/local/bin:/usr/bin:/bin'
+MIN_NODE = 'Node.js 20.19+, 22.12+ (Node.js 22 installé par AUTOKOM)'
 FQDN = re.compile(r'(?=.{4,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$')
 RELEASE_ID = re.compile(r'^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$')
 
@@ -53,6 +56,68 @@ def run(args, **kw):
         subprocess.run(args, check=True, timeout=kw.pop('timeout', 1200), **kw)
     except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as exc:
         raise FrontendError(f'Échec de {Path(args[0]).name}. Voir les logs de la commande.') from exc
+
+
+def node_compatible(version):
+    """Compatibilité Vite 7. La CLI ne dépend d'aucun paquet Python tiers."""
+    match = re.fullmatch(r'v?(\d+)\.(\d+)\.(\d+)', version.strip())
+    if not match:
+        return False
+    major, minor, _ = (int(n) for n in match.groups())
+    return (major == 20 and minor >= 19) or (major == 22 and minor >= 12) or (major >= 24)
+
+
+def node_toolchain_issue():
+    """Contrôle sous le PATH effectivement passé au compte de build.
+
+    Un Node trouvé seulement dans le profil shell root ne suffit pas.
+    """
+    for executable in ('node', 'npm'):
+        if not shutil.which(executable, path=BUILD_PATH):
+            return f'{executable} absent du PATH de build ({BUILD_PATH})'
+    try:
+        result = subprocess.run(
+            ['node', '--version'], capture_output=True, text=True, check=True,
+            timeout=15, env={'PATH': BUILD_PATH},
+        )
+        npm = subprocess.run(
+            ['npm', '--version'], capture_output=True, text=True, check=True,
+            timeout=15, env={'PATH': BUILD_PATH},
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return 'Node.js/npm existent mais ne fonctionnent pas'
+    version = result.stdout.strip()
+    if not node_compatible(version):
+        return f'Node.js {version or "inconnu"} incompatible avec Vite 7 ({MIN_NODE})'
+    if not re.fullmatch(r'\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?', npm.stdout.strip()):
+        return 'npm ne renvoie pas de version valide'
+    return None
+
+
+def provision_node_toolchain():
+    """Provisionnement idempotent, automatique et signé, avant toute écriture Nginx.
+
+    L'installation sur l'hôte n'est lancée que lors de setup --apply.
+    La source NodeSource est limitée à la branche 22.x ; aucun script distant
+    téléchargé n'est exécuté en shell.
+    """
+    require_root()
+    issue = node_toolchain_issue()
+    if issue is None:
+        print('  ✓ Node.js/npm compatibles déjà installés : aucune modification APT.')
+        return
+    if not NODE_PLAYBOOK.is_file():
+        raise FrontendError('Playbook de provisioning Node.js absent du dépôt AUTOKOM.')
+    if not shutil.which('ansible-playbook'):
+        raise FrontendError('Ansible absent : installer la fondation via AUTOKOM avant le frontend.')
+    print(f'  › {issue}')
+    print('  › AUTOKOM provisionne automatiquement Node.js 22 et npm (APT signé).')
+    run(['ansible-playbook', '-i', 'localhost,', '-c', 'local', str(NODE_PLAYBOOK)],
+        cwd=ROOT / 'ansible', timeout=1800)
+    issue = node_toolchain_issue()
+    if issue:
+        raise FrontendError(f'Node.js/npm non opérationnels après provisioning : {issue}')
+    print('  ✓ Node.js/npm provisionnés et validés par AUTOKOM.')
 
 
 def require_root():
@@ -256,13 +321,20 @@ def setup(args):
                 'location ^~ /api/' not in current):
                 raise FrontendError('Vhost TLS géré différent : corriger manuellement avant setup.')
     if not args.apply:
+        issue = node_toolchain_issue()
+        if issue:
+            print(f'  › Toolchain : {issue}. Sera provisionnée automatiquement par --apply.')
+        else:
+            print('  ✓ Toolchain Node.js/npm déjà compatible.')
         print('  ✓ Prévisualisation : aucun fichier de production modifié.')
         return 0
     require_root()
-    if not shutil.which('nginx') or not shutil.which('node') or not shutil.which('npm'):
-        raise FrontendError('Installer Nginx, Node.js compatible Vite et npm avant setup.')
+    if not shutil.which('nginx'):
+        raise FrontendError('Nginx absent : provisionner la fondation via AUTOKOM install, sans apt manuel.')
     if args.nginx_mode == 'managed' and args.tls_mode == 'certbot' and not shutil.which('certbot'):
-        raise FrontendError('Certbot indisponible.')
+        raise FrontendError('Certbot absent : provisionner la fondation via AUTOKOM install.')
+    # Ne modifie ni Nginx ni les secrets si le téléchargement/provisionnement échoue.
+    provision_node_toolchain()
     builder_prepare()
     RELEASES.mkdir(parents=True, exist_ok=True)
     RELEASES.parent.chmod(0o755)
@@ -329,7 +401,7 @@ def build_environment(source):
     # Pour l'instant GitHub est un composant de démonstration : ne pas l'annoncer connecté.
     if public['VITE_AUTOKOM_GITHUB_ENABLED'] != 'false':
         raise FrontendError('L’UI GitHub simulée doit rester désactivée jusqu’à la liaison OAuth réelle.')
-    env = {'HOME': '/var/lib/autokom/frontend', 'PATH': '/usr/local/bin:/usr/bin:/bin',
+    env = {'HOME': '/var/lib/autokom/frontend', 'PATH': BUILD_PATH,
            'NPM_CONFIG_CACHE': str(NPM_CACHE), 'CI': 'true', **public}
     return env
 
@@ -359,8 +431,9 @@ def deploy(args):
     require_root()
     ensure_source()
     state = read_state()
-    if not shutil.which('node') or not shutil.which('npm'):
-        raise FrontendError('Node.js/npm absents.')
+    issue = node_toolchain_issue()
+    if issue:
+        raise FrontendError(f'{issue}. Relancer autokom app frontend setup --apply pour auto-provisionner.')
     for tool in ('semgrep', 'trivy'):
         if not shutil.which(tool):
             raise FrontendError(f'{tool} absent : bloqué (scans DevSecOps obligatoires).')
@@ -478,6 +551,7 @@ def status(args):
     print('  Release active : ' + (active or 'aucune'))
     valid = bool(active and CURRENT.is_symlink() and CURRENT.resolve() == RELEASES / active
                  and (RELEASES / active / 'index.html').is_file())
+    print('  Node.js/npm : ' + ('OK' if node_toolchain_issue() is None else 'À PROVISIONNER via setup --apply'))
     print('  Artefact et symlink : ' + ('OK' if valid else 'ABSENT/INCOHÉRENT'))
     return 0 if valid else 1
 

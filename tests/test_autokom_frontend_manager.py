@@ -108,5 +108,93 @@ class FrontendManagerTests(unittest.TestCase):
         fm.ensure_source()
 
 
+
+# These tests deliberately mock provisioning: the test suite never touches APT.
+class FrontendNodeProvisionTests(unittest.TestCase):
+    def test_vite7_supported_node_versions(self):
+        for version in ('v20.19.0', 'v22.12.0', 'v22.16.0', 'v24.0.0'):
+            with self.subTest(version=version):
+                self.assertTrue(fm.node_compatible(version))
+        for version in ('v18.20.8', 'v20.18.9', 'v21.6.0', 'v22.11.9', 'garbage'):
+            with self.subTest(version=version):
+                self.assertFalse(fm.node_compatible(version))
+
+    def test_missing_toolchain_detected_on_builder_path(self):
+        with mock.patch.object(fm.shutil, 'which', side_effect=lambda command, **kwargs: None):
+            self.assertIn('node absent', fm.node_toolchain_issue())
+
+    def test_incompatible_node_version_detected(self):
+        from types import SimpleNamespace
+        versions = iter(['v18.20.8', '10.5.1'])
+        with mock.patch.object(fm.shutil, 'which', return_value='/usr/bin/executable'), \
+             mock.patch.object(fm.subprocess, 'run', side_effect=lambda *args, **kwargs: SimpleNamespace(stdout=next(versions))):
+            self.assertIn('incompatible', fm.node_toolchain_issue())
+
+    def test_node_provisioning_skips_when_compatible(self):
+        with mock.patch.object(fm, 'require_root'), \
+             mock.patch.object(fm, 'node_toolchain_issue', return_value=None), \
+             mock.patch.object(fm, 'run') as runner, \
+             contextlib.redirect_stdout(io.StringIO()):
+            fm.provision_node_toolchain()
+        runner.assert_not_called()
+
+    def test_node_provisioning_runs_signed_ansible_playbook_then_verifies(self):
+        with mock.patch.object(fm, 'require_root'), \
+             mock.patch.object(fm, 'node_toolchain_issue', side_effect=['npm absent', None]), \
+             mock.patch.object(fm.shutil, 'which', return_value='/usr/bin/ansible-playbook'), \
+             mock.patch.object(fm, 'run') as runner, \
+             contextlib.redirect_stdout(io.StringIO()):
+            fm.provision_node_toolchain()
+        runner.assert_called_once_with(
+            ['ansible-playbook', '-i', 'localhost,', '-c', 'local', str(fm.NODE_PLAYBOOK)],
+            cwd=fm.ROOT / 'ansible', timeout=1800)
+
+    def test_node_provisioning_fails_closed_if_version_wrong_after_ansible(self):
+        with mock.patch.object(fm, 'require_root'), \
+             mock.patch.object(fm, 'node_toolchain_issue', side_effect=['node absent', 'node v18 incompatible']), \
+             mock.patch.object(fm.shutil, 'which', return_value='/usr/bin/ansible-playbook'), \
+             mock.patch.object(fm, 'run'), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(fm.FrontendError, 'non opérationnels après provisioning'):
+                fm.provision_node_toolchain()
+
+    def test_setup_check_plans_installation_without_mutating(self):
+        import argparse
+        args = argparse.Namespace(domain='auto.ikom.mg', backend_domain='backend.auto.ikom.mg',
+            tls_mode='existing', email=None, nginx_mode='existing', apply=False, check=True)
+        with mock.patch.object(fm, 'ensure_source'), \
+             mock.patch.object(fm, 'node_toolchain_issue', return_value='node absent'), \
+             mock.patch.object(fm, 'provision_node_toolchain') as provision, \
+             mock.patch.object(fm, 'save_state') as save, \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(fm.setup(args), 0)
+        provision.assert_not_called()
+        save.assert_not_called()
+        self.assertIn('automatiquement', output.getvalue())
+
+    def test_setup_apply_aborts_before_writing_when_provision_fails(self):
+        import argparse
+        args = argparse.Namespace(domain='auto.ikom.mg', backend_domain='backend.auto.ikom.mg',
+            tls_mode='existing', email=None, nginx_mode='existing', apply=True, check=False)
+        with mock.patch.object(fm, 'ensure_source'), \
+             mock.patch.object(fm, 'require_root'), \
+             mock.patch.object(fm.shutil, 'which', return_value='/usr/sbin/nginx'), \
+             mock.patch.object(fm, 'provision_node_toolchain', side_effect=fm.FrontendError('APT failed')), \
+             mock.patch.object(fm, 'builder_prepare') as builder, \
+             mock.patch.object(fm, 'save_state') as save, \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(fm.FrontendError, 'APT failed'):
+                fm.setup(args)
+        builder.assert_not_called()
+        save.assert_not_called()
+
+    def test_ansible_role_has_repo_signature_pin_and_no_remote_shell(self):
+        role = (fm.ROOT / 'ansible/roles/frontend_node/tasks/main.yml').read_text()
+        self.assertIn('6F71F525282841EEDAF851B42F59B5F99B1BE0B4', role)
+        self.assertIn('Signed-By:', role)
+        self.assertIn('node_22.x', role)
+        self.assertIn('Pin-Priority: 700', role)
+        self.assertNotIn('curl | bash', role)
+        self.assertNotIn('shell:', role)
+
 if __name__ == '__main__':
     unittest.main()
