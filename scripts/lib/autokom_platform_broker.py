@@ -552,9 +552,28 @@ class Server(socketserver.ThreadingUnixStreamServer):
     daemon_threads=True
     allow_reuse_address=True
 
+def _prepare_socket_directory():
+    """Enforce the same root:autokom 0750 boundary after every restart.
+
+    The systemd RuntimeDirectory= setting should already provide these
+    attributes. Revalidating them here catches stale directories and prevents
+    a misconfigured unit from silently breaking the Django worker.
+    """
+    directory = SOCKET.parent
+    if directory.is_symlink():
+        raise BrokerError('Répertoire de contrôle Unix non conforme.')
+    directory.mkdir(parents=True, exist_ok=True, mode=0o750)
+    details = directory.lstat()
+    if not stat.S_ISDIR(details.st_mode) or details.st_uid != 0:
+        raise BrokerError('Propriétaire du répertoire Unix non conforme.')
+    gid = pwd.getpwnam('autokom').pw_gid
+    os.chown(directory, 0, gid)
+    os.chmod(directory, 0o750)
+
+
 def main():
     if os.geteuid()!=0:raise SystemExit('Lancer par systemd, utilisateur root.')
-    SOCKET.parent.mkdir(parents=True,exist_ok=True)
+    _prepare_socket_directory()
     SOCKET.unlink(missing_ok=True)
     STATE.mkdir(parents=True,exist_ok=True,mode=0o700)
     IMAGES.mkdir(parents=True,exist_ok=True,mode=0o750)

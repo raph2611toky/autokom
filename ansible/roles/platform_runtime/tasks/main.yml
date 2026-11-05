@@ -45,6 +45,16 @@
     - {path: /var/lib/autokom/acme, owner: root, group: root, mode: '0755'}
     - {path: /etc/autokom, owner: root, group: root, mode: '0750'}
 
+# The broker runs as uid 0 but the Django service must be allowed to
+# traverse this directory. The systemd unit keeps this owner/group on reboot.
+- name: Autoriser uniquement le groupe Django à traverser le runtime Unix
+  ansible.builtin.file:
+    path: /run/autokom
+    state: directory
+    owner: root
+    group: autokom
+    mode: '0750'
+
 - name: Installer le service root broker depuis AUTOKOM Core
   ansible.builtin.copy:
     src: "{{ playbook_dir }}/../../scripts/systemd/autokom-platform-broker.service"

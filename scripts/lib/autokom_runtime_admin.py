@@ -221,23 +221,51 @@ def doctor():
         state=systemctl_state(unit)
         print(f'  {"✓" if state == "active" else "✗"} {unit} : {state}')
         if state != 'active':failures.append(unit)
+    directory = sock.parent
+    if not directory.is_dir() or directory.is_symlink():
+        raise SetupError('Répertoire de contrôle Unix absent ou non conforme.')
+    import grp
+    try:
+        expected_gid = grp.getgrnam('autokom').gr_gid
+    except KeyError:
+        raise SetupError('Groupe de service autokom absent.')
+    directory_stat = directory.stat()
+    directory_mode = stat.S_IMODE(directory_stat.st_mode)
+    if directory_stat.st_uid != 0 or directory_stat.st_gid != expected_gid or directory_mode != 0o750:
+        print('  ✗ Répertoire de contrôle : attendu root:autokom (0750).')
+        raise SetupError('Répertoire de contrôle non accessible au compte Django ; corriger via runtime setup --apply.')
+    print('  ✓ Répertoire de contrôle : root:autokom (0750).')
     if not sock.exists() or not stat.S_ISSOCK(sock.stat().st_mode):
         raise SetupError('Le socket de contrôle n’existe pas. Vérifier le service broker.')
+    sock_stat = sock.stat()
+    if sock_stat.st_gid != expected_gid or stat.S_IMODE(sock_stat.st_mode) != 0o660:
+        raise SetupError('Socket Unix : groupe ou permissions non conformes (attendu autokom, 0660).')
+    print('  ✓ Socket Unix : groupe autokom, mode 0660.')
     if not shutil.which('runuser'):
         raise SetupError('La commande système runuser est absente.')
     probe = r"""import json,socket,sys
-s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-s.settimeout(4)
-s.connect('/run/autokom/platform-control.sock')
-s.sendall(b'{"action":"ping","params":{}}\n')
-b=b''
-while not b.endswith(b'\n') and len(b)<4096:
-    v=s.recv(4096)
-    if not v:break
-    b+=v
-r=json.loads(b)
-if not r.get('ok') or not isinstance(r.get('result'),dict):sys.exit(3)
-print('jenkins_configured='+str(r['result'].get('jenkins_configured') is True).lower())
+try:
+    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
+        s.settimeout(4)
+        s.connect('/run/autokom/platform-control.sock')
+        s.sendall(b'{"action":"ping","params":{}}\n')
+        b=b''
+        while not b.endswith(b'\n') and len(b)<4096:
+            v=s.recv(4096)
+            if not v:break
+            b+=v
+    r=json.loads(b)
+    if not r.get('ok') or not isinstance(r.get('result'),dict):
+        print('diagnostic=protocol');sys.exit(3)
+    print('jenkins_configured='+str(r['result'].get('jenkins_configured') is True).lower())
+except PermissionError:
+    print('diagnostic=permission');sys.exit(4)
+except (FileNotFoundError,ConnectionRefusedError):
+    print('diagnostic=socket');sys.exit(5)
+except TimeoutError:
+    print('diagnostic=timeout');sys.exit(6)
+except (OSError,ValueError,KeyError,TypeError):
+    print('diagnostic=protocol');sys.exit(7)
 """
     try:
         result=subprocess.run(['runuser','-u','autokom','--','/usr/bin/python3','-c',probe],
@@ -245,8 +273,16 @@ print('jenkins_configured='+str(r['result'].get('jenkins_configured') is True).l
     except (OSError,subprocess.TimeoutExpired):
         raise SetupError('Impossible de tester la liaison avec le compte Django.')
     if result.returncode:
-        print('  ✗ Django ne peut pas communiquer avec le broker (sans détails sensibles).')
-        raise SetupError('Vérifier droits /run/autokom, socket, journaux broker et redémarrage de son service.')
+        categories = {
+            'diagnostic=permission': 'Accès Unix refusé au compte Django.',
+            'diagnostic=socket': 'Socket Unix absent ou connexion refusée.',
+            'diagnostic=timeout': 'Broker joignable mais sans réponse dans le délai.',
+            'diagnostic=protocol': 'Réponse du broker invalide ou opération refusée.',
+        }
+        reason = next((value for key, value in categories.items() if key in result.stdout),
+                      'Sonde du compte Django impossible à exécuter.')
+        print('  ✗ '+reason)
+        raise SetupError('Liaison Django → broker non opérationnelle ; vérifier le journal du broker.')
     print('  ✓ Le compte Django communique réellement avec le broker.')
     if 'jenkins_configured=true' not in result.stdout:
         raise SetupError('Le broker fonctionne mais sa configuration Jenkins est incomplète.')

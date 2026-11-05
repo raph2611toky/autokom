@@ -6,10 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-Group=root
+Group=autokom
 RuntimeDirectory=autokom
 RuntimeDirectoryMode=0750
-ExecStartPre=/usr/bin/chgrp autokom /run/autokom
 EnvironmentFile=/etc/autokom/secrets/runtime.env
 EnvironmentFile=-/etc/autokom/secrets/cloudflare-dns.env
 ExecStart=/usr/bin/python3 /opt/autokom/source/scripts/lib/autokom_platform_broker.py
