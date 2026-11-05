@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
 import { ArrowRight, Check, Eye, EyeOff } from 'lucide-react'
 import AuthFrame from '../components/AuthFrame.jsx'
-import { API_AVAILABLE } from '../config/runtime.js'
+import GitHubMark from '../components/GitHubMark.jsx'
+import { API_AVAILABLE, GITHUB_AVAILABLE } from '../config/runtime.js'
 import { authApi } from '../services/authApi.js'
 import '../styles/auth.css'
 
@@ -108,7 +109,10 @@ export default function Register({ navigate, theme, onToggleTheme }) {
         <button type="submit" className="auth-ui-primary auth-ui-full" disabled={busy}>Créer mon compte <ArrowRight size={19}/></button>
       </form>
       <p className="auth-ui-switch">Vous avez déjà un compte ? <button type="button" onClick={() => navigate('/login')}>Se connecter</button></p>
-      <button type="button" className="auth-ui-explore" onClick={() => navigate(API_AVAILABLE ? '/login' : '/deploy')}>Configurer un projet <ArrowRight size={15}/></button>
+      <button type="button" className="auth-ui-explore auth-ui-github" onClick={() => {
+        if (API_AVAILABLE) setNotice(GITHUB_AVAILABLE ? 'Inscription GitHub en cours d’intégration.' : 'Inscription GitHub non activée.')
+        else navigate('/deploy')
+      }}><GitHubMark size={17} /> S’inscrire avec GitHub</button>
     </AuthFrame>
   )
 }

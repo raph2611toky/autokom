@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { ArrowRight, Eye, EyeOff, LockKeyhole } from 'lucide-react'
 import AuthFrame from '../components/AuthFrame.jsx'
+import GitHubMark from '../components/GitHubMark.jsx'
 import { API_AVAILABLE, GITHUB_AVAILABLE } from '../config/runtime.js'
 import { useAuth } from '../context/AuthContext.jsx'
 import '../styles/auth.css'
@@ -50,14 +51,20 @@ export default function Login({ navigate, theme, onToggleTheme }) {
               {visible ? <EyeOff size={18} /> : <Eye size={18} />}
             </button>
           </div>
+          {API_AVAILABLE && (
+            <button type="button" className="auth-ui-forgot" onClick={() => navigate('/forgot-password')}>
+              Mot de passe oublié ?
+            </button>
+          )}
         </div>
         {notice && <p className="auth-ui-notice" role="status">{notice}</p>}
         <button type="submit" className="auth-ui-primary" disabled={busy} ><LockKeyhole size={18}/> Se connecter <ArrowRight size={19} /></button>
       </form>
-      <button type="button" className="auth-ui-explore" onClick={() => { if (API_AVAILABLE) setNotice(GITHUB_AVAILABLE ? 'Connexion GitHub en cours d’intégration.' : 'Connexion GitHub non activée.'); else navigate('/deploy') }}>Continuer avec GitHub</button>
-      {API_AVAILABLE && <p className="auth-ui-switch"><button type="button" onClick={() => navigate('/forgot-password')}>Mot de passe oublié ?</button></p>}
       <p className="auth-ui-switch">Vous n'avez pas de compte ? <button type="button" onClick={() => navigate('/register')}>Créer un compte</button></p>
-      <button type="button" className="auth-ui-explore" onClick={() => { if (API_AVAILABLE) setNotice('Connectez-vous avant de configurer un projet.'); else navigate('/deploy') }}>Configurer un projet <ArrowRight size={15}/></button>
+      <button type="button" className="auth-ui-explore auth-ui-github" onClick={() => {
+        if (API_AVAILABLE) setNotice(GITHUB_AVAILABLE ? 'Connexion GitHub en cours d’intégration.' : 'Connexion GitHub non activée.')
+        else navigate('/deploy')
+      }}><GitHubMark size={17} /> Se connecter avec GitHub</button>
     </AuthFrame>
   )
 }

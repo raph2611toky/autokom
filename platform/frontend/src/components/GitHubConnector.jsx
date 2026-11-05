@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
-import { Check, ChevronRight, Folder, Github, LockKeyhole, Search, Unplug } from 'lucide-react'
+import { Check, ChevronRight, Folder, LockKeyhole, Search, Unplug } from 'lucide-react'
 import { getSampleDirectory, getSampleRepository, SAMPLE_REPOSITORIES } from '../services/simulationData.js'
 import { normalizeDirectoryPath } from '../services/github.js'
+import GitHubMark from './GitHubMark.jsx'
 
 /** Sélecteur autonome pour évaluer l'ergonomie avant la connexion GitHub réelle. */
 export default function GitHubConnector({ form, update, onNotice }) {
@@ -37,17 +38,17 @@ export default function GitHubConnector({ form, update, onNotice }) {
   }
   return <div className="gh-connect ak-gh-workspace">
     <div className="gh-connect-head">
-      <span className="gh-icon"><Github size={23}/></span>
+      <span className="gh-icon"><GitHubMark size={23}/></span>
       <div className="gh-connect-title"><h3>GitHub</h3><p>Choisissez le dépôt, la branche et le dossier.</p></div>
       <span className={`gh-state gh-state-${connected?'connected':'disconnected'}`}>{connected?<Check size={14}/>:<Unplug size={14}/>} {connected?'Espace ouvert':'À connecter'}</span>
     </div>
     <p className="ak-simulation-disclosure">Parcours interactif avec des dépôts d’exemple, sans accès à votre compte GitHub.</p>
-    {!connected ? <div className="ak-gh-start"><button className="button-primary" type="button" onClick={connect}><Github size={17}/> Continuer avec GitHub</button></div> : <>
+    {!connected ? <div className="ak-gh-start"><button className="button-primary" type="button" onClick={connect}><GitHubMark size={17}/> Continuer avec GitHub</button></div> : <>
       <div className="gh-inline"><span className="gh-user">Espace de sélection</span><button className="gh-subtle-button" type="button" onClick={disconnect}><Unplug size={15}/> Déconnecter</button></div>
       <div className="gh-repo-browser">
         <label className="gh-search"><Search size={17}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Rechercher un dépôt…" aria-label="Rechercher un dépôt" /></label>
         <div className="gh-repositories" role="group" aria-label="Exemples de dépôts">
-          {repositories.map(repo => <button key={repo.id} type="button" className={`gh-repository ${selectedRepo?.id===repo.id?'selected':''}`} onClick={()=>chooseRepo(repo)}><Github size={15}/><span><strong>{repo.name}</strong><small>{repo.summary}</small></span>{repo.private&&<LockKeyhole size={14}/>} {selectedRepo?.id===repo.id&&<Check size={15}/>}</button>)}
+          {repositories.map(repo => <button key={repo.id} type="button" className={`gh-repository ${selectedRepo?.id===repo.id?'selected':''}`} onClick={()=>chooseRepo(repo)}><GitHubMark size={15}/><span><strong>{repo.name}</strong><small>{repo.summary}</small></span>{repo.private&&<LockKeyhole size={14}/>} {selectedRepo?.id===repo.id&&<Check size={15}/>}</button>)}
           {!repositories.length&&<p className="gh-empty">Aucun dépôt correspondant.</p>}
         </div>
       </div>

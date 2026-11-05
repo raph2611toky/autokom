@@ -148,3 +148,10 @@
 .auth-ui-explore { display: flex; justify-content: center; align-items: center; gap: 8px; border: 0; background: transparent; color: var(--ak-muted); padding: 12px; margin: 5px auto 0; font: 600 12px var(--ak-font-body); }
 .auth-ui-explore:hover { color: var(--ak-accent); }
 .auth-ui-explore:focus-visible { outline: 2px solid var(--ak-focus); outline-offset: 3px; }
+
+/* Ajustements ciblés des actions d'authentification — les thèmes restent pilotés par tokens.css. */
+.auth-ui-forgot { align-self: flex-end; border: 0; padding: 2px 0; margin-top: 4px; background: transparent; color: var(--ak-accent); font: 700 12px var(--ak-font-body); cursor: pointer; }
+.auth-ui-forgot:hover { text-decoration: underline; text-underline-offset: 3px; }
+.auth-ui-forgot:focus-visible { outline: 2px solid var(--ak-focus); outline-offset: 3px; }
+.auth-ui-github svg { flex: 0 0 auto; color: var(--ak-text-strong); }
+.auth-ui-github:hover svg { color: var(--ak-accent); }
