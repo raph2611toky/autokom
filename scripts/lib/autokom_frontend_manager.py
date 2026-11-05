@@ -31,6 +31,8 @@ RELEASES = Path('/opt/autokom/frontend/releases')
 CURRENT = RELEASES.parent / 'current'
 BUILDS = Path('/var/lib/autokom/frontend/builds')
 NPM_CACHE = Path('/var/lib/autokom/frontend/npm-cache')
+WORK_ROOT = BUILDS.parent
+FRONTEND_LOGS = Path('/var/log/autokom/frontend')
 BUILDER = 'autokom-frontend-builder'
 VHOST = Path('/etc/nginx/sites-available/autokom-frontend.conf')
 MARKER = '# MANAGED BY AUTOKOM FRONTEND'
@@ -59,6 +61,46 @@ def run(args, **kw):
         subprocess.run(args, check=True, timeout=kw.pop('timeout', 1200), **kw)
     except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as exc:
         raise FrontendError(f'Échec de {Path(args[0]).name}. Voir les logs de la commande.') from exc
+
+
+def run_live(args, *, label, cwd=None, env=None, timeout=1200):
+    """Keep command output in a private log; show AUTOKOM's existing TTY spinner.
+
+    Never print raw third-party build output on failure (it can contain secrets).
+    Commands do not receive a shell, and a timeout always stops the process.
+    """
+    from tool_banner import Activity
+    require_root()
+    FRONTEND_LOGS.mkdir(parents=True, exist_ok=True, mode=0o700)
+    FRONTEND_LOGS.chmod(0o700)
+    log_name = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%SZ')
+    log_path = FRONTEND_LOGS / f'{log_name}-{os.getpid()}-{os.urandom(3).hex()}.log'
+    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    print(f'  › {label}', flush=True)
+    started = time.monotonic()
+    try:
+        with os.fdopen(fd, 'wb', buffering=0) as log, Activity(f'AUTOKOM · {label}'):
+            subprocess.run(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                           stdout=log, stderr=subprocess.STDOUT, timeout=timeout, check=True)
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as exc:
+        elapsed = int(time.monotonic() - started)
+        print(f'  ✗ {label} ({elapsed}s) · journal protégé : {log_path}', flush=True)
+        # AUTOKOM's shared redaction policy prevents tokens or credentials
+        # from leaking through third-party diagnostics in the terminal.
+        from autokom_app_manager import LiveProgress
+        try:
+            with log_path.open('rb') as stream:
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - 8192))
+                lines = stream.read().decode('utf-8', errors='replace').splitlines()
+            safe = [LiveProgress._safe_line(line) for line in lines]
+            for line in [line for line in safe if line][-3:]:
+                print('    │ ' + line[:150], flush=True)
+        except OSError:
+            pass
+        raise FrontendError(f'Échec de {Path(args[0]).name} pendant « {label} ». '
+                            f'Consulter le journal protégé {log_path}.') from exc
+    print(f'  ✓ {label} ({int(time.monotonic() - started)}s) · journal : {log_path}', flush=True)
 
 
 def node_compatible(version):
@@ -115,8 +157,8 @@ def provision_node_toolchain():
         raise FrontendError('Ansible absent : installer la fondation via AUTOKOM avant le frontend.')
     print(f'  › {issue}')
     print('  › AUTOKOM provisionne automatiquement Node.js 22 et npm (APT signé).')
-    run(['ansible-playbook', '-i', 'localhost,', '-c', 'local', str(NODE_PLAYBOOK)],
-        cwd=ROOT / 'ansible', timeout=1800)
+    run_live(['ansible-playbook', '-i', 'localhost,', '-c', 'local', str(NODE_PLAYBOOK)],
+             label='Provisionnement Node.js/npm via Ansible', cwd=ROOT / 'ansible', timeout=1800)
     issue = node_toolchain_issue()
     if issue:
         raise FrontendError(f'Node.js/npm non opérationnels après provisioning : {issue}')
@@ -196,9 +238,37 @@ def existing_vhost_conflicts(front):
                 raise FrontendError(f'Domaine {front} déjà configuré : {file}. Refus d’écrasement.')
 
 
+# Ne jamais laisser un vhost SPA entrer en boucle vers /index.html quand
+# aucune release n'a encore été publiée (setup HTTPS != deploy React).
+NO_RELEASE_MARKER = '# AUTOKOM_NO_RELEASE_GUARD'
+NO_RELEASE_LOCATION = '    location / {\n        try_files $uri $uri/ /index.html;'
+
+
+def nginx_release_guard(config):
+    """Ajoute une réponse 503 sûre et idempotente, sans toucher au TLS Certbot.
+
+    La seule forme acceptée est celle du vhost géré par AUTOKOM ; un vhost
+    personnalisé doit être révisé plutôt que remplacé aveuglément.
+    """
+    if MARKER not in config or 'root /opt/autokom/frontend/current;' not in config:
+        raise FrontendError('Vhost frontend non géré : refus de migration automatique.')
+    if NO_RELEASE_MARKER in config:
+        return config
+    if config.count(NO_RELEASE_LOCATION) != 1:
+        raise FrontendError('Bloc SPA Nginx inattendu : migration automatique refusée.')
+    replacement = ("    location / {\n"
+                   "        " + NO_RELEASE_MARKER + "\n"
+                   "        # La construction initiale n'est pas encore publiée.\n"
+                   "        if (!-f /opt/autokom/frontend/current/index.html) {\n"
+                   "            return 503 \"AUTOKOM frontend non publie. Lancer autokom app frontend deploy --check puis --apply.\\n\";\n"
+                   "        }\n"
+                   "        try_files $uri $uri/ /index.html;")
+    return config.replace(NO_RELEASE_LOCATION, replacement, 1)
+
+
 def nginx_config(front, back, port):
     # API Django directement via loopback, et non via une IP Cloudflare.
-    return f'''{MARKER}
+    return nginx_release_guard(f'''{MARKER}
 server {{
     listen 80;
     listen [::]:80;
@@ -247,18 +317,52 @@ server {{
     }}
     location ~ /\\. {{ deny all; }}
 }}
-'''
+''')
 
 
 def builder_prepare():
+    """Restrict shared parent to traversal by the builder group, not public access.
+
+    The old implementation made BUILDS/npm-cache private but left their parent
+    root:root 0700. runuser then could not resolve its working directory or
+    read package-lock.json; npm misleadingly reported EUSAGE.
+    """
     require_root()
     if BUILDER not in [u.pw_name for u in pwd.getpwall()]:
-        run(['useradd', '--system', '--home-dir', '/var/lib/autokom/frontend',
+        run(['useradd', '--system', '--home-dir', str(WORK_ROOT),
              '--shell', '/usr/sbin/nologin', '--user-group', BUILDER])
+    if WORK_ROOT.is_symlink():
+        raise FrontendError('Répertoire de travail frontend symbolique non autorisé.')
+    WORK_ROOT.mkdir(parents=True, exist_ok=True)
+    if not WORK_ROOT.is_dir() or WORK_ROOT.stat().st_uid not in (0, pwd.getpwnam(BUILDER).pw_uid):
+        raise FrontendError('Propriétaire inattendu pour le répertoire de travail frontend.')
+    # Root keeps ownership; only the private builder group can traverse.
+    shutil.chown(WORK_ROOT, user='root', group=BUILDER)
+    WORK_ROOT.chmod(0o710)
     for folder in (BUILDS, NPM_CACHE):
+        if folder.is_symlink():
+            raise FrontendError('Lien symbolique interdit dans le répertoire de build.')
         folder.mkdir(parents=True, exist_ok=True)
         shutil.chown(folder, user=BUILDER, group=BUILDER)
         folder.chmod(0o700)
+
+
+def verify_build_access(stage):
+    """Prove access *as the real builder*, before invoking npm."""
+    for path, flag, label in (
+        (stage / 'package.json', '-r', 'package.json'),
+        (stage / 'package-lock.json', '-r', 'package-lock.json'),
+        (stage, '-w', 'répertoire de compilation'),
+        (NPM_CACHE, '-w', 'cache npm'),
+    ):
+        check = subprocess.run(['runuser', '-u', BUILDER, '--', '/usr/bin/test',
+                                flag, str(path)], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=15, check=False)
+        if check.returncode:
+            raise FrontendError(
+                f'Accès refusé à {label} pour {BUILDER}. '
+                'AUTOKOM doit corriger les permissions du répertoire de travail '
+                'avant npm ci (vérifier aussi les répertoires parents).')
 
 
 def backend_port():
@@ -298,6 +402,23 @@ def certbot_command(front, email):
     return [*cmd, '-d', front]
 
 
+
+
+def managed_certificate_installed(front, *, live_root=Path('/etc/letsencrypt/live')):
+    """Do not re-request an already attached TLS certificate on setup reruns.
+
+    Renewal is still the responsibility of the Certbot systemd timer. A
+    missing/changed certificate fails this check and follows the normal setup.
+    """
+    if not VHOST.is_file():
+        return False
+    config = VHOST.read_text(encoding='utf-8')
+    chain = live_root / front / 'fullchain.pem'
+    key = live_root / front / 'privkey.pem'
+    return (MARKER in config and f'server_name {front};' in config
+            and f'ssl_certificate {chain};' in config
+            and f'ssl_certificate_key {key};' in config
+            and chain.is_file() and key.is_file())
 
 
 def cloudflare_frontend_zone(front):
@@ -366,22 +487,35 @@ def dns_ipv4_visible(front, expected_ip=None):
 
 
 def wait_frontend_dns(front, expected_ip=None, timeout=150, interval=5):
-    """Do not request an ACME certificate until the hostname publicly resolves.
+    """Résolution avant ACME, avec progression périodique visible à l'écran.
 
-    Cloudflare or an external DNS provider may need time to publish the record;
-    rerunning setup is safe, and a failed lookup cannot trigger a Certbot attempt.
+    Le cache DNS peut différer entre l'API Cloudflare et le résolveur local.
+    En cas de dépassement du délai, le record est conservé et le setup est
+    rejouable sans modifier les autres DNS ni les vhosts.
     """
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    attempt = 0
+    print(f'  › Vérification DNS publique de {front} (maximum {timeout}s).', flush=True)
     while True:
-        if dns_ipv4_visible(front, expected_ip):
-            print(f'  ✓ DNS public : {front} résolu en IPv4.')
+        attempt += 1
+        print(f'  ⏳ Résolution DNS · tentative {attempt}…', flush=True)
+        from tool_banner import Activity
+        with Activity(f'AUTOKOM · résolution DNS {front}'):
+            visible = dns_ipv4_visible(front, expected_ip)
+        if visible:
+            print(f'  ✓ DNS public : {front} résolu en IPv4.', flush=True)
             return
-        if time.monotonic() >= deadline:
+        remaining = max(0, deadline - time.monotonic())
+        if remaining <= 0:
             raise FrontendError(
-                f'DNS de {front} non visible. Enregistrement conservé ; '
-                'relancer le même setup --apply après propagation DNS.'
+                f'DNS de {front} non visible après {int(time.monotonic() - started)}s. '
+                'Enregistrement conservé ; relancer le même setup --apply après propagation DNS.'
             )
-        time.sleep(min(interval, max(0, deadline - time.monotonic())))
+        print(f'  › Propagation DNS en cours · prochaine vérification dans '
+              f'{min(interval, remaining):.0f}s · délai restant {remaining:.0f}s.', flush=True)
+        with Activity(f'AUTOKOM · propagation DNS {front}'):
+            time.sleep(min(interval, remaining))
 
 
 def setup(args):
@@ -435,7 +569,9 @@ def setup(args):
     # Ne modifie ni Nginx ni les secrets si le téléchargement/provisionnement échoue.
     provision_node_toolchain()
     if args.tls_mode == 'certbot':
-        expected_dns_ip = ensure_frontend_dns(front)
+        from tool_banner import Activity
+        with Activity('AUTOKOM · vérification DNS Cloudflare'):
+            expected_dns_ip = ensure_frontend_dns(front)
         wait_frontend_dns(front, expected_dns_ip)
     builder_prepare()
     RELEASES.mkdir(parents=True, exist_ok=True)
@@ -459,7 +595,12 @@ def setup(args):
         original = VHOST.read_text(encoding='utf-8') if VHOST.exists() else None
         # Ne jamais supprimer la configuration HTTPS créée par Certbot.
         if original is None or ('listen 443 ssl' not in original and 'ssl_certificate' not in original):
-            VHOST.write_text(nginx_config(front, back, backend_port()), encoding='utf-8')
+            new_vhost = nginx_config(front, back, backend_port())
+        else:
+            # Vhost HTTPS déjà émis par Certbot : préserver certificats et redirects.
+            new_vhost = nginx_release_guard(original)
+        if original != new_vhost:
+            VHOST.write_text(new_vhost, encoding='utf-8')
             VHOST.chmod(0o644)
         created = not link.exists() and not link.is_symlink()
         if created:
@@ -476,11 +617,16 @@ def setup(args):
                 link.unlink(missing_ok=True)
             raise
         if args.tls_mode == 'certbot':
-            run(certbot_command(front, email), timeout=300)
+            if managed_certificate_installed(front):
+                print('  ✓ Certificat TLS déjà installé : aucune nouvelle demande ACME.')
+            else:
+                run_live(certbot_command(front, email), label='Certificat HTTPS Let’s Encrypt', timeout=300)
     save_state({'domain': front, 'backend_domain': back, 'nginx_mode': args.nginx_mode,
                 'tls_mode': args.tls_mode, 'releases': previous.get('releases', []) if previous else [],
                 'active': previous.get('active') if previous else None})
     print('  ✓ Configuration frontend installée. Effectuer le deploy --check avant --apply.')
+    if not (previous and previous.get('active')):
+        print('  › Première release React non publiée : aucune application statique à servir pour le moment.')
     return 0
 
 
@@ -524,9 +670,10 @@ def chown_recursive(folder):
             shutil.chown(Path(directory) / item, BUILDER, BUILDER)
 
 
-def builder_run(command, cwd, env):
-    run(['runuser', '-u', BUILDER, '--', '/usr/bin/env', '-i',
-         *(f'{key}={value}' for key, value in env.items()), *command], cwd=cwd)
+def builder_run(command, cwd, env, *, label=None):
+    run_live(['runuser', '-u', BUILDER, '--', '/usr/bin/env', '-i',
+              *(f'{key}={value}' for key, value in env.items()), *command],
+             cwd=cwd, label=label or f'Frontend · {command[0]}', timeout=1800)
 
 
 def deploy(args):
@@ -551,19 +698,20 @@ def deploy(args):
         copy_source(stage)
         chown_recursive(Path(temp))
         stage.chmod(0o700)
+        verify_build_access(stage)
         print('  [1/6] Dépendances npm immuables, scripts tiers désactivés')
-        builder_run(['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], stage, env)
+        builder_run(['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], stage, env, label='Dépendances npm reproductibles')
         print('  [2/6] Tests frontend')
-        builder_run(['npm', 'run', 'test'], stage, env)
+        builder_run(['npm', 'run', 'test'], stage, env, label='Tests React')
         print('  [3/6] Audit dépendances (HIGH/CRITICAL bloquants)')
-        builder_run(['npm', 'audit', '--audit-level=high'], stage, env)
+        builder_run(['npm', 'audit', '--audit-level=high'], stage, env, label='Audit des dépendances')
         print('  [4/6] SAST Semgrep')
-        builder_run(['semgrep', 'scan', '--config', '.semgrep-rules.yml', '--error', '--metrics', 'off', 'src'], stage, env)
+        builder_run(['semgrep', 'scan', '--config', '.semgrep-rules.yml', '--error', '--metrics', 'off', 'src'], stage, env, label='Analyse Semgrep')
         print('  [5/6] Analyse Trivy (vulnérabilités + secrets)')
         builder_run(['trivy', 'fs', '--scanners', 'vuln,secret', '--exit-code', '1',
-                     '--severity', 'HIGH,CRITICAL', '--no-progress', '.'], stage, env)
+                     '--severity', 'HIGH,CRITICAL', '--no-progress', '.'], stage, env, label='Analyse Trivy')
         print('  [6/6] Compilation Vite, sans sourcemap publique')
-        builder_run(['npm', 'run', 'build'], stage, env)
+        builder_run(['npm', 'run', 'build'], stage, env, label='Compilation Vite')
         dist = stage / 'dist'
         if not (dist / 'index.html').is_file() or not (dist / 'assets').is_dir():
             raise FrontendError('Build Vite incomplet : aucun artefact publiable.')
@@ -655,6 +803,9 @@ def status(args):
                  and (RELEASES / active / 'index.html').is_file())
     print('  Node.js/npm : ' + ('OK' if node_toolchain_issue() is None else 'À PROVISIONNER via setup --apply'))
     print('  Artefact et symlink : ' + ('OK' if valid else 'ABSENT/INCOHÉRENT'))
+    if not active and not CURRENT.is_symlink():
+        print('  › Configuration prête ; aucune release React publiée pour le moment.')
+        print('  › Étapes : autokom app frontend deploy --check puis --apply.')
     return 0 if valid else 1
 
 

@@ -142,18 +142,18 @@ class FrontendNodeProvisionTests(unittest.TestCase):
         with mock.patch.object(fm, 'require_root'), \
              mock.patch.object(fm, 'node_toolchain_issue', side_effect=['npm absent', None]), \
              mock.patch.object(fm.shutil, 'which', return_value='/usr/bin/ansible-playbook'), \
-             mock.patch.object(fm, 'run') as runner, \
+             mock.patch.object(fm, 'run_live') as runner, \
              contextlib.redirect_stdout(io.StringIO()):
             fm.provision_node_toolchain()
         runner.assert_called_once_with(
             ['ansible-playbook', '-i', 'localhost,', '-c', 'local', str(fm.NODE_PLAYBOOK)],
-            cwd=fm.ROOT / 'ansible', timeout=1800)
+            label='Provisionnement Node.js/npm via Ansible', cwd=fm.ROOT / 'ansible', timeout=1800)
 
     def test_node_provisioning_fails_closed_if_version_wrong_after_ansible(self):
         with mock.patch.object(fm, 'require_root'), \
              mock.patch.object(fm, 'node_toolchain_issue', side_effect=['node absent', 'node v18 incompatible']), \
              mock.patch.object(fm.shutil, 'which', return_value='/usr/bin/ansible-playbook'), \
-             mock.patch.object(fm, 'run'), contextlib.redirect_stdout(io.StringIO()):
+             mock.patch.object(fm, 'run_live'), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(fm.FrontendError, 'non opérationnels après provisioning'):
                 fm.provision_node_toolchain()
 
@@ -316,3 +316,155 @@ class FrontendDNSProvisionTests(unittest.TestCase):
         with mock.patch.object(fm.socket, 'getaddrinfo', return_value=addresses):
             self.assertTrue(fm.dns_ipv4_visible('auto.ikom.mg', '56.228.86.160'))
             self.assertFalse(fm.dns_ipv4_visible('auto.ikom.mg', '56.228.86.161'))
+
+
+class FrontendFirstReleaseTests(unittest.TestCase):
+    """Evite le HTTP 500 avant premier deploy, sans modifier les vhosts tiers."""
+
+    def test_generated_nginx_returns_503_before_first_release(self):
+        rendered = fm.nginx_config('auto.ikom.mg', 'backend.auto.ikom.mg', 8172)
+        self.assertEqual(rendered.count(fm.NO_RELEASE_MARKER), 1)
+        self.assertIn('if (!-f /opt/autokom/frontend/current/index.html)', rendered)
+        self.assertIn('return 503', rendered)
+        self.assertIn('try_files $uri $uri/ /index.html;', rendered)
+        self.assertIn('location ^~ /api/ {', rendered)
+        self.assertIn('location = /__autokom/health', rendered)
+
+    def test_migration_preserves_tls_and_is_idempotent(self):
+        old = fm.nginx_config('auto.ikom.mg', 'backend.auto.ikom.mg', 8172)
+        # Simule la version deja installee avant le garde de premiere release.
+        start = old.index('        ' + fm.NO_RELEASE_MARKER)
+        end = old.index('        try_files $uri $uri/ /index.html;', start)
+        old = old[:start] + old[end:]
+        old += '\n# Certbot-managed\nlisten 443 ssl;\nssl_certificate /etc/letsencrypt/live/auto.ikom.mg/fullchain.pem;\n'
+        migrated = fm.nginx_release_guard(old)
+        self.assertIn('ssl_certificate /etc/letsencrypt/live/auto.ikom.mg/fullchain.pem;', migrated)
+        self.assertIn('# Certbot-managed', migrated)
+        self.assertEqual(migrated.count(fm.NO_RELEASE_MARKER), 1)
+        self.assertEqual(fm.nginx_release_guard(migrated), migrated)
+
+    def test_foreign_nginx_conf_is_never_rewritten(self):
+        with self.assertRaises(fm.FrontendError):
+            fm.nginx_release_guard('server { listen 443 ssl; location / { return 200; } }')
+        with self.assertRaises(fm.FrontendError):
+            fm.nginx_release_guard(fm.MARKER + '\nroot /opt/autokom/frontend/current;\nlocation / { return 200; }')
+
+    def test_dns_wait_prints_progress_until_resolved(self):
+        output = io.StringIO()
+        with mock.patch.object(fm, 'dns_ipv4_visible', side_effect=[False, False, True]) as check, \
+             mock.patch.object(fm.time, 'sleep') as sleep, contextlib.redirect_stdout(output):
+            fm.wait_frontend_dns('auto.ikom.mg', '56.228.86.160', timeout=60, interval=5)
+        self.assertEqual(check.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertIn('tentative 1', output.getvalue())
+        self.assertIn('tentative 2', output.getvalue())
+        self.assertIn('résolu en IPv4', output.getvalue())
+
+    def test_dns_wait_timeout_reports_duration(self):
+        output = io.StringIO()
+        with mock.patch.object(fm, 'dns_ipv4_visible', return_value=False), \
+             contextlib.redirect_stdout(output), self.assertRaises(fm.FrontendError):
+            fm.wait_frontend_dns('auto.ikom.mg', timeout=0, interval=5)
+        self.assertIn('tentative 1', output.getvalue())
+
+
+class FrontendBuilderAccessRegressionTests(unittest.TestCase):
+    """Regression for the exact npm EUSAGE caused by inaccessible parent."""
+
+    @unittest.skipUnless(__import__('os').geteuid() == 0, 'needs root for runuser validation')
+    def test_builder_can_read_lockfile_after_private_group_traverse(self):
+        import os
+        import pwd
+        import grp
+        import shutil
+        # Run as an existing unprivileged user only in the isolated temp tree.
+        account = 'nobody'
+        try:
+            user = pwd.getpwnam(account)
+        except KeyError:
+            self.skipTest('nobody not installed')
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            base.chmod(0o711)
+            work = base / 'work'
+            builds = work / 'builds'
+            stage = builds / 'one' / 'source'
+            cache = work / 'npm-cache'
+            stage.mkdir(parents=True)
+            cache.mkdir()
+            for name in ('package.json', 'package-lock.json'):
+                shutil.copy2(fm.FRONTEND / name, stage / name)
+            for folder in (builds, builds / 'one', stage, cache):
+                os.chown(folder, user.pw_uid, user.pw_gid)
+                folder.chmod(0o700)
+            for name in ('package.json', 'package-lock.json'):
+                os.chown(stage / name, user.pw_uid, user.pw_gid)
+                (stage / name).chmod(0o600)
+            work.chmod(0o700)   # reproduces AWS issue
+            with mock.patch.object(fm, 'BUILDER', account), \
+                 mock.patch.object(fm, 'NPM_CACHE', cache):
+                with self.assertRaisesRegex(fm.FrontendError, 'Accès refusé'):
+                    fm.verify_build_access(stage)
+                os.chown(work, 0, user.pw_gid)
+                work.chmod(0o710)  # root may list; builder group can traverse only
+                fm.verify_build_access(stage)
+
+    @unittest.skipUnless(__import__('os').geteuid() == 0, 'needs root for ownership tests')
+    def test_builder_prepare_creates_traversable_parent_but_private_children(self):
+        import os
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / 'frontend'
+            build = work / 'builds'
+            cache = work / 'npm-cache'
+            with mock.patch.object(fm, 'BUILDS', build), \
+                 mock.patch.object(fm, 'NPM_CACHE', cache), \
+                 mock.patch.object(fm, 'WORK_ROOT', work), \
+                 mock.patch.object(fm, 'BUILDER', 'root'):
+                fm.builder_prepare()
+            self.assertEqual(stat.S_IMODE(work.stat().st_mode), 0o710)
+            self.assertEqual(stat.S_IMODE(build.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o700)
+
+    def test_deploy_verifies_permissions_before_npm(self):
+        source = (fm.ROOT / 'scripts/lib/autokom_frontend_manager.py').read_text()
+        self.assertLess(source.index('verify_build_access(stage)'), source.index("builder_run(['npm', 'ci'"))
+
+    def test_run_live_protects_logs_and_hides_failure_output(self):
+        import os
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_logs = Path(tmp) / 'logs'
+            output = io.StringIO()
+            with mock.patch.object(fm, 'FRONTEND_LOGS', fake_logs), \
+                 mock.patch.object(fm, 'require_root'), \
+                 mock.patch.object(fm.subprocess, 'run', side_effect=__import__('subprocess').CalledProcessError(3,['npm'])), \
+                 contextlib.redirect_stdout(output):
+                with self.assertRaises(fm.FrontendError):
+                    fm.run_live(['npm', 'ci'], label='npm test', timeout=1)
+            self.assertEqual(len(list(fake_logs.iterdir())), 1)
+            self.assertEqual(list(fake_logs.iterdir())[0].stat().st_mode & 0o777, 0o600)
+            self.assertNotIn('secret-value', output.getvalue())
+
+    def test_no_release_error_guard_preserves_existing_nginx_https(self):
+        self.assertEqual(fm.nginx_config('auto.ikom.mg','backend.auto.ikom.mg',8172).count(fm.NO_RELEASE_MARKER),1)
+
+
+class FrontendTLSIdempotenceTests(unittest.TestCase):
+    def test_reuses_only_certificate_attached_to_expected_domain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live = root / 'live'
+            cert = live / 'auto.ikom.mg'
+            cert.mkdir(parents=True)
+            (cert / 'fullchain.pem').write_text('CERT')
+            (cert / 'privkey.pem').write_text('KEY')
+            vhost = root / 'autokom-frontend.conf'
+            vhost.write_text(fm.MARKER + '\nserver_name auto.ikom.mg;\n'
+                + f'ssl_certificate {cert}/fullchain.pem;\n'
+                + f'ssl_certificate_key {cert}/privkey.pem;\n')
+            with mock.patch.object(fm, 'VHOST', vhost):
+                self.assertTrue(fm.managed_certificate_installed('auto.ikom.mg', live_root=live))
+                self.assertFalse(fm.managed_certificate_installed('evil.example.org', live_root=live))
+                (cert / 'privkey.pem').unlink()
+                self.assertFalse(fm.managed_certificate_installed('auto.ikom.mg', live_root=live))
