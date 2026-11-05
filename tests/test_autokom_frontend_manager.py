@@ -484,26 +484,52 @@ class FrontendTLSIdempotenceTests(unittest.TestCase):
 class FrontendBuilderFullPathTests(unittest.TestCase):
     """Regression: backend's /var/lib/autokom is private (0750)."""
 
-    @unittest.skipUnless(__import__('os').geteuid() == 0, 'needs root for ACL mock')
-    def test_parent_acl_is_traverse_only_and_keeps_backend_mode(self):
+    def test_build_workspace_is_not_nested_in_django_state(self):
+        self.assertEqual(fm.WORK_ROOT, Path('/var/lib/autokom-frontend'))
+        self.assertEqual(fm.BUILDS, fm.WORK_ROOT / 'builds')
+        self.assertEqual(fm.NPM_CACHE, fm.WORK_ROOT / 'npm-cache')
+        self.assertEqual(fm.RELEASES, Path('/opt/autokom/frontend/releases'))
+        self.assertNotIn('/var/lib/autokom/', str(fm.WORK_ROOT) + '/')
+
+    @unittest.skipUnless(__import__('os').geteuid() == 0, 'needs root to verify real Unix permissions')
+    def test_real_builder_access_without_acl_to_backend_parent(self):
+        """Use an actual unprivileged process, not mocked ACL/access responses."""
         import os
-        import stat
+        import pwd
         with tempfile.TemporaryDirectory() as tmp:
-            data_root = Path(tmp) / 'autokom'
-            data_root.mkdir(mode=0o750)
-            data_root.chmod(0o750)
-            original = stat.S_IMODE(data_root.stat().st_mode)
-            with mock.patch.object(fm, 'WORK_ROOT', data_root / 'frontend'), \
-                 mock.patch.object(fm, 'BUILDER', 'autokom-frontend-builder'), \
-                 mock.patch.object(fm, 'builder_access', side_effect=[False, True]) as access, \
-                 mock.patch.object(fm.shutil, 'which', return_value='/usr/bin/setfacl'), \
-                 mock.patch.object(fm, 'run') as command, \
-                 contextlib.redirect_stdout(io.StringIO()):
-                fm.prepare_builder_parent()
-            command.assert_called_once_with(
-                ['setfacl', '-m', 'u:autokom-frontend-builder:--x', str(data_root)], timeout=30)
-            self.assertEqual(access.call_count, 2)
-            self.assertEqual(stat.S_IMODE(data_root.stat().st_mode), original)
+            root = Path(tmp)
+            root.chmod(0o711)
+            backend_private = root / 'autokom'
+            backend_private.mkdir(mode=0o750)
+            backend_private.chmod(0o750)
+            backend_private.joinpath('backend-private.txt').write_text('secret')
+            work = root / 'autokom-frontend'
+            uid = pwd.getpwnam('daemon').pw_uid
+            gid = pwd.getpwnam('daemon').pw_gid
+            with mock.patch.object(fm, 'WORK_ROOT', work), \
+                 mock.patch.object(fm, 'BUILDS', work / 'builds'), \
+                 mock.patch.object(fm, 'NPM_CACHE', work / 'npm-cache'), \
+                 mock.patch.object(fm, 'BUILD_HOME', work / 'home'), \
+                 mock.patch.object(fm, 'SCANNER_CACHE', work / 'trivy-cache'), \
+                 mock.patch.object(fm, 'BUILDER', 'daemon'):
+                fm.builder_prepare()
+                self.assertFalse(fm.builder_access('-x', backend_private))
+                self.assertFalse(fm.builder_access('-r', backend_private / 'backend-private.txt'))
+                self.assertTrue(fm.builder_access('-x', work))
+                self.assertTrue(fm.builder_access('-w', work / 'npm-cache'))
+                stage = work / 'builds' / 'test-one' / 'source'
+                stage.mkdir(parents=True)
+                for directory in (stage.parent, stage):
+                    os.chown(directory, uid, gid)
+                    directory.chmod(0o700)
+                for filename in ('package.json', 'package-lock.json'):
+                    file = stage / filename
+                    file.write_text('{}')
+                    os.chown(file, uid, gid)
+                    file.chmod(0o600)
+                fm.verify_build_access(stage)
+            self.assertEqual(backend_private.stat().st_mode & 0o777, 0o750)
+
 
     @unittest.skipUnless(__import__('os').geteuid() == 0, 'needs root for runuser validation')
     def test_builder_home_and_scanner_cache_are_private_writable(self):
@@ -559,12 +585,14 @@ class FrontendBuilderFullPathTests(unittest.TestCase):
                 with fm.deployment_guard():
                     pass
 
-    def test_setup_includes_user_rights_without_chmod_shared_parent(self):
+    def test_work_parent_does_not_change_shared_backend_permissions(self):
         import inspect
-        code = inspect.getsource(fm.prepare_builder_parent)
-        self.assertIn('setfacl', code)
-        self.assertNotIn('chmod(', code)
-        self.assertNotIn('chown(', code)
+        source = inspect.getsource(fm.prepare_builder_parent)
+        self.assertNotIn('setfacl', source)
+        self.assertNotIn('chmod(', source)
+        self.assertNotIn('chown(', source)
+        self.assertIn('builder_access', source)
+
 
     def test_deploy_and_rollback_use_the_same_lock(self):
         with mock.patch.object(fm, 'deployment_guard') as guard, \

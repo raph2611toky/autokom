@@ -9,11 +9,13 @@
 /opt/autokom/frontend/
   releases/                          builds Vite versionnés, sans code source
   current -> releases/<ID_RELEASE>    lien atomique publié par Nginx
-/var/lib/autokom/frontend/builds/    compilations éphémères non privilégiées
-/var/lib/autokom/frontend/npm-cache/ cache npm du builder
+/var/lib/autokom-frontend/builds/   compilations éphémères non privilégiées
+/var/lib/autokom-frontend/npm-cache/ cache npm du builder
 /etc/autokom/secrets/frontend.env     options publiques du build (fichier root 0600)
 /etc/autokom/secrets/backend.env      secrets Django inchangés (root 0600)
 ```
+
+Les builds sont isolés de `/var/lib/autokom` (état privé Django) : aucun droit ACL sur ce répertoire n'est requis. L'ancien espace `/var/lib/autokom/frontend/` n'est ni déplacé ni supprimé automatiquement.
 
 Nginx `root /opt/autokom/frontend/current;`, `location /api/` relaie vers Gunicorn `127.0.0.1:<port>` avec `Host: backend.auto.ikom.mg`, `X-Forwarded-Proto` et cookies HTTP ordinaires (pas de réécriture de cookie Domain/Path). Le site React est exposé en HTTPS sous `auto.ikom.mg`. Les cookies sans `Domain` appartiennent au domaine du navigateur qui reçoit la réponse proxifiée ; **ne pas faire appeler directement `backend.auto.ikom.mg` depuis React**.
 

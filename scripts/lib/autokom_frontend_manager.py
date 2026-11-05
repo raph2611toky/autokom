@@ -31,8 +31,11 @@ SECRETS = Path('/etc/autokom/secrets/frontend.env')
 STATE = Path('/etc/autokom/frontend-deployment.json')
 RELEASES = Path('/opt/autokom/frontend/releases')
 CURRENT = RELEASES.parent / 'current'
-BUILDS = Path('/var/lib/autokom/frontend/builds')
-NPM_CACHE = Path('/var/lib/autokom/frontend/npm-cache')
+# Build workspace separated from Django state (/var/lib/autokom, mode 0750).
+# Do not put the unprivileged builder under Django's private directory.
+# The published React releases remain exclusively in /opt/autokom/frontend.
+BUILDS = Path('/var/lib/autokom-frontend/builds')
+NPM_CACHE = Path('/var/lib/autokom-frontend/npm-cache')
 WORK_ROOT = BUILDS.parent
 BUILD_HOME = WORK_ROOT / 'home'
 SCANNER_CACHE = WORK_ROOT / 'trivy-cache'
@@ -339,39 +342,21 @@ def builder_access(flag, path):
 
 
 def prepare_builder_parent():
-    """Grant *traverse only* on /var/lib/autokom, never read of backend data.
+    """Check the shared /var/lib directory, without modifying Django's data ACLs.
 
-    The Django service deliberately owns the shared parent as autokom:autokom
-    with mode 0750. Changing its Unix group or chmod to 0755 would expose
-    other AUTOKOM state. A named-user ACL gives the separate build account
-    exactly one directory traversal permission and is repeatable.
+    WORK_ROOT is a dedicated sibling of /var/lib/autokom, not its child.
+    This completely avoids granting a frontend build process access to the
+    backend's private parent directory. The build's own workspace is guarded
+    separately by builder_prepare (root:builder 0710, private 0700 children).
     """
-    data_root = WORK_ROOT.parent
-    if data_root.is_symlink() or not data_root.is_dir():
-        raise FrontendError('Parent des données AUTOKOM invalide ou symbolique.')
-    trusted = {0}
-    try:
-        trusted.add(pwd.getpwnam('autokom').pw_uid)
-    except KeyError:
-        pass
-    if data_root.stat().st_uid not in trusted:
-        raise FrontendError('Le parent des données AUTOKOM a un propriétaire inattendu.')
-    if builder_access('-x', data_root):
-        return
-    if not shutil.which('setfacl'):
-        # Ubuntu's signed APT repository. This is provisioning by AUTOKOM,
-        # never a manual requirement or a broad permission fallback.
-        run_live(['apt-get', 'install', '-y', 'acl'],
-                 label='AUTOKOM · support des ACL minimales', timeout=900,
-                 env={'PATH': BUILD_PATH, 'DEBIAN_FRONTEND': 'noninteractive', 'LANG': 'C.UTF-8'})
-    if not shutil.which('setfacl'):
-        raise FrontendError('Support ACL introuvable après provisionnement AUTOKOM.')
-    run(['setfacl', '-m', f'u:{BUILDER}:--x', str(data_root)], timeout=30)
-    if not builder_access('-x', data_root):
+    parent = WORK_ROOT.parent
+    if parent.is_symlink() or not parent.is_dir():
+        raise FrontendError('Parent du workspace frontend invalide ou symbolique.')
+    if not builder_access('-x', parent):
         raise FrontendError(
-            f'ACL de traversée inefficace sur {data_root}. '
-            'Contrôler les permissions des parents sans les élargir.')
-    print(f'  ✓ ACL minimale accordée à {BUILDER} sur {data_root} (traversée uniquement).')
+            f'{BUILDER} ne peut pas traverser {parent}. '
+            'AUTOKOM refuse d’élargir les permissions des répertoires partagés.'
+        )
 
 
 def builder_prepare():
@@ -384,6 +369,7 @@ def builder_prepare():
              '--shell', '/usr/sbin/nologin', '--user-group', BUILDER])
     if WORK_ROOT.is_symlink():
         raise FrontendError('Répertoire de travail frontend symbolique non autorisé.')
+    # Only a dedicated root-owned workspace is created; never touch Django state.
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
     if not WORK_ROOT.is_dir() or WORK_ROOT.stat().st_uid not in (0, pwd.getpwnam(BUILDER).pw_uid):
         raise FrontendError('Propriétaire inattendu pour le répertoire de travail frontend.')
