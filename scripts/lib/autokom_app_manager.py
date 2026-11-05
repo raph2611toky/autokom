@@ -1062,6 +1062,8 @@ def deploy(args):
         if state['runtime'] == 'systemd':
             with phase('MySQL · migrations Django versionnées'):
                 run_as_service([str(VENV/'bin/python'), 'manage.py', 'migrate', '--noinput'], timeout=300)
+            with phase('Offre gratuite DevOps · initialisation idempotente'):
+                run_as_service([str(VENV/'bin/python'), 'manage.py', 'seed_project_offers'], timeout=90)
             with phase('Staticfiles · collecte'):
                 run_as_service([str(VENV/'bin/python'), 'manage.py', 'collectstatic', '--noinput'], timeout=300)
                 if shutil.which('setfacl'):
@@ -1077,6 +1079,10 @@ def deploy(args):
                 call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
                       'exec', '-T', 'web', 'python', 'manage.py', 'migrate', '--noinput'],
                      cwd=BACKEND, timeout=300, env=_compose_env(state))
+            with phase('Docker · offre gratuite DevOps'):
+                call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
+                      'exec', '-T', 'web', 'python', 'manage.py', 'seed_project_offers'],
+                     cwd=BACKEND, timeout=90, env=_compose_env(state))
             with phase('Docker · collecte des staticfiles'):
                 call(['docker', 'compose', '-f', str(BACKEND/'docker-compose.autokom.yml'),
                       'exec', '-T', 'web', 'python', 'manage.py', 'collectstatic', '--noinput'],

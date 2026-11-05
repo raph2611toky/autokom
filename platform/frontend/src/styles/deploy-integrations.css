@@ -100,3 +100,7 @@
 .ak-gh-workspace .gh-repository > span strong { font-size:12px; font-weight:700; overflow-wrap:anywhere; }
 .ak-gh-workspace .gh-repository > span small { color:var(--ak-muted); font-size:10px; font-weight:400; }
 .ak-gh-workspace .gh-repository { align-items:center; }
+
+/* Installation GitHub : action lisible en thèmes sombre et clair. */
+.ak-gh-workspace .ak-gh-install-action { color: var(--ak-accent); background: var(--ak-accent-soft); border: 1px solid var(--ak-accent-border); padding: 11px 13px; margin-top: 9px; }
+.ak-gh-workspace .ak-gh-install-action:hover { color: var(--ak-accent-hover); border-color: var(--ak-accent); }

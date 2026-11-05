@@ -18,12 +18,14 @@ def check_configuration(cfg):
     buildpacks as deployable until the actual builder supports them.
     """
     issues = {}
-    if cfg.build_method != DeploymentConfig.BuildMethod.DOCKERFILE:
-        issues['build_method'] = (
-            'Le runner Jenkins actuel prend en charge uniquement Dockerfile. '
-            'AUTO, STATIC et BUILDPACKS sont disponibles en brouillon, pas au déploiement.')
-    if not cfg.dockerfile_path:
-        issues['dockerfile_path'] = 'Indiquer le chemin du Dockerfile.'
+    if cfg.build_method == DeploymentConfig.BuildMethod.STATIC:
+        if cfg.runtime_type != DeploymentConfig.RuntimeType.STATIC or cfg.output_directory != 'dist' or cfg.internal_port != 8080:
+            issues['static'] = 'Le mode statique approuvé requiert Vite, dist et le port 8080.'
+    elif cfg.build_method == DeploymentConfig.BuildMethod.DOCKERFILE:
+        if not cfg.dockerfile_path:
+            issues['dockerfile_path'] = 'Indiquer le chemin du Dockerfile.'
+    else:
+        issues['build_method'] = 'Buildpacks et AUTO ne sont pas encore exécutables par le runner.'
     if cfg.build_command or cfg.start_command:
         issues['commands'] = (
             'Commandes personnalisées non prises en charge par le runner Dockerfile isolé. '
@@ -76,6 +78,10 @@ def check_entitlement(cfg):
     if (entitlement is None or entitlement.status != 'ACTIVE' or
             (entitlement.expires_at and entitlement.expires_at <= timezone.now())):
         raise PermissionDenied('Aucun plan actif attribué à cet environnement.')
+    # Server-side product boundary: free includes only the trusted Vite STATIC recipe.
+    # A client must not gain a paid backend runtime by editing request JSON.
+    if not entitlement.resource_plan.is_premium and cfg.build_method != DeploymentConfig.BuildMethod.STATIC:
+        raise PermissionDenied('Offre gratuite limitée aux frontends statiques Vite. Applications serveur : offre adaptée requise.')
     if cfg.mode == 'DEVSECOPS' and entitlement.mode_offer.code != 'DEVSECOPS':
         raise PermissionDenied('Le mode DevSecOps nécessite une autorisation premium.')
     chosen = cfg.resource_plan or entitlement.resource_plan

@@ -91,8 +91,8 @@ def scan(doc,kind):
 def build(doc):
     path=source(doc)
     cfg=doc['build']
-    if cfg['method'] not in ('DOCKERFILE','AUTO','STATIC'):
-        fail('Buildpacks exigera un runtime adapté; seul Dockerfile/STATIC est activé sans registre.')
+    if cfg['method'] not in ('DOCKERFILE','STATIC'):
+        fail('Buildpacks et AUTO ne sont pas encore pris en charge.')
     if cfg.get('start_command') or cfg.get('build_command'):
         fail('Commande personnalisée non autorisée pour le runner Dockerfile actuel.')
     rid=doc['run_id']
@@ -103,17 +103,60 @@ def build(doc):
     dockerfile=cfg.get('dockerfile') or 'Dockerfile'
     if not isinstance(dockerfile,str) or dockerfile.startswith('/') or '\\' in dockerfile or '..' in dockerfile.split('/'):
         fail('Dockerfile non autorisé.')
-    file=(path/dockerfile).resolve()
-    if not file.is_relative_to(path) or not file.is_file():
-        fail('Dockerfile requis pour ce mode. Les sites statiques nécessitent une image de build approuvée.')
+    if cfg['method'] == 'DOCKERFILE':
+        file=(path/dockerfile).resolve()
+        if not file.is_relative_to(path) or not file.is_file():
+            fail('Dockerfile introuvable pour le build demandé.')
+    else:
+        if cfg.get('runtime') != 'STATIC' or cfg.get('output_directory') != 'dist' or cfg.get('port') != 8080:
+            fail('Configuration Vite statique invalide.')
+        package = path/'package.json'
+        lockfile = path/'package-lock.json'
+        if package.is_symlink() or lockfile.is_symlink() or not package.is_file() or not lockfile.is_file():
+            fail('Vite nécessite package.json et package-lock.json dans le dossier source.')
+        try:
+            if package.stat().st_size > 65536: fail('Manifeste npm trop volumineux.')
+            parsed = json.loads(package.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            fail('package.json non valide.')
+        deps = {**(parsed.get('dependencies') or {}), **(parsed.get('devDependencies') or {})}
+        if 'vite' not in deps or 'build' not in (parsed.get('scripts') or {}):
+            fail('Projet Vite avec script build requis pour ce build gratuit.')
+        # Base images are provisioned by BuildKit and should be digest-pinned in production.
+        # Only the trusted AUTOKOM recipe is executed, never an arbitrary user path.
+        recipe = (
+            'FROM node:22-alpine AS builder\n'
+            'WORKDIR /app\n'
+            'COPY package.json package-lock.json ./\n'
+            'RUN npm ci --ignore-scripts --no-audit --no-fund\n'
+            'COPY . .\n'
+            'RUN npm run build\n'
+            'RUN printf "%s\\n" "server {" "listen 8080;" "server_name _;" '
+            '"root /usr/share/nginx/html;" "index index.html;" '
+            '"location / { try_files \\$uri \\$uri/ /index.html; }" '
+            '"add_header X-Content-Type-Options nosniff always;" "}" > /tmp/autokom-nginx.conf\n'
+            'FROM nginxinc/nginx-unprivileged:1.29-alpine\n'
+            'COPY --from=builder /tmp/autokom-nginx.conf /etc/nginx/conf.d/default.conf\n'
+            'COPY --from=builder /app/dist/ /usr/share/nginx/html/\n'
+            'EXPOSE 8080\n'
+        )
     stage('build','RUNNING')
     with tempfile.NamedTemporaryFile(dir=artifact_dir,prefix='.building-',suffix='.tar',delete=False) as tmp:
         temp=Path(tmp.name)
     try:
-        execute(['buildctl','build','--frontend','dockerfile.v0',
-                 '--local','context='+str(path),'--local','dockerfile='+str(file.parent),
-                 '--opt','filename='+file.name,
-                 '--output','type=docker,name=autokom-local:'+rid+',dest='+str(temp)],timeout=1800)
+        if cfg['method'] == 'STATIC':
+            with tempfile.TemporaryDirectory(prefix='autokom-vite-dockerfile-') as trusted_dir:
+                trusted = Path(trusted_dir)/'Dockerfile'
+                trusted.write_text(recipe, encoding='utf-8')
+                execute(['buildctl','build','--frontend','dockerfile.v0',
+                         '--local','context='+str(path),'--local','dockerfile='+trusted_dir,
+                         '--opt','filename=Dockerfile',
+                         '--output','type=docker,name=autokom-local:'+rid+',dest='+str(temp)],timeout=1800)
+        else:
+            execute(['buildctl','build','--frontend','dockerfile.v0',
+                     '--local','context='+str(path),'--local','dockerfile='+str(file.parent),
+                     '--opt','filename='+file.name,
+                     '--output','type=docker,name=autokom-local:'+rid+',dest='+str(temp)],timeout=1800)
         if not 1024<=temp.stat().st_size<=8*1024**3:fail('Artefact Docker vide ou trop volumineux.')
         os.chmod(temp,0o640)
         os.rename(temp,dest)

@@ -3,7 +3,7 @@ import { ArrowRight, LoaderCircle } from 'lucide-react'
 import AuthFrame from '../components/AuthFrame.jsx'
 import { useAuth } from '../context/AuthContext.jsx'
 import { authApi } from '../services/authApi.js'
-import { consumeGitHubAccountCallback } from '../services/githubAuthFlow.js'
+import { consumeGitHubAccountCallback, GITHUB_FINISH_SETUP_KEY } from '../services/githubAuthFlow.js'
 
 const ERRORS = Object.freeze({
   denied: 'Vous avez annulé ou refusé l’autorisation GitHub.',
@@ -27,6 +27,7 @@ export default function GitHubAuthCallback({ navigate, theme, onToggleTheme }) {
     const callback = consumeGitHubAccountCallback(window.location.hash, window.sessionStorage)
     // Retirer immédiatement le ticket de l'URL (historique, captures et navigateur).
     window.history.replaceState(window.history.state, '', '/auth/github/callback')
+    if (!['ok', 'created'].includes(callback.status)) window.sessionStorage.removeItem(GITHUB_FINISH_SETUP_KEY)
     if (callback.status === 'linked') {
       setNotice('Compte GitHub associé. Vous pouvez désormais vous connecter à AUTOKOM avec GitHub.')
       setLinked(true)

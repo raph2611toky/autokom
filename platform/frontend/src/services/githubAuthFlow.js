@@ -2,6 +2,7 @@ import { authApi } from './authApi.js'
 
 // Secret temporaire du navigateur : ni JWT ni access token, supprimé après le callback.
 export const GITHUB_BROWSER_BINDING_KEY = 'autokom.github.browser_binding'
+export const GITHUB_FINISH_SETUP_KEY = 'autokom.github.complete-repos-after-signup'
 
 export function validatedGitHubAuthorizationUrl(raw) {
   const url = new URL(raw)
@@ -25,6 +26,7 @@ export async function startGitHubAccountAuth(intent, {
     throw new Error('Session de connexion GitHub incomplète.')
   }
   storage.setItem(GITHUB_BROWSER_BINDING_KEY, result.browser_binding)
+  if (intent === 'signup') storage.setItem(GITHUB_FINISH_SETUP_KEY, '1')
   redirect(href)
 }
 

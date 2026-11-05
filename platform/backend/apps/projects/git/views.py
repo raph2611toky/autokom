@@ -1,5 +1,7 @@
 """API GitHub App: chaque classe hérite directement d'APIView et n'a qu'une méthode HTTP."""
 import json
+import base64
+import binascii
 import logging
 from urllib.parse import urlencode, quote
 from django.conf import settings
@@ -200,7 +202,29 @@ class GitHubDirectoriesAPIView(APIView):
             directories = [{'name': item['name'], 'path': item['path'], 'type': 'dir'}
                            for item in items if item.get('type') == 'dir'
                            and isinstance(item.get('path'), str) and isinstance(item.get('name'), str)]
-            return api_success({'directories': directories, 'path': folder}, 'Dossiers GitHub autorisés.')
+            # Expose only file names and allowlisted package metadata, never source code or secrets.
+            files = [{'name': item['name'], 'type': 'file'} for item in items
+                     if item.get('type') == 'file' and isinstance(item.get('name'), str)]
+            package = None
+            if any(item['name'] == 'package.json' for item in files):
+                # GitHub contents endpoint; cap returned payload and avoid leaking raw file contents.
+                package_response = _request('GET', endpoint + '/package.json?ref=' + quote(branch, safe=''),
+                                            token=get_user_token(request.user))
+                if package_response.get('encoding') == 'base64' and len(package_response.get('content', '')) <= 90000:
+                    try:
+                        raw = base64.b64decode(package_response['content'], validate=False)
+                        if len(raw) <= 65536:
+                            doc = json.loads(raw)
+                            if isinstance(doc, dict) and all(isinstance(doc.get(key) or {}, dict) for key in ('dependencies','devDependencies','scripts')):
+                                package = {
+                                    'dependencies': {k: '*' for k in (doc.get('dependencies') or {}) if isinstance(k, str) and len(k) <= 100},
+                                    'devDependencies': {k: '*' for k in (doc.get('devDependencies') or {}) if isinstance(k, str) and len(k) <= 100},
+                                    'scripts': {k: 'configured' for k in (doc.get('scripts') or {}) if k in ('build', 'test', 'start')},
+                                }
+                    except (ValueError, TypeError, KeyError, binascii.Error):
+                        package = None
+            return api_success({'directories': directories, 'files': files, 'package': package,
+                                'path': folder}, 'Arborescence GitHub et métadonnées de build.')
         except Exception as exc:
             return handle_error(exc, 'github_directories')
 

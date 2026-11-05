@@ -4,7 +4,8 @@ import GitHubMark from './GitHubMark.jsx'
 import { GITHUB_AVAILABLE } from '../config/runtime.js'
 import { projectsApi, gitApi } from '../services/projectsApi.js'
 import { errorText } from '../services/projectWorkflow.js'
-import { startGitHubAccountAuth } from '../services/githubAuthFlow.js'
+import { startGitHubAccountAuth, GITHUB_FINISH_SETUP_KEY, validatedGitHubAuthorizationUrl } from '../services/githubAuthFlow.js'
+import { INSTALL_HANDOFF, verifiedInstallationUrl, selectAuthorizedInstallation } from '../services/githubInstallFlow.js'
 
 /** Même interface GitHub, données provenant exclusivement de Django/GitHub App. */
 export default function LiveGitHubConnector({ form, update, onNotice, onConnectionChange }) {
@@ -34,8 +35,37 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
       setConnected(Boolean(status?.connected) && status?.configured !== false)
       setInstallationUrl(status?.installation_url || '')
       setOrganizations(org?.organizations || [])
+      // After explicit GitHub signup, continue with repository permissions without
+      // requiring a second AUTOKOM button. GitHub itself must still receive consent.
+      if (!status?.connected && sessionStorage.getItem(GITHUB_FINISH_SETUP_KEY) === '1') {
+        sessionStorage.removeItem(GITHUB_FINISH_SETUP_KEY)
+        const grant = await gitApi.start()
+        window.location.assign(validatedGitHubAuthorizationUrl(grant.authorization_url))
+        return
+      }
+      if (status?.connected) sessionStorage.removeItem(GITHUB_FINISH_SETUP_KEY)
       if (!form.organizationId && org?.organizations?.[0]) update({ organizationId: org.organizations[0].id })
-      if (status?.connected) setInstallations((await gitApi.installations())?.installations || [])
+      if (status?.connected) {
+        const installed = (await gitApi.installations())?.installations || []
+        setInstallations(installed)
+        if (installed.length) sessionStorage.removeItem('autokom.github.install-started')
+        let previous = []
+        try {
+          const stored = sessionStorage.getItem(INSTALL_HANDOFF)
+          if (stored) { previous = JSON.parse(stored); sessionStorage.removeItem(INSTALL_HANDOFF) }
+        } catch { sessionStorage.removeItem(INSTALL_HANDOFF) }
+        const hinted = new URLSearchParams(window.location.search).get('installation_id') || ''
+        const chosen = selectAuthorizedInstallation(installed, previous, hinted)
+        if (!form.githubInstallationId && chosen) update({ githubInstallationId: chosen })
+        // After OAuth, continue the setup flow automatically if there is no installation.
+        // GitHub still requires the user to approve its installation UI.
+        if (!installed.length && status.installation_url &&
+            sessionStorage.getItem('autokom.github.install-started') !== '1') {
+          sessionStorage.setItem('autokom.github.install-started', '1')
+          sessionStorage.setItem(INSTALL_HANDOFF, JSON.stringify([]))
+          window.location.assign(verifiedInstallationUrl(status.installation_url))
+        }
+      }
     }).catch(err => {
       if (alive) {
         if (err?.status === 401 || err?.status === 409) setConnected(false)
@@ -100,6 +130,12 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
     } catch (err) { setError(errorText(err)) }
     finally { setBusy(false) }
   }
+  function configureInstallation() {
+    try {
+      sessionStorage.setItem(INSTALL_HANDOFF, JSON.stringify(installations.map(item => String(item.id))))
+      window.location.assign(verifiedInstallationUrl(installationUrl))
+    } catch (err) { setError(errorText(err)) }
+  }
   function chooseRepo(repo) {
     setChosenRepo(repo)
     setBrowsePath('')
@@ -131,11 +167,14 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
       {organizations.length > 1 && <label className="field"><span>Organisation AUTOKOM</span><select value={form.organizationId || ''} onChange={event => update({ organizationId: event.target.value })}>
         <option value="">Sélectionner…</option>{organizations.map(org => <option value={org.id} key={org.id}>{org.name}</option>)}
       </select></label>}
-      <label className="field"><span>Installation GitHub</span><select value={form.githubInstallationId || ''} onChange={event => {
+      {installations.length > 1 ? <label className="field"><span>Compte GitHub autorisé</span><select value={form.githubInstallationId || ''} onChange={event => {
         update({ githubInstallationId: event.target.value, githubRepositoryId: '', branch: '', repositorySlug: '', workdir: './' }); setChosenRepo(null)
-      }}><option value="">Choisir l'installation…</option>{installations.map(item => <option key={item.id} value={item.id}>{item.account}</option>)}</select></label>
-      {!installations.length && <p className="ak-simulation-disclosure">Aucune installation GitHub App autorisée sur tes dépôts.</p>}
-      {installationUrl && <a className="gh-subtle-button" href={installationUrl} target="_blank" rel="noopener noreferrer">Configurer l'installation GitHub</a>}
+      }}><option value="">Choisir le compte…</option>{installations.map(item => <option key={item.id} value={item.id}>{item.account}</option>)}</select></label>
+        : installations.length === 1 ? <p className="ak-simulation-disclosure" role="status">Compte GitHub sélectionné automatiquement : {installations[0].account}</p> :
+          <p className="ak-simulation-disclosure">Aucun dépôt autorisé pour ce compte. GitHub demande votre accord avant l’installation.</p>}
+      {installationUrl && <button className="gh-subtle-button ak-gh-install-action" type="button" onClick={configureInstallation}>
+        {installations.length ? 'Gérer les dépôts autorisés' : 'Autoriser des dépôts GitHub'}
+      </button>}
       {!!form.githubInstallationId && <div className="gh-repo-browser">
         <label className="gh-search"><Search size={17}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Rechercher un dépôt…" aria-label="Rechercher un dépôt"/></label>
         <div className="gh-repositories" role="group" aria-label="Dépôts GitHub autorisés">
@@ -149,7 +188,7 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
           {branches.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}
         </select></label>
         <div className="ak-gh-folders">
-          <div className="ak-gh-folders-head"><strong>Emplacement du code source</strong><span>{form.workdir === './' ? 'Racine' : form.workdir}</span></div>
+          <div className="ak-gh-folders-head"><strong>Dossier du projet (sources, package.json ou Dockerfile) — pas dist/build</strong><span>{form.workdir === './' ? 'Racine' : form.workdir}</span></div>
           <div className="ak-gh-breadcrumb"><button type="button" onClick={() => setBrowsePath('')}>Racine</button>{browsePath.split('/').filter(Boolean).map((part, idx, arr) => <span key={idx}><ChevronRight size={13}/><button type="button" onClick={() => setBrowsePath(arr.slice(0, idx+1).join('/'))}>{part}</button></span>)}</div>
           <div className="ak-gh-folder-list">{directories.map(item => <button key={item.path} type="button" onClick={() => setBrowsePath(item.path)}><Folder size={17}/>{item.name}<ChevronRight size={15}/></button>)}{!directories.length && <small>Aucun sous-dossier à ce niveau.</small>}</div>
           <button type="button" className="button-outline ak-gh-use-folder" onClick={() => { update({ workdir: browsePath || './' }); onNotice?.({ type: 'success', text: `Dossier source : ${browsePath || 'racine'}` }) }}><Check size={15}/> Choisir {browsePath || 'la racine'}</button>

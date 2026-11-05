@@ -20,17 +20,24 @@ export function toBackendConfiguration(form) {
   const path = selectedDirectory === './' ? '' : selectedDirectory.replace(/^\.\//, '').replace(/\/$/, '')
   if (path.startsWith('/') || path.split('/').includes('..') || path.includes('\\')) throw new Error('Dossier source Git invalide.')
   // AUTO demeure disponible en brouillon ; le runner actuel exige DOCKERFILE pour finaliser.
+  const viteStatic = form.detectedKind === 'static' && form.detectedVite === true &&
+    ['React', 'Vue', 'Svelte'].includes(form.detectedFramework) && (!form.pricingPlan || form.pricingPlan === 'free')
+  if (form.detectedKind === 'service' && form.pricingPlan === 'free') throw new Error('Les applications backend (Next.js SSR, Django, Flask, Node, Java, PHP/Laravel) nécessitent une offre serveur. L’offre gratuite est réservée aux frontends Vite.')
+  if (viteStatic && form.hasNpmLockfile === false) throw new Error('package-lock.json est requis pour construire ce projet Vite automatiquement. Ajoutez le lockfile dans le dossier source GitHub.')
+  if (form.detectedKind && !viteStatic && !form.hasDockerfile) {
+    throw new Error('Ce framework nécessite un Dockerfile ou une offre backend adaptée. La version gratuite automatique couvre actuellement React/Vue/Svelte avec Vite.')
+  }
   const dockerfile = String(advanced.dockerfile || 'Dockerfile').trim()
-  const portValue = Number(advanced.appPort || 8000)
+  const portValue = viteStatic ? 8080 : Number(advanced.appPort || 8000)
   if (!Number.isSafeInteger(portValue) || portValue < 1 || portValue > 65535) throw new Error('Port interne invalide.')
   const mode = (form.pipelineMode || 'devops').toUpperCase()
   if (!['DEVOPS', 'DEVSECOPS'].includes(mode)) throw new Error('Mode de pipeline invalide.')
   return {
     mode, branch: form.branch, root_directory: path,
-    build_method: 'DOCKERFILE', dockerfile_path: dockerfile, runtime_type: 'OTHER',
-    build_command: String(advanced.buildCommand || ''),
-    start_command: String(advanced.startCommand || ''),
-    output_directory: String(advanced.outputDir || ''),
+    build_method: viteStatic ? 'STATIC' : 'DOCKERFILE', dockerfile_path: dockerfile, runtime_type: viteStatic ? 'STATIC' : 'OTHER',
+    build_command: viteStatic ? '' : String(advanced.buildCommand || ''),
+    start_command: viteStatic ? '' : String(advanced.startCommand || ''),
+    output_directory: viteStatic ? 'dist' : String(advanced.outputDir || ''),
     internal_port: portValue,
     auto_deploy: Boolean(form.autoDeploy), auto_deploy_branch: form.autoDeploy ? form.branch : '',
   }

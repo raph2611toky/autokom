@@ -6,7 +6,7 @@ from apps.plans.catalog.models import DeploymentModeOffer, ResourcePlan
 
 
 class Command(BaseCommand):
-    help = 'Crée les offres de référence DevOps/DevSecOps et un plan gratuit de démonstration, sans écraser le catalogue.'
+    help = 'Crée les offres de référence DevOps/DevSecOps et un plan Découverte gratuit à quotas limités, sans écraser le catalogue.'
 
     def handle(self, *args, **options):
         devops, _ = DeploymentModeOffer.objects.get_or_create(code='DEVOPS', defaults={
@@ -19,7 +19,7 @@ class Command(BaseCommand):
         })
         if not ResourcePlan.objects.filter(is_default=True, is_active=True, is_premium=False).exists():
             ResourcePlan.objects.get_or_create(code='starter', defaults={
-                'name': 'Starter', 'description': 'Profil gratuit de démarrage, à ajuster par l’administrateur.',
+                'name': 'Découverte', 'description': 'Hébergement statique Vite gratuit à quotas limités (250 mCPU, 512 Mo RAM, 1 Go stockage).',
                 'cpu_millicores': 250, 'memory_mb': 512, 'storage_mb': 1024,
                 'max_instances': 1, 'is_premium': False,
                 'is_default': True, 'is_active': True,
