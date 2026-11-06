@@ -108,14 +108,29 @@ def dispatch_one(client):
         run.save(update_fields=['status','started_at'])
     # Fail closed if dispatch outcome is unknown: no duplicate build on retry.
     try:
+        # Every hosted project reserves an AUTOKOM-managed domain. Refuse a
+        # Jenkins build *before* consuming CI minutes when DNS credentials
+        # are missing. The privileged broker validates the root-only config.
+        from apps.deployments.runs.autokom_socket import request_control
+        request_control('domain.config.check', timeout=10)
         external_id = client.dispatch(run)
         DeploymentRun.objects.filter(pk=run.pk, status='RUNNING').update(external_run_id=external_id)
         add_log(run, 'AUTOKOM_LOG: Exécution Jenkins mise en file ; aucun jeton GitHub transmis.')
     except Exception as exc:
-        logger.warning('Dispatch failed for run %s: %s', run.pk, type(exc).__name__)
+        code = getattr(exc, 'safe_code', '')
+        is_cf = code in {'AUTOKOM_DOMAIN_CLOUDFLARE_CONFIG_MISSING','AUTOKOM_CF_SECRETS_PERMISSIONS',
+                         'AUTOKOM_CF_SECRETS_INVALID','AUTOKOM_DOMAIN_SUFFIX_MISSING',
+                         'AUTOKOM_INGRESS_IPV4_MISSING','AUTOKOM_CF_ZONE_MISMATCH'}
+        logger.warning('Dispatch blocked for run %s: %s code=%s', run.pk, type(exc).__name__,
+                       code if is_cf else 'AUTOKOM_DISPATCH_BLOCKED')
         DeploymentRun.objects.filter(pk=run.pk).update(status='BLOCKED', finished_at=timezone.now(),
-              error_message='Dispatch Jenkins indisponible ou résultat incertain. Vérifier le job avant de retenter.')
-        add_log(run, 'AUTOKOM_LOG: Dispatch impossible ; vérifier Jenkins (aucune relance automatique).', level='ERROR')
+              error_message=('AUTOKOM_DOMAIN_PREFLIGHT_BLOCKED '+code if is_cf else
+                             'Dispatch Jenkins indisponible ou résultat incertain. Vérifier le job avant de retenter.'))
+        if is_cf:
+            add_log(run, 'AUTOKOM_LOG: Publication bloquée avant Jenkins : '+code+
+                    ' · administrateur : autokom dns cloudflare env setup.', level='ERROR')
+        else:
+            add_log(run, 'AUTOKOM_LOG: Dispatch impossible ; vérifier Jenkins (aucune relance automatique).', level='ERROR')
     return True
 
 

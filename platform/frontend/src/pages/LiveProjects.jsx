@@ -6,7 +6,6 @@ import { errorText, listRemoteProjectRecords, getRemoteProjectDetail } from '../
 import { publicationLabel } from '../services/deploymentPresentation.js'
 import { sortRecentRuns, isPublishing, canPublish } from '../services/deploymentHistory.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
-import { publicSiteUrl, siteStateLabel } from '../services/sitePresentation.js'
 
 function formatDate(value) {
   if (!value) return 'Non renseignée'
@@ -165,7 +164,6 @@ export default function LiveProjects({ navigate, projectId = null }) {
       {loading ? <div className="ak-workspace-empty" role="status"><LoaderCircle size={19} className="ak-spin"/> Chargement des projets…</div> : visible.length ? <div className="ak-project-list">{visible.map(project => <div className="ak-project-row" key={project.id}>
         <div className="ak-project-row-symbol"><FolderKanban size={21}/></div>
         <button type="button" className="ak-project-row-main" onClick={() => navigate(`/projects/${project.id}`)}><strong>{project.name}</strong><small><GitBranch size={13}/>{project.repository} · {project.branch}</small></button>
-        <div className="ak-project-row-public">{publicSiteUrl(project.publicSite) ? <a href={publicSiteUrl(project.publicSite)} target="_blank" rel="noopener noreferrer">{project.publicSite.hostname} ↗</a> : <span>{project.publicSite?.hostname || 'Pas de domaine'} · {siteStateLabel(project.publicSite)}</span>}</div>
         <span className={`ak-project-state ak-project-state--${project.status === 'ARCHIVED' ? 'archived' : 'active'}`} role="status">{project.status === 'ARCHIVED' ? 'Archivé' : 'Actif'}</span>
         <button type="button" className="ak-project-settings-icon" onClick={() => navigate(`/projects/${project.id}/settings`)} title={`Paramètres de ${project.name}`} aria-label={`Paramètres de ${project.name}`}><Settings2 size={18}/></button>
       </div>)}</div> : <div className="ak-workspace-empty"><FolderKanban size={29}/><h2>{error ? 'Chargement impossible' : projects.length ? 'Aucun résultat' : 'Aucun projet pour le moment'}</h2><p>{error ? 'Vérifiez votre session et l’API.' : projects.length ? 'Essayez une autre recherche ou un autre filtre.' : 'Créez votre premier projet pour le retrouver ici.'}</p>{!projects.length && !error && <button className="button-primary" type="button" onClick={() => navigate('/deploy')}>Créer un projet <ArrowRight size={16}/></button>}</div>}

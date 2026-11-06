@@ -23,3 +23,12 @@ test('adresse publique uniquement confirmée via HTTPS',()=>{
   const domains=read('../src/pages/LiveSites.jsx')
   assert.ok(domains.includes('activation_error_code'))
 })
+test('Mes projets garde une seule ligne : statut à droite suivi des paramètres',()=>{
+  const projects=read('../src/pages/LiveProjects.jsx')
+  const styles=read('../src/styles/sites.css')
+  assert.ok(!projects.includes('ak-project-row-public'))
+  const row=projects.slice(projects.indexOf('ak-project-row" key='),projects.indexOf('</div>)}</div>'))
+  assert.ok(row.indexOf('ak-project-state--') < row.indexOf('ak-project-settings-icon'))
+  assert.ok(styles.includes('/* Project inventory: exactly one grid row'))
+  assert.ok(styles.includes('.ak-project-list .ak-project-row .ak-project-state'))
+})

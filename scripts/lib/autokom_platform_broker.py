@@ -38,6 +38,7 @@ IMAGES = Path('/var/lib/autokom/build-artifacts')
 PROXY = Path('/etc/nginx/sites-available')
 ENABLED = Path('/etc/nginx/sites-enabled')
 WEBROOT = Path('/var/lib/autokom/acme')
+CLOUDFLARE_CONFIG = Path('/etc/autokom/secrets/cloudflare-dns.env')
 UUID = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
 HOSTNAME = re.compile(r'^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
 KEY = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,127}$')
@@ -453,20 +454,61 @@ def _check_dns(host,token,managed):
         raise BrokerError('A record DNS ne pointe pas vers l’ingress AUTOKOM.')
     return {'verified':True,'ipv4':ingress}
 
+def _cloudflare_settings():
+    """Resolve the root-only DNS configuration for *each* request.
+
+    This also picks up a completed `autokom dns cloudflare env setup` without
+    waiting for an unrelated platform rebuild or systemd environment reload.
+    Never log, return, or expose the API token through the broker socket.
+    """
+    conf = {}
+    path = CLOUDFLARE_CONFIG
+    if path.is_symlink():
+        raise BrokerError('AUTOKOM_CF_SECRETS_PERMISSIONS: Lien symbolique interdit.')
+    if path.exists():
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or (stat.S_IMODE(info.st_mode) & 0o077):
+            raise BrokerError('AUTOKOM_CF_SECRETS_PERMISSIONS: Configuration DNS attendue root:0600.')
+        from autokom_env_manager import read_env
+        try:
+            conf = read_env(path)
+        except Exception as exc:
+            raise BrokerError('AUTOKOM_CF_SECRETS_INVALID: Configuration DNS illisible.') from exc
+        # A configured file is authoritative: do not silently mix its token
+        # with another Cloudflare account left in a process environment.
+        zone = conf.get('CLOUDFLARE_ZONE_ID','').strip().lower()
+        token = conf.get('CLOUDFLARE_API_TOKEN','').strip()
+        zone_name = conf.get('CLOUDFLARE_ZONE_NAME','').strip('.').lower()
+    else:
+        zone = (os.environ.get('CLOUDFLARE_ZONE_ID') or os.environ.get('AUTOKOM_CLOUDFLARE_ZONE_ID') or '').strip().lower()
+        token = (os.environ.get('CLOUDFLARE_API_TOKEN') or os.environ.get('AUTOKOM_CLOUDFLARE_TOKEN') or '').strip()
+        zone_name = os.environ.get('CLOUDFLARE_ZONE_NAME','').strip('.').lower()
+    suffix = os.environ.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX','').strip('.').lower()
+    address = os.environ.get('AUTOKOM_INGRESS_IPV4','').strip()
+    if not suffix or not HOSTNAME.fullmatch('probe.'+suffix):
+        raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISSING: Suffixe des sites AUTOKOM absent.')
+    if not re.fullmatch(r'[a-f0-9]{32}',zone) or not token:
+        raise BrokerError('AUTOKOM_DOMAIN_CLOUDFLARE_CONFIG_MISSING: Configurer sudo autokom dns cloudflare env setup.')
+    if zone_name and not (suffix==zone_name or suffix.endswith('.'+zone_name)):
+        raise BrokerError('AUTOKOM_CF_ZONE_MISMATCH: Zone Cloudflare incompatible avec le domaine géré.')
+    try:
+        ip = ipaddress.IPv4Address(address)
+        if not ip.is_global:
+            raise ValueError('Adresse non publique')
+    except ValueError as exc:
+        raise BrokerError('AUTOKOM_INGRESS_IPV4_MISSING: IP publique ingress absente ou invalide.') from exc
+    return {'zone':zone,'token':token,'zone_name':zone_name,'suffix':suffix,'address':address}
+
+
 def _cloudflare_record(host):
-    suffix=os.environ.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX','').strip('.').lower()
-    zone=(os.environ.get('CLOUDFLARE_ZONE_ID') or os.environ.get('AUTOKOM_CLOUDFLARE_ZONE_ID',''))
-    token=(os.environ.get('CLOUDFLARE_API_TOKEN') or os.environ.get('AUTOKOM_CLOUDFLARE_TOKEN',''))
-    if not suffix or not host.endswith('.'+suffix) or not re.fullmatch(r'[a-f0-9]{32}',zone) or not token:
-        raise BrokerError('AUTOKOM_DOMAIN_CLOUDFLARE_CONFIG_MISSING: Accès Cloudflare ou zone gérée non configurés.')
-    ingress=os.environ.get('AUTOKOM_INGRESS_IPV4','')
-    try:ipaddress.IPv4Address(ingress)
-    except ValueError:raise BrokerError('AUTOKOM_INGRESS_IPV4_MISSING: IP ingress non configurée.')
+    settings = _cloudflare_settings()
+    suffix,zone,token = settings['suffix'],settings['zone'],settings['token']
+    if not host.endswith('.'+suffix):
+        raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH: Domaine extérieur à la zone gérée.')
+    ingress = settings['address']
     base='https://api.cloudflare.com/client/v4/zones/'+zone+'/dns_records'
     headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'}
-    # A managed subdomain must belong to the configured Cloudflare zone.
-    # In particular, never edit a different Cloudflare account/zone by mistake.
-    zone_name=os.environ.get('CLOUDFLARE_ZONE_NAME','').strip('.').lower()
+    zone_name=settings['zone_name']
     if zone_name and (host==zone_name or not host.endswith('.'+zone_name)):
         raise BrokerError('AUTOKOM_CF_ZONE_MISMATCH: Domaine hors de la zone Cloudflare configurée.')
     def cloudflare(request):
@@ -737,6 +779,9 @@ def handle(action,params):
         lines=[line[:500] for line in raw.splitlines()[-n:]
                if not re.search(r'(?i)password|secret|token|authorization|api[_-]?key|gh[us]_|xsmtpsib-',line)]
         return {'logs':lines}
+    if action=='domain.config.check':
+        _cloudflare_settings()  # no external request and never disclose secrets
+        return {'ready':True}
     if action=='domain.inspect':return _domain_inspect(params)
     if action=='domain.verify':
         return _check_dns(params.get('hostname'),params.get('token'),params.get('managed') is True)

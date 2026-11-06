@@ -219,3 +219,22 @@
 .ak-domain-diagnostic{color:var(--ak-warning);font-size:12px;overflow-wrap:anywhere}
 @media(max-width:800px){.ak-project-row{grid-template-columns:40px minmax(0,1fr) auto 38px}.ak-project-row .ak-project-row-public{grid-column:2 / -1;grid-row:2}.ak-project-row .ak-project-state{grid-column:3;grid-row:1}.ak-project-row .ak-project-settings-icon{grid-column:4;grid-row:1}}
 @media(max-width:520px){.ak-project-row{grid-template-columns:34px minmax(0,1fr) auto 30px}.ak-project-settings-icon{width:30px;height:32px}.ak-danger-zone-content{padding:18px}}
+
+/* Project inventory: exactly one grid row, even when DNS is pending.
+   The public hostname and diagnostics belong to the project detail instead. */
+.ak-project-list .ak-project-row {
+  grid-template-columns:45px minmax(0,1fr) auto 40px;
+  grid-template-rows:1fr;
+  align-items:center;
+  min-height:78px;
+  column-gap:14px;
+}
+.ak-project-list .ak-project-row-main {grid-column:2;grid-row:1;overflow:hidden}
+.ak-project-list .ak-project-row-main strong {overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ak-project-list .ak-project-row-main small {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.ak-project-list .ak-project-row .ak-project-state {grid-column:3;grid-row:1;justify-self:end}
+.ak-project-list .ak-project-row .ak-project-settings-icon {grid-column:4;grid-row:1;justify-self:end}
+@media(max-width:520px){
+  .ak-project-list .ak-project-row {grid-template-columns:34px minmax(0,1fr) auto 32px;gap:8px;min-height:66px}
+  .ak-project-list .ak-project-row .ak-project-state {font-size:10px;padding:5px 6px}
+}

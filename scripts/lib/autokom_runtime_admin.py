@@ -411,6 +411,16 @@ except (OSError,ValueError,KeyError,TypeError):
     except IngressError as exc:
         raise SetupError(str(exc)) from exc
     print('  ✓ Ingress privé : '+str(ingress_report['ingresses_checked'])+' publication(s) inspectée(s).')
+    from autokom_platform_broker import _cloudflare_settings, BrokerError
+    try:
+        _cloudflare_settings()
+        print('  ✓ Cloudflare DNS : configuration privée vérifiée (jeton non affiché).')
+    except BrokerError as exc:
+        code = str(exc).split(':',1)[0]
+        print('  ! Cloudflare DNS / HTTPS automatique indisponible : '+code)
+        print('  › Vérifier : sudo autokom dns cloudflare env show')
+        print('  › Configurer une seule fois : sudo autokom dns cloudflare env setup')
+        print('  › Vérifier le suffixe et l’IPv4 : sudo autokom runtime env show')
     if failures:
         raise SetupError('Un ou plusieurs services ne sont pas actifs.')
     return 0
