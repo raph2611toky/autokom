@@ -133,14 +133,17 @@ def smoke_test(*, timeout=240, workspace_base=None):
     # Each run has a distinct cache key; a previously cached RUN must NOT
     # hide a broken procfs namespace after a host security policy changes.
     nonce = secrets.token_hex(12)
+    phase = 'creation_workspace'
     try:
         with tempfile.TemporaryDirectory(prefix='.autokom-proc-smoke-', dir=base) as temporary:
             directory = Path(temporary)
+            phase = 'droits_workspace'
             os.chown(directory, builder.pw_uid, builder.pw_gid)
             os.chmod(directory, 0o700)
             recipe = (b'FROM docker.io/library/busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662\n'
                       + b'ARG AUTOKOM_SMOKE=' + nonce.encode('ascii') + b'\n'
                       + b'RUN true && test -n "$AUTOKOM_SMOKE"\n')
+            phase = 'ecriture_dockerfile'
             dockerfile = directory / 'Dockerfile'
             dockerfile.write_bytes(recipe)
             os.chmod(dockerfile, 0o644)
@@ -150,13 +153,22 @@ def smoke_test(*, timeout=240, workspace_base=None):
                    '--local', 'context=' + str(directory),
                    '--local', 'dockerfile=' + str(directory),
                    '--progress=plain']
+            phase = 'execution_buildctl'
             completed = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                                        check=False, env={'PATH': '/usr/local/bin:/usr/bin:/bin',
                                                          'LANG': 'C.UTF-8'})
     except subprocess.TimeoutExpired as exc:
         raise BuildkitError('Test RUN BuildKit expiré : vérifier réseau, mémoire et journal systemd.') from exc
     except OSError as exc:
-        raise BuildkitError('Test RUN BuildKit non exécutable par le compte Jenkins.') from exc
+        # The system error was previously reduced to a misleading generic message.
+        # Only report the bounded operation name and errno, never the raw exception
+        # (which may contain private host paths or command arguments).
+        import errno as errno_module
+        reason = errno_module.errorcode.get(exc.errno, 'INCONNU')
+        raise BuildkitError(
+            'OCI_OS_ERROR: opération=' + phase + ', errno=' + reason +
+            '. Examiner les permissions du workspace, le service BuildKit et le compte builder.'
+        ) from exc
     if completed.returncode:
         # The fixed probe never includes customer sources or secrets; nonetheless,
         # publish only the bounded error category, not raw OCI traces, to the CLI.

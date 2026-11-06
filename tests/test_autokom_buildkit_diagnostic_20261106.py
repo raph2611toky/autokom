@@ -30,6 +30,26 @@ class ProbeErrorTests(unittest.TestCase):
         self.assertIn('ansible.builtin.fail', role)
         self.assertIn('when: not ansible_check_mode', role)
 
+    def test_os_errors_remain_actionable_without_host_paths(self):
+        import errno
+        import os
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as location:
+            workspace = Path(location)
+            # Path is controlled by test; root-only workspace is mocked.
+            with patch.object(admin, 'BASE', workspace), \
+                 patch.object(admin, 'SOCKET', workspace/'unused.sock'), \
+                 patch('pwd.getpwnam', return_value=SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())):
+                (workspace/'buildctl').touch()
+                with patch('tempfile.TemporaryDirectory', side_effect=PermissionError(errno.EACCES, 'secret-private-path')):
+                    with self.assertRaises(admin.BuildkitError) as cm:
+                        admin.smoke_test(workspace_base=workspace)
+                    self.assertIn('OCI_OS_ERROR', str(cm.exception))
+                    self.assertIn('creation_workspace', str(cm.exception))
+                    self.assertIn('EACCES', str(cm.exception))
+                    self.assertNotIn('secret-private-path', str(cm.exception))
+
     def test_no_automatic_privilege_bypass(self):
         code=(ROOT/'scripts/lib/autokom_buildkit_admin.py').read_text()
         unit=(ROOT/'scripts/systemd/autokom-buildkit.service').read_text()

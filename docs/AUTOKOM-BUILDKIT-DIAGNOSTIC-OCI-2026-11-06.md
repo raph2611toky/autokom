@@ -14,3 +14,14 @@ Push the complete changed files to GitHub from Kali, then `sudo autokom update` 
 
 ## Preserve integration
 Django -> UNIX broker -> Jenkins -> isolated agent -> private BuildKit socket stays unchanged. After the real smoke succeeds, run `sudo autokom runtime doctor` and only then a new customer deployment.
+
+## Distribution ZIP à plat (6 novembre 2026)
+Cette distribution contient directement les chemins `scripts/`, `ansible/`, `tests/`, `docs/`.
+Depuis la racine du dépôt, après vérification de `git status --short` :
+`unzip -o /home/raph/Downloads/AUTOKOM-BUILDKIT-DIAGNOSTIC-DIRECT-2026-11-06.zip`
+Le ZIP remplace les fichiers complets, sans patch ni installateur.
+La commande doit être exécutée uniquement dans le dépôt Git propre; `-o` écrase les fichiers énumérés.
+
+La nouvelle catégorie `OCI_OS_ERROR` précise l'opération et le code errno lorsque le test
+OCI échoue avant que `buildctl` ne renvoie une sortie. Aucune restriction systemd n'est assouplie.
+Si le test révèle un refus, rechercher sa cause et corriger ensuite le rôle Ansible approprié.
