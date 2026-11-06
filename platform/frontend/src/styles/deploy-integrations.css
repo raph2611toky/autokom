@@ -147,3 +147,41 @@
 .ak-deployment-messages summary { cursor:pointer; font-weight:700; }
 .ak-deployment-messages ol { margin:15px 0 0; padding-left:20px; display:grid; gap:10px; color:var(--ak-muted); overflow-wrap:anywhere; }
 @media(max-width:650px) { .ak-deployment-summary { gap:10px; } .ak-deployment-toggle { width:100%; } .ak-publication-step { grid-template-columns:18px minmax(0,1fr) auto; gap:7px; } }
+
+/* AUTOKOM · Mes projets : priorité aux publications, détails consultables sans surcharge. */
+.ak-project-hero-actions { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:12px; }
+.ak-project-runs-first { margin-bottom:24px; }
+.ak-section-subtitle { font-size:12px; line-height:1.6; color:var(--ak-muted); margin:6px 0 0; }
+.ak-run-all-link { display:flex; justify-content:flex-end; margin-top:20px; }
+.ak-project-config-fold > summary { cursor:pointer; list-style:none; }
+.ak-project-config-fold > summary::-webkit-details-marker { display:none; }
+.ak-project-config-fold .ak-project-config-summary { border-bottom:0; padding-bottom:0; }
+.ak-project-config-fold[open] .ak-project-config-summary { border-bottom:1px solid var(--ak-border); padding-bottom:17px; }
+.ak-project-config-suffix { display:flex; align-items:center; gap:12px; color:var(--ak-muted); }
+.ak-project-config-suffix svg { transition:transform .2s ease; }
+.ak-project-config-fold[open] .ak-project-config-suffix svg { transform:rotate(180deg); }
+.ak-project-config-fold > summary:focus-visible { outline:2px solid var(--ak-focus); outline-offset:4px; }
+.ak-page-kicker { font-size:11px !important; letter-spacing:.08em; font-weight:700; text-transform:uppercase; color:var(--ak-accent) !important; }
+.ak-run-detail-sheet { margin-bottom:24px; }
+.ak-run-detail-sheet .ak-workspace-sheet-heading { align-items:flex-start; }
+.ak-run-updating { color:var(--ak-warning); font-size:12px; display:inline-flex; align-items:center; gap:7px; }
+.ak-muted-icon { color:var(--ak-muted); }
+.ak-run-detail-timeline { list-style:none; margin:20px 0 0; padding:0; display:grid; }
+.ak-run-detail-stage { display:grid; grid-template-columns:38px minmax(0,1fr) auto; align-items:center; gap:13px; padding:15px 0; border-bottom:1px solid var(--ak-border); }
+.ak-run-detail-stage:last-child { border-bottom:0; }
+.ak-run-detail-marker { width:35px; height:35px; display:grid; place-items:center; border:1px solid var(--ak-border); color:var(--ak-muted); background:var(--ak-surface-2); }
+.ak-run-detail-stage.state-success .ak-run-detail-marker,.ak-run-detail-stage.state-success .ak-run-detail-state { color:var(--ak-success); }
+.ak-run-detail-stage.state-running .ak-run-detail-marker,.ak-run-detail-stage.state-running .ak-run-detail-state,.ak-run-detail-stage.state-waiting .ak-run-detail-marker,.ak-run-detail-stage.state-waiting .ak-run-detail-state { color:var(--ak-warning); }
+.ak-run-detail-stage.state-danger .ak-run-detail-marker,.ak-run-detail-stage.state-danger .ak-run-detail-state { color:var(--ak-danger); }
+.ak-run-detail-stage-main { display:grid; gap:5px; min-width:0; }
+.ak-run-detail-stage-main strong { font-size:13px; overflow-wrap:anywhere; }
+.ak-run-detail-stage-main small { font-size:11px; color:var(--ak-muted); }
+.ak-run-detail-state { font-size:11px; font-weight:700; text-align:right; }
+.ak-run-log-list { list-style:none; margin:15px 0 0; padding:0; display:grid; gap:0; }
+.ak-run-log-list li { display:grid; grid-template-columns:145px minmax(0,1fr); align-items:start; gap:16px; padding:12px 0; border-bottom:1px solid var(--ak-border); font-size:12px; line-height:1.65; }
+.ak-run-log-list time { color:var(--ak-muted); }
+.ak-run-log-list span { overflow-wrap:anywhere; white-space:pre-wrap; }
+.ak-run-loadmore { margin-top:18px; }
+.ak-run-pager { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:18px; margin-top:23px; font-size:12px; color:var(--ak-muted); }
+@media(max-width:700px) { .ak-project-hero-actions{justify-content:flex-start;} .ak-run-log-list li{grid-template-columns:1fr;gap:3px;} .ak-run-detail-stage{grid-template-columns:32px minmax(0,1fr) auto;gap:8px;} .ak-run-detail-marker{width:30px;height:30px;} }
+@media(prefers-reduced-motion:reduce){ .ak-project-config-suffix svg{transition:none} }

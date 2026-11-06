@@ -10,6 +10,7 @@ import GitHubAuthCallback from './pages/GitHubAuthCallback.jsx'
 import Deploy from './pages/Deploy.jsx'
 import Sites from './pages/Sites.jsx'
 import Projects from './pages/Projects.jsx'
+import LiveRuns from './pages/LiveRuns.jsx'
 import Pricing from './pages/Pricing.jsx'
 import { API_AVAILABLE } from './config/runtime.js'
 import { useAuth } from './context/AuthContext.jsx'
@@ -17,7 +18,7 @@ import { useAuth } from './context/AuthContext.jsx'
 const ROUTES = ['/', '/login', '/register', '/deploy', '/sites', '/projects', '/pricing', '/verify-email', '/forgot-password', '/reset-password', '/integrations/github', '/auth/github/callback']
 
 function validRoute(path) {
-  return ROUTES.includes(path) || /^\/(?:sites|projects)\/[^/]+$/.test(path)
+  return ROUTES.includes(path) || /^\/(?:sites|projects)\/[^/]+$/.test(path) || /^\/projects\/[^/]+\/(?:history|deployments\/[^/]+)$/.test(path)
 }
 
 function projectFromPath(path) {
@@ -82,6 +83,11 @@ export default function App() {
 
   if (API_AVAILABLE && /^\/(?:deploy|projects|sites)(?:\/|$)/.test(route) && status !== 'authenticated') {
     return <div className="app-shell"><main className="container workspace" role="status">Vérification de votre session…</main></div>
+  }
+
+  if (API_AVAILABLE && /^\/projects\/[^/]+\/(?:history|deployments\/[^/]+)$/.test(route)) {
+    const segments = route.split('/')
+    return <div className="app-shell"><Header route="/projects" {...commonProps}/><main className="container workspace" id="main-content"><LiveRuns navigate={navigate} projectId={projectFromPath(route)} runId={segments[3] === 'deployments' ? segments[4] : null}/></main><footer className="container footer">AUTOKOM · Déploiement et gestion des applications</footer></div>
   }
 
   if (route === '/') return <Landing {...commonProps} />

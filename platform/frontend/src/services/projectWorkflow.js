@@ -100,9 +100,9 @@ export async function getRemoteProjectDetail(id) {
   if (!env) throw new Error('Environnement du projet introuvable.')
   const [configsResponse, runsResponse] = await Promise.all([
     projectsApi.configurations(project.id, env.id),
-    deploymentsApi.list(project.id, env.id),
+    deploymentsApi.list(project.id, env.id, 1, 10),
   ])
-  return { project, environment: env, configurations: configsResponse?.configurations || [], runs: runsResponse?.runs || [] }
+  return { project, environment: env, configurations: configsResponse?.configurations || [], runs: runsResponse?.runs || [], runCount: runsResponse?.count ?? (runsResponse?.runs || []).length }
 }
 
 /** Création d'un projet puis mise à jour de son unique configuration initiale.

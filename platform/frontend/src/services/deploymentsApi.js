@@ -14,8 +14,15 @@ export const deploymentsApi = Object.freeze({
     if (!key || !/^[a-zA-Z0-9-]{8,128}$/.test(key)) throw new TypeError('Clé d’idempotence invalide.')
     return api.post(`${prefix(p, e)}deployments/launch/`, {}, { headers: { 'Idempotency-Key': key } })
   },
-  list: (p, e) => api.get(`${prefix(p, e)}deployments/`),
+  list: (p, e, page = 1, pageSize = 10) => {
+    if (!Number.isSafeInteger(page) || page < 1 || page > 100000) throw new TypeError('Page invalide.')
+    if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) throw new TypeError('Taille de page invalide.')
+    return api.get(`${prefix(p, e)}deployments/?page=${page}&page_size=${pageSize}`)
+  },
   detail: (p, e, runId) => api.get(`${prefix(p, e)}deployments/${validId(runId)}/`),
-  logs: (p, e, runId) => api.get(`${prefix(p, e)}deployments/${validId(runId)}/logs/`),
+  logs: (p, e, runId, after = 0) => {
+    if (!Number.isSafeInteger(after) || after < 0) throw new TypeError('Curseur de journal invalide.')
+    return api.get(`${prefix(p, e)}deployments/${validId(runId)}/logs/?after=${after}`)
+  },
   cancel: (p, e, runId) => api.post(`${prefix(p, e)}deployments/${validId(runId)}/cancel/`, {}),
 })

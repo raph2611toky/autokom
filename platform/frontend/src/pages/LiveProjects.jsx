@@ -1,17 +1,18 @@
-import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, ArrowRight, LoaderCircle, FolderKanban, GitBranch, Plus, Search, Settings2, Trash2, Workflow } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, ArrowRight, ChevronDown, Clock3, FolderKanban, GitBranch, LoaderCircle, Plus, Rocket, Search, Settings2, Trash2, Workflow } from 'lucide-react'
 import { projectsApi } from '../services/projectsApi.js'
 import { deploymentsApi } from '../services/deploymentsApi.js'
 import { errorText, listRemoteProjectRecords, getRemoteProjectDetail } from '../services/projectWorkflow.js'
-import { publicationLabel, phaseTitles, phaseOrder, cleanCustomerLog } from '../services/deploymentPresentation.js'
+import { publicationLabel } from '../services/deploymentPresentation.js'
+import { sortRecentRuns, isPublishing, canPublish } from '../services/deploymentHistory.js'
 
 function formatDate(value) {
   if (!value) return 'Non renseignée'
   const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? 'Non renseignée' : new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium' }).format(date)
+  return Number.isNaN(date.getTime()) ? 'Non renseignée' : new Intl.DateTimeFormat('fr-FR', {dateStyle:'medium', timeStyle:'short'}).format(date)
 }
 
-/** Même composants visuels que Projects.jsx, sources exclusivement AUTOKOM. */
+/** Mes projets réels : données exclusivement issues de Django, aucun lancement simulé. */
 export default function LiveProjects({ navigate, projectId = null }) {
   const [projects, setProjects] = useState([])
   const [detail, setDetail] = useState(null)
@@ -20,12 +21,13 @@ export default function LiveProjects({ navigate, projectId = null }) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('all')
   const [busy, setBusy] = useState(false)
-  const [logs, setLogs] = useState({})
-  const [openedRun, setOpenedRun] = useState(null)
+  const [launchError, setLaunchError] = useState('')
+  const launchLock = useRef(false)
+  const idempotencyKey = useRef(null)
 
   useEffect(() => {
     let alive = true
-    setLoading(true); setError(''); setDetail(null)
+    setLoading(true); setError(''); setLaunchError(''); setDetail(null)
     const request = projectId ? getRemoteProjectDetail(projectId) : listRemoteProjectRecords()
     request.then(result => {
       if (!alive) return
@@ -37,13 +39,15 @@ export default function LiveProjects({ navigate, projectId = null }) {
   }, [projectId])
 
   useEffect(() => {
-    if (!projectId || !detail?.runs?.some(r => ['QUEUED', 'RUNNING'].includes(r.status))) return
+    if (!projectId || !detail?.runs?.some(run => isPublishing(run.status))) return
     let alive = true
     const timer = window.setInterval(() => {
-      getRemoteProjectDetail(projectId).then(next => { if (alive) setDetail(next) }).catch(() => { /* le chargement manuel garde l'erreur visible */ })
-    }, 15000)
+      deploymentsApi.list(projectId, detail.environment.id, 1, 10).then(next => {
+        if (alive) setDetail(previous => previous ? {...previous, runs:next?.runs || [], runCount: next?.count ?? previous.runCount} : previous)
+      }).catch(() => {})
+    }, 12000)
     return () => { alive = false; window.clearInterval(timer) }
-  }, [projectId, detail?.runs?.map(r => r.status).join('|')])
+  }, [projectId, detail?.environment?.id, detail?.runs?.map(run => run.status).join('|')])
 
   const visible = useMemo(() => projects.filter(p => {
     const status = (p.status || '').toUpperCase()
@@ -52,7 +56,7 @@ export default function LiveProjects({ navigate, projectId = null }) {
   }), [projects, query, filter])
 
   function editProject(p) {
-    try { sessionStorage.setItem('autokom.ui.editRemoteProject', p.id) } catch { /* navigation sans stockage */ }
+    try { sessionStorage.setItem('autokom.ui.editRemoteProject', p.id) } catch {}
     navigate('/deploy')
   }
 
@@ -62,95 +66,85 @@ export default function LiveProjects({ navigate, projectId = null }) {
     try {
       await projectsApi.archive(project.id)
       if (projectId) navigate('/projects')
-      else setProjects(current => current.map(p => p.id === project.id ? { ...p, status: 'ARCHIVED' } : p))
+      else setProjects(current => current.map(p => p.id === project.id ? {...p,status:'ARCHIVED'} : p))
     } catch (err) { setError(errorText(err)) }
     finally { setBusy(false) }
   }
 
-  async function loadLogs(run) {
-    if (!detail || busy) return
-    if (openedRun === run.id) { setOpenedRun(null); return }
-    setOpenedRun(run.id); setBusy(true); setError('')
+  async function publishNow() {
+    if (launchLock.current || busy || !detail || !canPublish(detail)) return
+    launchLock.current = true
+    setBusy(true); setLaunchError('')
     try {
-      const result = await deploymentsApi.logs(detail.project.id, detail.environment.id, run.id)
-      setLogs(current => ({ ...current, [run.id]: result.logs || [] }))
-    } catch (err) { setError(errorText(err)) }
-    finally { setBusy(false) }
+      // Prévisualisation serveur obligatoire; cette requête ne déclenche rien.
+      await deploymentsApi.preview(detail.project.id, detail.environment.id)
+      // Même clé sur une reprise après échec réseau ambigu; ne jamais créer deux runs.
+      const key = idempotencyKey.current || globalThis.crypto?.randomUUID?.()
+      if (!key) throw new Error('La publication sécurisée nécessite un navigateur HTTPS récent.')
+      idempotencyKey.current = key
+      const answer = await deploymentsApi.launch(detail.project.id, detail.environment.id, key)
+      if (!answer?.deployment?.id) throw new Error('AUTOKOM n’a pas confirmé la création de la publication.')
+      idempotencyKey.current = null
+      navigate(`/projects/${detail.project.id}/deployments/${answer.deployment.id}`)
+    } catch (err) {
+      setLaunchError(errorText(err))
+      // En cas de réponse ambiguë, conserver la clé pour une nouvelle tentative idempotente.
+    } finally { launchLock.current = false; setBusy(false) }
   }
-
-  useEffect(() => {
-    const run = detail?.runs?.find(item => item.id === openedRun)
-    if (!detail || !run || !['QUEUED', 'RUNNING'].includes(run.status)) return
-    let alive = true
-    const timer = window.setInterval(() => {
-      deploymentsApi.logs(detail.project.id, detail.environment.id, run.id)
-        .then(result => { if (alive) setLogs(current => ({ ...current, [run.id]: result.logs || [] })) })
-        .catch(() => { /* Les erreurs réseau n'effacent jamais les journaux déjà affichés. */ })
-    }, 12000)
-    return () => { alive = false; window.clearInterval(timer) }
-  }, [detail?.project?.id, detail?.environment?.id, detail?.runs?.map(run => `${run.id}:${run.status}`).join('|'), openedRun])
 
   if (projectId) {
-    if (loading) return <section className="ak-workspace-empty" role="status"><LoaderCircle size={19} className="ak-spin"/> Chargement du projet AUTOKOM…</section>
+    if (loading) return <section className="ak-workspace-empty" role="status"><LoaderCircle size={19} className="ak-spin"/> Chargement du projet…</section>
     if (error && !detail) return <section className="ak-workspace-empty"><p className="feedback error" role="alert">{error}</p><button className="button-outline" onClick={() => navigate('/projects')}>Mes projets</button></section>
     if (!detail) return <section className="ak-workspace-empty"><h1>Projet introuvable</h1></section>
-    const { project, environment, configurations, runs } = detail
-    const cfg = configurations[0]
+    const {project, environment, configurations, runs} = detail
+    const cfg = configurations.find(item => !item.is_draft) || configurations[0]
+    const latest = sortRecentRuns(runs).slice(0, 10)
+    const active = latest.find(run => isPublishing(run.status))
+    const [statusText, statusTone] = publicationLabel(latest[0]?.status)
+    const ready = canPublish(detail)
     return <>
       <div className="ak-back-line"><button type="button" className="button-quiet" onClick={() => navigate('/projects')}><ArrowLeft size={17}/> Mes projets</button></div>
       <section className="page-hero ak-workspace-hero"><div><h1>{project.name}</h1><p>{project.repository_name} · {cfg?.branch || project.default_branch}</p></div>
-        <button className="button-primary" type="button" onClick={() => editProject(project)} disabled={project.status === 'ARCHIVED'}><Settings2 size={17}/> Modifier</button></section>
-      {error && <p className="feedback error" role="alert">{error}</p>}
-      <section className="ak-workspace-sheet">
-        <div className="ak-workspace-sheet-heading"><h2>Configuration du projet</h2><span className="ak-project-state">{cfg?.is_draft ? 'Brouillon' : cfg ? 'Configuration finalisée' : 'Sans configuration'}</span></div>
+        <div className="ak-project-hero-actions">
+          <span className={`ak-publication-pill state-${latest.length ? statusTone : 'muted'}`} role="status">{latest.length ? statusText : 'Non publié'}</span>
+          {active ? <button type="button" className="button-primary" onClick={() => navigate(`/projects/${project.id}/deployments/${active.id}`)}><Clock3 size={17}/> Suivre la publication</button> : <button type="button" className="button-primary" disabled={busy || !ready} onClick={publishNow}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <Rocket size={17}/>} {busy ? 'Préparation…' : 'Déployer maintenant'}</button>}
+        </div>
+      </section>
+      {launchError && <p className="feedback error" role="alert">{launchError}</p>}
+      {!cfg && <p className="ak-deployment-error">Configurez votre projet avant sa première publication.</p>}
+      <section className="ak-workspace-sheet ak-project-runs-first" aria-labelledby="recent-deployments">
+        <div className="ak-workspace-sheet-heading"><div><h2 id="recent-deployments">Publications récentes</h2><p className="ak-section-subtitle">Les dix dernières activités de votre application.</p></div><span className="ak-project-state">{detail.runCount ?? runs.length} au total</span></div>
+        {latest.length === 0 && <div className="ak-workspace-empty"><Workflow size={25}/><h3>Pas encore de publication</h3><p>Une fois votre projet configuré, vous pourrez le mettre en ligne ici.</p></div>}
+        <div className="ak-deployment-list">{latest.map(run => {
+          const [label,tone] = publicationLabel(run.status)
+          return <article className="ak-deployment-card" key={run.id}>
+            <div className="ak-deployment-summary">
+              <div className="ak-deployment-symbol"><Workflow size={19}/></div>
+              <div className="ak-deployment-summary-text"><strong>Publication du {formatDate(run.created_at)}</strong><small>{run.trigger_type === 'GIT_PUSH' ? 'Mise à jour automatique' : 'Lancement manuel'} · Réf. {String(run.id).slice(0,8)}</small></div>
+              <span className={`ak-publication-pill state-${tone}`}>{label}</span>
+              <button type="button" className="button-outline" onClick={() => navigate(`/projects/${project.id}/deployments/${run.id}`)}>Voir les détails <ArrowRight size={15}/></button>
+            </div>
+          </article>
+        })}</div>
+        {(detail.runCount ?? runs.length) > 0 && <div className="ak-run-all-link"><button type="button" className="button-outline" onClick={() => navigate(`/projects/${project.id}/history`)}>Voir tout l’historique <ArrowRight size={16}/></button></div>}
+      </section>
+      <details className="ak-workspace-sheet ak-project-config-fold">
+        <summary className="ak-workspace-sheet-heading ak-project-config-summary"><h2>Configuration du projet</h2><span className="ak-project-config-suffix"><span className="ak-project-state">{cfg?.is_draft ? 'Brouillon' : cfg ? 'Configuration finalisée' : 'À configurer'}</span><ChevronDown size={20}/></span></summary>
         <dl className="ak-site-info-grid ak-workspace-details">
           <div><dt>Dépôt GitHub</dt><dd>{project.repository_name}</dd></div>
           <div><dt>Branche</dt><dd>{cfg?.branch || project.default_branch}</dd></div>
           <div><dt>Répertoire source</dt><dd>{cfg?.root_directory || 'Racine'}</dd></div>
           <div><dt>Environnement</dt><dd>{environment.name}</dd></div>
-          <div><dt>Publication</dt><dd>{cfg?.mode === 'DEVSECOPS' ? 'Contrôles renforcés' : cfg ? 'Standard' : 'Non configurée'}</dd></div>
-          <div><dt>Statut</dt><dd>{project.status}</dd></div>
+          <div><dt>Type de publication</dt><dd>{cfg?.mode === 'DEVSECOPS' ? 'Sécurité renforcée' : 'Standard'}</dd></div>
+          <div><dt>État du projet</dt><dd>{project.status === 'ACTIVE' ? 'Actif' : 'Archivé'}</dd></div>
           <div><dt>Dernière modification</dt><dd>{formatDate(project.updated_at)}</dd></div>
-          <div><dt>Publication</dt><dd><span className={`ak-publication-pill state-${publicationLabel(runs[0]?.status)[1]}`}>{runs.length ? publicationLabel(runs[0]?.status)[0] : 'Aucune publication'}</span></dd></div>
+          <div><dt>Dernière publication</dt><dd>{latest.length ? statusText : 'Aucune'}</dd></div>
         </dl>
         <div className="ak-project-detail-actions">
           <button className="button-outline" type="button" onClick={() => editProject(project)} disabled={busy || project.status === 'ARCHIVED'}><Settings2 size={16}/> Modifier la configuration</button>
           {project.status !== 'ARCHIVED' && <button className="button-quiet ak-danger-action" type="button" disabled={busy} onClick={() => archiveProject(project)}><Trash2 size={16}/> Archiver</button>}
         </div>
-      </section>
-      <section className="ak-workspace-sheet">
-        <div className="ak-workspace-sheet-heading"><h2>Historique des publications</h2><span className="ak-project-state">{runs.length} exécution(s)</span></div>
-        {runs.length === 0 && <p className="gh-muted">Aucune publication pour le moment.</p>}
-        <div className="ak-deployment-list">{runs.map(run => {
-          const [name, tone] = publicationLabel(run.status)
-          const expanded = openedRun === run.id
-          const steps = [...(run.stages || [])].sort((a,b) => phaseOrder.indexOf(a.stage_key) - phaseOrder.indexOf(b.stage_key))
-          const entries = (logs[run.id] || []).map(row => cleanCustomerLog(row.message)).filter(Boolean)
-          return <article key={run.id} className="ak-deployment-card">
-            <div className="ak-deployment-summary">
-              <div className="ak-deployment-symbol"><Workflow size={19}/></div>
-              <div className="ak-deployment-summary-text"><strong>Publication du {formatDate(run.created_at)}</strong><small>Référence {String(run.id).slice(0,8)}</small></div>
-              <span className={`ak-publication-pill state-${tone}`} role="status">{name}</span>
-              <button type="button" className="button-outline ak-deployment-toggle" disabled={busy} onClick={() => loadLogs(run)} aria-expanded={expanded}>{expanded ? 'Masquer les détails' : 'Voir la progression'}</button>
-            </div>
-            {expanded && <div className="ak-deployment-details">
-              <h3>Progression de la mise en ligne</h3>
-              <ol className="ak-publication-timeline">{(steps.length ? steps : [{stage_key:'source',status:'PENDING'}]).map(stage => {
-                const [label, stateTone] = publicationLabel(stage.status)
-                return <li key={stage.stage_key} className={`ak-publication-step state-${stateTone}`}>
-                  <span className="ak-publication-dot" aria-hidden="true"/>
-                  <span className="ak-publication-step-name">{phaseTitles[stage.stage_key] || 'Vérification'}</span>
-                  <span className="ak-publication-step-state">{label}</span>
-                </li>
-              })}</ol>
-              {['QUEUED','RUNNING'].includes(run.status) && <p className="ak-deployment-hint">Mise à jour automatique de la progression.</p>}
-              {run.error_message && <p className="ak-deployment-error" role="alert">{cleanCustomerLog(run.error_message) || "Cette publication nécessite une intervention. Votre précédente version reste inchangée."}</p>}
-              {!!entries.length && <details className="ak-deployment-messages"><summary>Historique des opérations</summary><ol>{entries.map((entry,index) => <li key={index}>{entry}</li>)}</ol></details>}
-              {!entries.length && <p className="ak-deployment-hint">Les informations détaillées apparaîtront dès le démarrage de la préparation.</p>}
-            </div>}
-          </article>
-        })}</div>
-      </section>
+      </details>
     </>
   }
 

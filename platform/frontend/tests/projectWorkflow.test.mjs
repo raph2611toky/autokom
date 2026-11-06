@@ -131,12 +131,13 @@ test('Détails réels : configurations et derniers runs Django', async () => {
   mocked({
     [`GET ${p}/`]: { project: { id: UUIDS.project, name: 'Test', repository_name: 'org/test' }, environments: [{ id: UUIDS.env, slug: 'production' }] },
     [`GET ${p}/environments/${UUIDS.env}/configurations/`]: { configurations: [{ id: UUIDS.cfg, is_draft: true }] },
-    [`GET ${p}/environments/${UUIDS.env}/deployments/`]: { runs: [{ id: 'deployment-1', status: 'QUEUED' }] },
+    [`GET ${p}/environments/${UUIDS.env}/deployments/?page=1&page_size=10`]: { runs: [{ id: 'deployment-1', status: 'QUEUED' }], count: 37 },
   })
   try {
     const details = await getRemoteProjectDetail(UUIDS.project)
     assert.equal(details.configurations[0].is_draft, true)
     assert.equal(details.runs[0].status, 'QUEUED')
+    assert.equal(details.runCount, 37)
   } finally { restore() }
 })
 
