@@ -155,7 +155,7 @@ def smoke_test(*, timeout=240, workspace_base=None):
                    '--progress=plain']
             phase = 'execution_buildctl'
             completed = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                                       check=False, env={'PATH': '/usr/local/bin:/usr/bin:/bin',
+                                       check=False, env={'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
                                                          'LANG': 'C.UTF-8'})
     except subprocess.TimeoutExpired as exc:
         raise BuildkitError('Test RUN BuildKit expiré : vérifier réseau, mémoire et journal systemd.') from exc

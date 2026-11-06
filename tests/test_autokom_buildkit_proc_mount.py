@@ -50,6 +50,7 @@ class BuildKitProcMountTests(unittest.TestCase):
             def run(command, **kwargs):
                 calls.append(command)
                 self.assertEqual(command[:4], ['runuser','-u','autokom-builder','--'])
+                self.assertIn('/usr/sbin', kwargs['env']['PATH'].split(':'))
                 self.assertIn('unix:///run/autokom-buildkit/buildkitd.sock', ' '.join(command))
                 self.assertIn('--frontend', command)
                 self.assertNotIn('--output', command)
