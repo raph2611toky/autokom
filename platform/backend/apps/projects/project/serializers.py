@@ -17,6 +17,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'url': 'https://' + selected.hostname if selected else None,
             'status': 'ACTIVE' if selected else (planned.status if planned else 'NONE'),
             'https': bool(selected),
+            'activation_error_code': planned.activation_error_code if planned else '',
         }
 
     class Meta:

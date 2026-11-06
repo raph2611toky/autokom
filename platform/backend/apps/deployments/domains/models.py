@@ -23,6 +23,8 @@ class Domain(models.Model):
     tls_status = models.CharField(max_length=40, blank=True)
     is_primary = models.BooleanField(default=False)
     is_disabled = models.BooleanField(default=False)
+    activation_error_code = models.CharField(max_length=90, blank=True)
+    last_activation_attempt_at = models.DateTimeField(null=True, blank=True)
     certificate_expires_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

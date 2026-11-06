@@ -73,6 +73,22 @@
     mode: '0644'
   notify: reload runtime units
 
+- name: Installer la réconciliation DNS/HTTPS des domaines existants
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../platform/backend/deployment_templates/autokom-domain-reconciler.service.example"
+    dest: /etc/systemd/system/autokom-domain-reconciler.service
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Installer le planificateur de réconciliation de domaines
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../platform/backend/deployment_templates/autokom-domain-reconciler.timer.example"
+    dest: /etc/systemd/system/autokom-domain-reconciler.timer
+    owner: root
+    group: root
+    mode: '0644'
+
 - name: Recharger systemd
   ansible.builtin.systemd_service:
     daemon_reload: true
@@ -82,6 +98,13 @@
     name: autokom-platform-broker
     enabled: true
     state: restarted
+  when: not ansible_check_mode
+
+- name: Activer les tentatives DNS/HTTPS automatiques (aucune publication Jenkins)
+  ansible.builtin.systemd_service:
+    name: autokom-domain-reconciler.timer
+    enabled: true
+    state: started
   when: not ansible_check_mode
 
 - name: Démarrer le worker des exécutions

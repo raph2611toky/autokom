@@ -443,7 +443,7 @@ def _check_dns(host,token,managed):
     if managed:
         suffix=os.environ.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX','').strip('.').lower()
         if not suffix or not host.endswith('.'+suffix) or host==suffix:
-            raise BrokerError('Sous-domaine non autorisé par IKOM.')
+            raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH: Sous-domaine hors de la zone gérée.')
     else:
         if not isinstance(token,str) or not re.fullmatch(r'[A-Za-z0-9_-]{32,128}',token):
             raise BrokerError('Preuve de domaine manquante.')
@@ -461,22 +461,42 @@ def _cloudflare_record(host):
         raise BrokerError('AUTOKOM_DOMAIN_CLOUDFLARE_CONFIG_MISSING: Accès Cloudflare ou zone gérée non configurés.')
     ingress=os.environ.get('AUTOKOM_INGRESS_IPV4','')
     try:ipaddress.IPv4Address(ingress)
-    except ValueError:raise BrokerError('IP ingress non configurée.')
+    except ValueError:raise BrokerError('AUTOKOM_INGRESS_IPV4_MISSING: IP ingress non configurée.')
     base='https://api.cloudflare.com/client/v4/zones/'+zone+'/dns_records'
     headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'}
-    # Strictly refuse replacing a record created by another administrator.
-    req=Request(base+'?'+urlencode({'type':'A','name':host}),headers=headers)
-    with urllib.request.urlopen(req,timeout=12) as resp: data=json.load(resp)
-    if not data.get('success'):raise BrokerError('Recherche DNS Cloudflare refusée.')
-    results=data.get('result') or []
-    if results:
-        if len(results)!=1 or results[0].get('content')!=ingress or results[0].get('proxied'):
-            raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Un enregistrement différent existe déjà ; aucun remplacement automatique.')
-        return {'created':False}
+    # A managed subdomain must belong to the configured Cloudflare zone.
+    # In particular, never edit a different Cloudflare account/zone by mistake.
+    zone_name=os.environ.get('CLOUDFLARE_ZONE_NAME','').strip('.').lower()
+    if zone_name and (host==zone_name or not host.endswith('.'+zone_name)):
+        raise BrokerError('AUTOKOM_CF_ZONE_MISMATCH: Domaine hors de la zone Cloudflare configurée.')
+    def cloudflare(request):
+        try:
+            with urllib.request.urlopen(request,timeout=12) as response:
+                document=json.load(response)
+        except HTTPError as exc:
+            if exc.code in (401,403):
+                raise BrokerError('AUTOKOM_CF_AUTH_DENIED: Vérifier les droits DNS Read et DNS Write du token Cloudflare.') from exc
+            if exc.code==429:
+                raise BrokerError('AUTOKOM_CF_RATE_LIMITED: Limite Cloudflare atteinte; nouvelle tentative programmée.') from exc
+            raise BrokerError('AUTOKOM_CF_DNS_UNAVAILABLE: API Cloudflare indisponible.') from exc
+        except (OSError,ValueError,TimeoutError) as exc:
+            raise BrokerError('AUTOKOM_CF_DNS_UNAVAILABLE: API Cloudflare indisponible.') from exc
+        if not isinstance(document,dict) or document.get('success') is not True:
+            raise BrokerError('AUTOKOM_CF_DNS_REJECTED: Cloudflare refuse la configuration DNS.')
+        return document
+    # Check both A and CNAME. Cloudflare rejects CNAME/A coexistence; do not
+    # overwrite records created outside AUTOKOM or hide an existing conflict.
+    for record_type in ('CNAME','A'):
+        req=Request(base+'?'+urlencode({'type':record_type,'name':host,'per_page':100}),headers=headers)
+        data=cloudflare(req)
+        results=[item for item in (data.get('result') or []) if isinstance(item,dict) and item.get('name','').rstrip('.').lower()==host]
+        if results:
+            if record_type=='CNAME' or len(results)!=1 or results[0].get('content')!=ingress or results[0].get('proxied') is not False:
+                raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Enregistrement DNS existant différent.')
+            return {'created':False}
     payload=json.dumps({'type':'A','name':host,'content':ingress,'ttl':120,'proxied':False}).encode()
     req=Request(base,data=payload,headers=headers,method='POST')
-    with urllib.request.urlopen(req,timeout=12) as resp: data=json.load(resp)
-    if not data.get('success'):raise BrokerError('Création DNS Cloudflare refusée.')
+    cloudflare(req)
     return {'created':True}
 
 def _nginx_config(host,port,tls=False):
@@ -536,8 +556,11 @@ def _proxy_apply(host,environment):
         if True:
             email=os.environ.get('AUTOKOM_ACME_EMAIL','')
             if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email):raise BrokerError('AUTOKOM_ACME_EMAIL_MISSING: Adresse de contact TLS absente.')
-            run(['certbot','certonly','--webroot','-w',str(WEBROOT),
-                 '-d',host,'--agree-tos','--keep-until-expiring','--non-interactive','--email',email],timeout=130)
+            try:
+                run(['certbot','certonly','--webroot','-w',str(WEBROOT),
+                     '-d',host,'--agree-tos','--keep-until-expiring','--non-interactive','--email',email],timeout=130)
+            except BrokerError as exc:
+                raise BrokerError('AUTOKOM_ACME_FAILED: Certificat HTTPS non délivré ; vérifier DNS public et TCP/80.') from exc
         publish(_nginx_config(host,state['port'],tls=True))
         owner.write_text(environment,encoding='utf-8')
         os.chmod(owner,0o600)
@@ -548,6 +571,40 @@ def _proxy_apply(host,environment):
         subprocess.run(['systemctl','reload','nginx'],capture_output=True,timeout=15)
         raise
     return {'active':True,'hostname':host}
+
+
+def _domain_inspect(params):
+    """Read-only, ownership-verified status for a managed public vhost."""
+    host=valid_hostname(params.get('hostname'))
+    env=valid_id(params.get('environment_id'))
+    conf=PROXY/('autokom-customer-'+host+'.conf')
+    link=ENABLED/conf.name
+    owner=STATE/('domain-owner-'+host+'.txt')
+    if owner.is_symlink() or conf.is_symlink() or (link.exists() and not link.is_symlink()):
+        raise BrokerError('AUTOKOM_DOMAIN_OWNERSHIP_MISMATCH: Configuration non conforme.')
+    if not owner.is_file() or not conf.is_file() or not link.is_symlink():
+        return {'active':False}
+    if owner.read_text(encoding='utf-8').strip()!=env:
+        raise BrokerError('AUTOKOM_DOMAIN_OWNERSHIP_MISMATCH: Vhost géré par un autre environnement.')
+    if link.resolve()!=conf.resolve():
+        raise BrokerError('AUTOKOM_DOMAIN_OWNERSHIP_MISMATCH: Lien Nginx incohérent.')
+    contents=conf.read_text(encoding='utf-8')
+    state=_load_state(env)
+    if not state or type(state.get('port')) is not int:
+        return {'active':False}
+    expected_upstream='proxy_pass http://127.0.0.1:'+str(state['port'])+';'
+    active=('server_name '+host+';' in contents and
+            'listen 443 ssl;' in contents and expected_upstream in contents and
+            '/etc/letsencrypt/live/'+host+'/fullchain.pem' in contents and
+            (Path('/etc/letsencrypt/live')/host/'fullchain.pem').is_file())
+    if active:
+        # A valid local vhost is NOT proof of publicly reachable DNS.
+        expected_ip=os.environ.get('AUTOKOM_INGRESS_IPV4','')
+        try:ipaddress.IPv4Address(expected_ip)
+        except ValueError:
+            raise BrokerError('AUTOKOM_INGRESS_IPV4_MISSING: IPv4 publique non configurée.')
+        active=expected_ip in _dig('A',host)
+    return {'active':bool(active)}
 
 
 def _deactivate_owned_vhost(host, environment):
@@ -680,6 +737,7 @@ def handle(action,params):
         lines=[line[:500] for line in raw.splitlines()[-n:]
                if not re.search(r'(?i)password|secret|token|authorization|api[_-]?key|gh[us]_|xsmtpsib-',line)]
         return {'logs':lines}
+    if action=='domain.inspect':return _domain_inspect(params)
     if action=='domain.verify':
         return _check_dns(params.get('hostname'),params.get('token'),params.get('managed') is True)
     if action=='domain.dns.create':

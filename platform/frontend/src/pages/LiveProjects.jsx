@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, ArrowRight, ChevronDown, Clock3, FolderKanban, GitBranch, LoaderCircle, Plus, Rocket, Search, Settings2, Trash2, Workflow } from 'lucide-react'
+import { ArrowLeft, ArrowRight, ChevronDown, Clock3, FolderKanban, GitBranch, LoaderCircle, Plus, Rocket, Search, Settings2, Workflow } from 'lucide-react'
 import { projectsApi } from '../services/projectsApi.js'
 import { deploymentsApi } from '../services/deploymentsApi.js'
 import { errorText, listRemoteProjectRecords, getRemoteProjectDetail } from '../services/projectWorkflow.js'
 import { publicationLabel } from '../services/deploymentPresentation.js'
 import { sortRecentRuns, isPublishing, canPublish } from '../services/deploymentHistory.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
-import { publicSiteUrl } from '../services/sitePresentation.js'
+import { publicSiteUrl, siteStateLabel } from '../services/sitePresentation.js'
 
 function formatDate(value) {
   if (!value) return 'Non renseignée'
@@ -51,6 +51,19 @@ export default function LiveProjects({ navigate, projectId = null }) {
     return () => { alive = false; window.clearInterval(timer) }
   }, [projectId, detail?.environment?.id, detail?.runs?.map(run => run.status).join('|')])
 
+  // Re-read the authoritative HTTPS state while an old deployed site's DNS
+  // is being reconciled. Refreshing does not launch Jenkins or change domains.
+  useEffect(() => {
+    if (!projectId || !detail?.project || publicSiteUrl(detail.project.public_site)) return
+    let alive = true
+    const timer = window.setInterval(() => {
+      projectsApi.detail(projectId).then(response => {
+        if (alive && response?.project) setDetail(old => old ? {...old, project:response.project} : old)
+      }).catch(() => {})
+    }, 20000)
+    return () => {alive=false;window.clearInterval(timer)}
+  }, [projectId,detail?.project?.public_site?.status,detail?.project?.public_site?.https])
+
   const visible = useMemo(() => projects.filter(p => {
     const status = (p.status || '').toUpperCase()
     const ok = filter === 'all' || (filter === 'active' ? status === 'ACTIVE' : status === 'ARCHIVED')
@@ -60,41 +73,6 @@ export default function LiveProjects({ navigate, projectId = null }) {
   function editProject(p) {
     try { sessionStorage.setItem('autokom.ui.editRemoteProject', p.id) } catch {}
     navigate('/deploy')
-  }
-
-  async function archiveProject(project) {
-    if (busy || !window.confirm(`Archiver « ${project.name} » dans AUTOKOM ? Le projet ne sera pas effacé.`)) return
-    setBusy(true); setError('')
-    try {
-      await projectsApi.archive(project.id)
-      if (projectId) navigate('/projects')
-      else setProjects(current => current.map(p => p.id === project.id ? {...p,status:'ARCHIVED'} : p))
-    } catch (err) { setError(errorText(err)) }
-    finally { setBusy(false) }
-  }
-
-  async function deleteProject(project) {
-    if (busy) return
-    const name = window.prompt(`Suppression de « ${project.name} » : le site sera arrêté et retiré de l'interface.\nPour confirmer, saisir exactement : ${project.name}`)
-    if (name !== project.name) return
-    setBusy(true); setError('')
-    try {
-      await projectsApi.deleteProject(project.id, name)
-      if (projectId) navigate('/projects')
-      else setProjects(current => current.filter(p => p.id !== project.id))
-    } catch (err) { setError(errorText(err)) }
-    finally { setBusy(false) }
-  }
-
-  async function restoreProject(project) {
-    if (busy) return
-    setBusy(true); setError('')
-    try {
-      await projectsApi.restore(project.id)
-      if (projectId) setDetail(d => d ? {...d,project:{...d.project,status:'ACTIVE'}} : d)
-      else setProjects(current => current.map(p => p.id === project.id ? {...p,status:'ACTIVE'} : p))
-    } catch (err) { setError(errorText(err)) }
-    finally { setBusy(false) }
   }
 
   async function publishNow() {
@@ -133,6 +111,7 @@ export default function LiveProjects({ navigate, projectId = null }) {
       <section className="page-hero ak-workspace-hero"><div><h1>{project.name}</h1><p>{project.repository_name} · {cfg?.branch || project.default_branch}</p></div>
         <div className="ak-project-hero-actions">
           <span className={`ak-publication-pill state-${latest.length ? statusTone : 'muted'}`} role="status">{latest.length ? statusText : 'Non publié'}</span>
+          <button type="button" className="ak-project-settings-icon" onClick={() => navigate(`/projects/${project.id}/settings`)} title="Paramètres du projet" aria-label="Paramètres du projet"><Settings2 size={18}/></button>
           {active ? <button type="button" className="button-primary" onClick={() => navigate(`/projects/${project.id}/deployments/${active.id}`)}><Clock3 size={17}/> Suivre la publication</button> : <button type="button" className="button-primary" disabled={busy || !ready} onClick={publishNow}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <Rocket size={17}/>} {busy ? 'Préparation…' : 'Déployer maintenant'}</button>}
         </div>
       </section>
@@ -169,8 +148,7 @@ export default function LiveProjects({ navigate, projectId = null }) {
         </dl>
         <div className="ak-project-detail-actions">
           <button className="button-outline" type="button" onClick={() => editProject(project)} disabled={busy || project.status === 'ARCHIVED'}><Settings2 size={16}/> Modifier la configuration</button>
-          {project.status !== 'ARCHIVED' ? <button className="button-quiet ak-danger-action" type="button" disabled={busy} onClick={() => archiveProject(project)}><Trash2 size={16}/> Archiver</button> : <button className="button-outline" type="button" disabled={busy} onClick={() => restoreProject(project)}>Restaurer le projet</button>}
-          <button className="button-quiet ak-danger-action" type="button" disabled={busy} onClick={() => deleteProject(project)}><Trash2 size={16}/> Supprimer le projet</button>
+          <button className="button-outline" type="button" onClick={() => navigate(`/projects/${project.id}/settings`)}><Settings2 size={16}/> Paramètres du projet</button>
         </div>
       </details>
     </>
@@ -187,10 +165,9 @@ export default function LiveProjects({ navigate, projectId = null }) {
       {loading ? <div className="ak-workspace-empty" role="status"><LoaderCircle size={19} className="ak-spin"/> Chargement des projets…</div> : visible.length ? <div className="ak-project-list">{visible.map(project => <div className="ak-project-row" key={project.id}>
         <div className="ak-project-row-symbol"><FolderKanban size={21}/></div>
         <button type="button" className="ak-project-row-main" onClick={() => navigate(`/projects/${project.id}`)}><strong>{project.name}</strong><small><GitBranch size={13}/>{project.repository} · {project.branch}</small></button>
-        <div className="ak-project-row-public">{publicSiteUrl(project.publicSite) ? <a href={publicSiteUrl(project.publicSite)} target="_blank" rel="noopener noreferrer">{project.publicSite.hostname} ↗</a> : <span>{project.publicSite?.hostname || 'Pas de domaine'} · HTTPS en attente</span>}<button className="button-quiet" type="button" onClick={() => navigate(`/sites/${project.id}`)}>Gérer le domaine</button></div>
-        <span className="ak-project-state">{project.status === 'ARCHIVED' ? 'Archivé' : 'Actif'}</span>
-        <button className="button-quiet ak-danger-action" type="button" disabled={busy} onClick={() => deleteProject(project)} aria-label={`Supprimer ${project.name}`}><Trash2 size={16}/></button>
-        <button type="button" className="ak-project-open" onClick={() => navigate(`/projects/${project.id}`)} aria-label={`Ouvrir ${project.name}`}><ArrowRight size={19}/></button>
+        <div className="ak-project-row-public">{publicSiteUrl(project.publicSite) ? <a href={publicSiteUrl(project.publicSite)} target="_blank" rel="noopener noreferrer">{project.publicSite.hostname} ↗</a> : <span>{project.publicSite?.hostname || 'Pas de domaine'} · {siteStateLabel(project.publicSite)}</span>}</div>
+        <span className={`ak-project-state ak-project-state--${project.status === 'ARCHIVED' ? 'archived' : 'active'}`} role="status">{project.status === 'ARCHIVED' ? 'Archivé' : 'Actif'}</span>
+        <button type="button" className="ak-project-settings-icon" onClick={() => navigate(`/projects/${project.id}/settings`)} title={`Paramètres de ${project.name}`} aria-label={`Paramètres de ${project.name}`}><Settings2 size={18}/></button>
       </div>)}</div> : <div className="ak-workspace-empty"><FolderKanban size={29}/><h2>{error ? 'Chargement impossible' : projects.length ? 'Aucun résultat' : 'Aucun projet pour le moment'}</h2><p>{error ? 'Vérifiez votre session et l’API.' : projects.length ? 'Essayez une autre recherche ou un autre filtre.' : 'Créez votre premier projet pour le retrouver ici.'}</p>{!projects.length && !error && <button className="button-primary" type="button" onClick={() => navigate('/deploy')}>Créer un projet <ArrowRight size={16}/></button>}</div>}
     </section>
   </>

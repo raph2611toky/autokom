@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { ArrowLeft, ArrowRight, CheckCircle2, ExternalLink, GitBranch, Globe2, LoaderCircle, Plus, Rocket, Search, ShieldCheck } from 'lucide-react'
 import { projectsApi } from '../services/projectsApi.js'
 import { errorText, getRemoteProjectDetail, listRemoteProjectRecords } from '../services/projectWorkflow.js'
-import { publicSiteUrl } from '../services/sitePresentation.js'
+import { publicSiteUrl, siteStateLabel } from '../services/sitePresentation.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
 
 /** Domains are backed by real Django and broker state: no demo or guessed public URLs. */
@@ -40,6 +40,21 @@ export default function LiveSites({ navigate, projectId = null }) {
     return () => { alive = false }
   }, [projectId])
 
+  useEffect(() => {
+    if (!projectId || !detail?.environment?.id) return
+    let alive=true
+    const timer=window.setInterval(() => {
+      projectsApi.domains(detail.project.id,detail.environment.id).then(response => {
+        if (!alive) return
+        setDomains(response?.domains || [])
+        return projectsApi.detail(detail.project.id).then(data => {
+          if (alive && data?.project) setDetail(old => old ? {...old,project:data.project} : old)
+        })
+      }).catch(() => {})
+    },20000)
+    return () => {alive=false;window.clearInterval(timer)}
+  },[projectId,detail?.environment?.id])
+
   const visible = useMemo(() => projects.filter(project =>
     `${project.name} ${project.repository} ${project.publicSite?.hostname || ''}`.toLowerCase().includes(query.toLowerCase().trim())), [projects, query])
 
@@ -61,7 +76,7 @@ export default function LiveSites({ navigate, projectId = null }) {
     await perform(async () => {
       await projectsApi.createDomain(detail.project.id, detail.environment.id, host)
       setHostname('')
-    }, 'Domaine réservé. Cliquez sur « Activer HTTPS » après la configuration DNS si nécessaire.')
+    }, 'Domaine réservé. AUTOKOM prépare automatiquement DNS et HTTPS pour les sous-domaines gérés.')
   }
 
   if (projectId) return <>
@@ -73,12 +88,12 @@ export default function LiveSites({ navigate, projectId = null }) {
     {detail && <>
       <ProjectPublicSite site={detail.project.public_site}/>
       <section className="ak-workspace-sheet ak-site-detail">
-        <div className="ak-workspace-sheet-heading"><div><h2>Domaines configurés</h2><p className="ak-section-subtitle">L’adresse n’est cliquable qu’après vérification DNS et activation TLS.</p></div><span className="ak-project-state">{domains.length} domaine(s)</span></div>
+        <div className="ak-workspace-sheet-heading"><div><h2>Domaines configurés</h2><p className="ak-section-subtitle">AUTOKOM active automatiquement les sous-domaines gérés après publication. Une adresse devient cliquable une fois HTTPS réellement actif.</p></div><span className="ak-project-state">{domains.length} domaine(s)</span></div>
         {!domains.length && <p className="gh-muted">Aucun domaine réservé.</p>}
         {domains.map(domain => {
           const url = publicSiteUrl(domain)
           return <article className="ak-domain-entry" key={domain.id}>
-            <div className="ak-domain-entry-head"><div><strong>{domain.hostname}</strong> {domain.is_primary && <span className="ak-project-state">Principal</span>}<p className="ak-section-subtitle">DNS : {domain.status} · HTTPS : {domain.https ? 'Actif' : 'À activer'}</p></div>
+            <div className="ak-domain-entry-head"><div><strong>{domain.hostname}</strong> {domain.is_primary && <span className="ak-project-state">Principal</span>}<p className="ak-section-subtitle">DNS : {domain.status} · HTTPS : {domain.https ? 'Actif' : 'Activation automatique en cours'}</p>{domain.activation_error_code && <p className="ak-domain-diagnostic">Diagnostic : {domain.activation_error_code}. Nouvelle tentative automatique programmée.</p>}</div>
               {url && <a href={url} className="button-outline" target="_blank" rel="noopener noreferrer"><ExternalLink size={15}/> Ouvrir</a>}
             </div>
             {!domain.https && domain.verification?.type === 'TXT' && <div className="ak-domain-proof"><strong>Preuve DNS requise :</strong> TXT {domain.verification.hostname} = {domain.verification.value}<p>Configurez également l'enregistrement A vers l’IP publique de votre ingress AUTOKOM.</p></div>}
@@ -104,7 +119,7 @@ export default function LiveSites({ navigate, projectId = null }) {
       {error && <p role="alert" className="feedback error">{error}</p>}
       {loading ? <div className="ak-workspace-empty" role="status"><LoaderCircle className="ak-spin" size={19}/> Chargement des domaines AUTOKOM…</div> : visible.length ? <div className="ak-project-list">{visible.map(project => <div className="ak-project-row" key={project.id}>
         <span className="ak-project-row-symbol"><Globe2 size={20}/></span><button type="button" className="ak-project-row-main" onClick={() => navigate(`/sites/${project.id}`)}><strong>{project.name}</strong><small><GitBranch size={13}/>{project.repository} · {project.branch}</small></button>
-        <div className="ak-project-row-public">{publicSiteUrl(project.publicSite) ? <a href={publicSiteUrl(project.publicSite)} target="_blank" rel="noopener noreferrer">{project.publicSite.hostname} ↗</a> : <span>{project.publicSite?.hostname || 'Domaine non défini'} · HTTPS en attente</span>}</div>
+        <div className="ak-project-row-public">{publicSiteUrl(project.publicSite) ? <a href={publicSiteUrl(project.publicSite)} target="_blank" rel="noopener noreferrer">{project.publicSite.hostname} ↗</a> : <span>{project.publicSite?.hostname || 'Domaine non défini'} · {siteStateLabel(project.publicSite)}</span>}</div>
         <button className="button-outline" type="button" onClick={() => navigate(`/sites/${project.id}`)}>Gérer <ArrowRight size={16}/></button>
       </div>)}</div> : <div className="ak-workspace-empty"><Globe2 size={29}/><h2>Aucun projet</h2><p>Les sites apparaîtront ici après création du premier projet.</p></div>}
     </section>

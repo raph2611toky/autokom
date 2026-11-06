@@ -13,6 +13,8 @@ export function publicSiteUrl(site) {
 }
 export function siteStateLabel(site) {
   if (publicSiteUrl(site)) return 'HTTPS actif'
+  if (site?.activation_error_code && /^AUTOKOM_[A-Z0-9_]{3,80}$/.test(site.activation_error_code))
+    return `Activation HTTPS en attente · ${site.activation_error_code}`
   if (site?.hostname) return 'Adresse réservée · DNS/HTTPS en attente'
   return 'Aucun domaine configuré'
 }

@@ -1,0 +1,26 @@
+[Unit]
+Description=AUTOKOM · Reconciliation automatique des domaines DNS et HTTPS
+After=network-online.target mysql.service autokom-platform-broker.service
+Wants=network-online.target
+Requires=autokom-platform-broker.service
+
+[Service]
+Type=oneshot
+User=autokom
+Group=autokom
+WorkingDirectory=/opt/autokom/source/platform/backend
+EnvironmentFile=/etc/autokom/secrets/backend.env
+Environment=AUTOKOM_CONTROL_SOCKET=/run/autokom/platform-control.sock
+ExecStart=/opt/autokom/venv/bin/python manage.py autokom_domain_reconcile --limit 2
+TimeoutStartSec=600
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+StandardOutput=journal
+StandardError=journal

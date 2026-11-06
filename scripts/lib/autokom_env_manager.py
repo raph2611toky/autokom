@@ -167,7 +167,7 @@ def _default(kind,key,existing):
     found=discover()
     if key in found:return found[key]
     if key=='VITE_AUTOKOM_AUTH_MODE':return 'cookie'
-    if key=='AUTOKOM_MANAGED_DOMAIN_SUFFIX': return 'apps.ikom.mg'
+    if key=='AUTOKOM_MANAGED_DOMAIN_SUFFIX':return 'auto.ikom.mg'
     if key=='AUTOKOM_ACME_EMAIL':return ''
     if key=='CLOUDFLARE_ZONE_NAME':return 'ikom.mg'
     return ''

@@ -47,6 +47,7 @@ def domain_summary(domain,*,include_challenge=False):
              'https':domain.tls_status=='ACTIVE' and domain.status==Domain.Status.ACTIVE,
              'tls_status':domain.tls_status, 'domain_type':domain.domain_type,
              'is_primary':domain.is_primary, 'is_disabled':domain.is_disabled,
+             'activation_error_code': domain.activation_error_code,
              'url':('https://' + domain.hostname if domain.status==Domain.Status.ACTIVE and domain.tls_status=='ACTIVE' else None)}
     if include_challenge and domain.domain_type==Domain.Type.CUSTOM:
         payload['verification']={'type':'TXT','hostname':'_autokom-challenge.'+domain.hostname,
@@ -90,7 +91,8 @@ def verify_and_activate(user,project_id,environment_id,domain_id):
         domain.tls_status='ACTIVE'
         if not Domain.objects.filter(environment=env, is_primary=True).exclude(pk=domain.pk).exists():
             domain.is_primary=True
-        domain.save(update_fields=['status','tls_status','is_primary'])
+        domain.activation_error_code=''
+        domain.save(update_fields=['status','tls_status','is_primary','activation_error_code'])
     return domain
 
 
@@ -103,6 +105,12 @@ def activate_managed_domains_for_release(environment):
     from apps.deployments.domains.models import Domain
     for domain in Domain.objects.filter(environment=environment, domain_type=Domain.Type.SUBDOMAIN, is_disabled=False).order_by('created_at'):
         token = _challenge(domain)
+        # Older projects reserved a managed name without a proof hash. Repair
+        # only never-verified, pending AUTOKOM-owned reservations.
+        if (not domain.verification_token_hash and domain.status == Domain.Status.PENDING
+                and domain.verified_at is None):
+            domain.verification_token_hash = hashlib.sha256(token.encode()).hexdigest()
+            domain.save(update_fields=['verification_token_hash'])
         if not hmac.compare_digest(domain.verification_token_hash or '', hashlib.sha256(token.encode()).hexdigest()):
             raise ValidationError({'domain':'Empreinte de propriété AUTOKOM non conforme.'})
         request_control('domain.dns.create', {'hostname':domain.hostname}, timeout=22)
@@ -126,7 +134,8 @@ def activate_managed_domains_for_release(environment):
         domain.tls_status='ACTIVE'
         if not Domain.objects.filter(environment=environment, is_primary=True).exclude(pk=domain.pk).exists():
             domain.is_primary=True
-        domain.save(update_fields=['verified_at','status','tls_status','is_primary'])
+        domain.activation_error_code=''
+        domain.save(update_fields=['verified_at','status','tls_status','is_primary','activation_error_code'])
 
 
 def choose_primary_domain(user, project_id, environment_id, domain_id):
@@ -160,6 +169,7 @@ def deactivate_domain(user, project_id, environment_id, domain_id):
     domain.status=Domain.Status.PENDING
     domain.is_disabled=True
     domain.tls_status=''
+    domain.activation_error_code=''
     domain.verified_at=None
-    domain.save(update_fields=['status','tls_status','verified_at','is_disabled'])
+    domain.save(update_fields=['status','tls_status','verified_at','is_disabled','activation_error_code'])
     return domain

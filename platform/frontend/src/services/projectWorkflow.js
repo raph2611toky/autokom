@@ -7,7 +7,8 @@ import { deploymentsApi } from './deploymentsApi.js'
 export function errorText(error) {
   const raw = String(error?.message || '')
   if (/Service de contrôle AUTOKOM indisponible|Jenkins ou AUTOKOM|Compte de service Jenkins/.test(raw)) {
-    return 'La publication est temporairement indisponible. Votre projet est conservé : réessayez plus tard.'
+    const code = raw.match(/AUTOKOM_[A-Z0-9_]{3,80}/)?.[0]
+    return 'La publication est temporairement indisponible. Votre projet est conservé.' + (code ? ` Diagnostic : ${code}.` : ' Réessayez plus tard.')
   }
 
   const errors = error?.errors

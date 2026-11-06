@@ -21,7 +21,7 @@ def request_control(action, params=None, *, timeout=30):
     if action not in {
         'ping', 'jenkins.dispatch','jenkins.state','jenkins.console','jenkins.cancel',
         'runtime.deploy','runtime.status','runtime.logs','runtime.rollback','runtime.commit','runtime.deprovision',
-        'domain.verify','domain.dns.create','domain.activate','domain.deactivate',
+        'domain.verify','domain.dns.create','domain.activate','domain.deactivate','domain.inspect',
     }:
         raise AutokomControlUnavailable('Opération non autorisée.')
     body = (json.dumps({'action':action,'params':params or {}},separators=(',',':'))+'\n').encode('utf-8')
@@ -44,7 +44,10 @@ def request_control(action, params=None, *, timeout=30):
             code = reply.get('code','')
             safe_code = code if isinstance(code,str) and re.fullmatch(r'AUTOKOM_[A-Z0-9_]{3,80}',code) else None
             logger.warning('Broker refuse %s code=%s', action, safe_code or 'AUTOKOM_BROKER_REFUSED')
-            error=AutokomControlUnavailable()
+            error=AutokomControlUnavailable(
+                'Service de contrôle AUTOKOM indisponible. Diagnostic : '+safe_code
+                if safe_code and action.startswith('domain.') else
+                'Service de contrôle AUTOKOM indisponible.')
             error.safe_code=safe_code
             raise error
         return reply['result']
