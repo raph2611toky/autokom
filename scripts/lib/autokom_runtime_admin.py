@@ -395,12 +395,14 @@ except (OSError,ValueError,KeyError,TypeError):
         print('  ✗ Agent autokom-isolated : '+reason)
         raise SetupError('Agent de compilation isolé absent ou hors ligne. N’ajouter aucun label au contrôleur Jenkins.')
     print('  ✓ Agent autokom-isolated connecté avec au moins un exécuteur.')
-    from autokom_buildkit_admin import healthcheck, BuildkitError
+    from autokom_buildkit_admin import healthcheck, smoke_test, BuildkitError
     try:
         healthcheck()
+        print('  › BuildKit rootless : test OCI RUN isolé (sans publier d’image)...', flush=True)
+        smoke_test()
     except (BuildkitError, OSError, KeyError) as exc:
         raise SetupError('BuildKit rootless non opérationnel : ' + str(exc)) from exc
-    print('  ✓ BuildKit rootless accessible par Jenkins (socket privé et worker disponible).')
+    print('  ✓ BuildKit rootless accessible par Jenkins : socket, worker et RUN validés.')
     if failures:
         raise SetupError('Un ou plusieurs services ne sont pas actifs.')
     return 0
@@ -429,7 +431,7 @@ def main(argv=None):
     group.add_argument('--check',action='store_true')
     group.add_argument('--apply',action='store_true')
     sub.add_parser('status')
-    sub.add_parser('doctor', help='Vérifier la liaison Django → socket → broker sans modifier le serveur')
+    sub.add_parser('doctor', help='Vérifier Django → broker → Jenkins et compiler un test OCI isolé (cache BuildKit)')
     env_p = sub.add_parser('env', help='Secrets runtime : show, setup, edit, delete',add_help=False)
     env_p.add_argument('env_args', nargs=argparse.REMAINDER)
     opts=parser.parse_args(argv)

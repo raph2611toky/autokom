@@ -28,7 +28,12 @@ NoNewPrivileges=false
 ProtectSystem=full
 ProtectHome=true
 ProtectKernelModules=true
-ProtectKernelTunables=true
+# IMPORTANT: systemd remounts/masks /proc/sys and other procfs nodes when
+# ProtectKernelTunables=yes. With rootlesskit -> nested runc, Linux rejects
+# a fresh procfs mount: "VFS: Mount too revealing" (Ubuntu 26.04 AWS).
+# Disable this mount-namespacing feature FOR THIS UNPRIVILEGED SERVICE ONLY.
+# Do not disable AppArmor/user namespace restrictions on the entire host.
+ProtectKernelTunables=no
 ProtectControlGroups=true
 LimitNOFILE=65536
 TasksMax=384

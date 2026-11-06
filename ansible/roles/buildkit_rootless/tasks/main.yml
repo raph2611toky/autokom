@@ -173,3 +173,16 @@
   until: ak_bk_workers.rc == 0 and 'ID' in ak_bk_workers.stdout
   when: not ansible_check_mode
   no_log: true
+
+# A successful "buildctl debug workers" does not prove OCI process creation.
+# Always exercise a RUN in the same rootless runtime used by Jenkins.
+- name: Vérifier une exécution OCI réelle (RUN true) avant de déclarer BuildKit prêt
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - "from autokom_buildkit_admin import healthcheck, smoke_test; healthcheck(); smoke_test()"
+  environment:
+    PYTHONPATH: "{{ playbook_dir }}/../../scripts/lib"
+  changed_when: false
+  when: not ansible_check_mode
