@@ -20,9 +20,10 @@ export const deploymentsApi = Object.freeze({
     return api.get(`${prefix(p, e)}deployments/?page=${page}&page_size=${pageSize}`)
   },
   detail: (p, e, runId) => api.get(`${prefix(p, e)}deployments/${validId(runId)}/`),
-  logs: (p, e, runId, after = 0) => {
+  logs: (p, e, runId, after = 0, mode = 'technical') => {
     if (!Number.isSafeInteger(after) || after < 0) throw new TypeError('Curseur de journal invalide.')
-    return api.get(`${prefix(p, e)}deployments/${validId(runId)}/logs/?after=${after}`)
+    if (!['technical','simple'].includes(mode)) throw new TypeError('Mode de journal invalide.')
+    return api.get(`${prefix(p, e)}deployments/${validId(runId)}/logs/?after=${after}&mode=${mode}`)
   },
   cancel: (p, e, runId) => api.post(`${prefix(p, e)}deployments/${validId(runId)}/cancel/`, {}),
 })

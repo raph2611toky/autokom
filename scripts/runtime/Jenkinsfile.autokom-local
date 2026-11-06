@@ -26,6 +26,7 @@ pipeline {
         }
         stage('SAST Semgrep') {
             steps {
+                echo 'AUTOKOM_STAGE:sast:RUNNING'
                 withCredentials([string(credentialsId:'autokom-runner-key',variable:'AUTOKOM_RUNNER_SHARED_KEY')]) {
                     sh 'set +x; python3 /opt/autokom/source/scripts/runtime/autokom_agent_local.py sast'
                 }
@@ -33,6 +34,7 @@ pipeline {
         }
         stage('SCA Trivy') {
             steps {
+                echo 'AUTOKOM_STAGE:sca:RUNNING'
                 withCredentials([string(credentialsId:'autokom-runner-key',variable:'AUTOKOM_RUNNER_SHARED_KEY')]) {
                     sh 'set +x; python3 /opt/autokom/source/scripts/runtime/autokom_agent_local.py sca'
                 }
@@ -40,6 +42,7 @@ pipeline {
         }
         stage('BuildKit rootless · export local') {
             steps {
+                echo 'AUTOKOM_STAGE:build:RUNNING'
                 withCredentials([string(credentialsId:'autokom-runner-key',variable:'AUTOKOM_RUNNER_SHARED_KEY')]) {
                     sh 'set +x; python3 /opt/autokom/source/scripts/runtime/autokom_agent_local.py build'
                 }

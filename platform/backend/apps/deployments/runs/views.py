@@ -117,11 +117,17 @@ class DeploymentLogsAPIView(APIView):
         try:
             run = accessible_run(request.user, project_id, environment_id, run_id)
             after = int_param(request, 'after', default=0, minimum=0, maximum=100000000)
-            qs = DeploymentLogEntry.objects.filter(deployment=run, sequence__gt=after).order_by('sequence')
+            mode = request.query_params.get('mode', 'technical')
+            if mode not in ('technical', 'simple'):
+                raise ValidationError({'mode': 'Mode de journal non pris en charge.'})
+            qs = DeploymentLogEntry.objects.filter(deployment=run, sequence__gt=after)
+            if mode == 'simple':
+                qs = qs.exclude(level='TECH')
+            qs = qs.order_by('sequence')
             entries = list(qs[:100])
             return api_success({'logs': DeploymentLogSerializer(entries, many=True).data,
                 'next_after': entries[-1].sequence if entries else after,
-                'running': run.status in ('QUEUED','RUNNING')}, 'Journal filtré du déploiement.')
+                'running': run.status in ('QUEUED','RUNNING'), 'mode': mode}, 'Journal filtré du déploiement.')
         except Exception as exc:
             return handle_error(exc, 'deployment_logs')
 

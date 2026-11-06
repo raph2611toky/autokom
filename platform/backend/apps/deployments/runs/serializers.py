@@ -13,7 +13,7 @@ class DeploymentRunSerializer(serializers.ModelSerializer):
     def get_error_message(self, instance):
         if not instance.error_message:
             return ''
-        return 'La publication a rencontré un problème. Réessayez ou contactez le support.'
+        return 'La publication a échoué ou a été bloquée. Consultez le journal technique et les étapes pour plus de détails.'
 
     stages = DeploymentStageSerializer(many=True, read_only=True)
     class Meta:
@@ -24,9 +24,18 @@ class DeploymentRunSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 class DeploymentLogSerializer(serializers.ModelSerializer):
+    stage_key = serializers.SerializerMethodField()
+
+    def get_stage_key(self, instance):
+        if instance.level == 'TECH' and instance.message.startswith('AUTOKOM_TECH:'):
+            parts = instance.message.split(':', 2)
+            if len(parts) == 3 and parts[1] in ('source','sast','sca','build','release','health'):
+                return parts[1]
+        return ''
+
     class Meta:
         model = DeploymentLogEntry
-        fields = ('sequence','level','message','created_at')
+        fields = ('sequence','level','message','stage_key','created_at')
         read_only_fields = fields
 
 class HighAvailabilityRequestSerializer(serializers.Serializer):

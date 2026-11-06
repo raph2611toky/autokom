@@ -7,7 +7,7 @@ from django.db.models import Max, Q
 from apps.deployments.runs.models import DeploymentRun, PipelineStageRun, DeploymentLogEntry
 from apps.deployments.runs.jenkins import JenkinsClient, JenkinsUnavailable
 from apps.deployments.runs.autokom_socket import AutokomControlUnavailable
-from apps.deployments.runs.console_stream import consume_chunk
+from apps.deployments.runs.console_stream import consume_diagnostic_chunk
 
 logger = logging.getLogger('autokom.deployments')
 SECRETS = re.compile(r'(?i)((?:authorization\s*:\s*bearer|password|token|secret|api[_-]?key)\s*[=:]\s*)(\S+)')
@@ -25,7 +25,7 @@ def add_log(run, line, level='INFO'):
     line = redact(line)
     # Markers are informational only. Never use customer-originated log text as
     # proof that a security scan or deployment has passed.
-    if not line.startswith(('AUTOKOM_LOG:', 'AUTOKOM_STAGE:')) and level != 'ERROR':
+    if not line.startswith(('AUTOKOM_LOG:', 'AUTOKOM_STAGE:', 'AUTOKOM_TECH:')) and level != 'ERROR':
         return
     # Serialize sequence allocation per deployment across multiple workers.
     # Prevents duplicate sequence IDs during overlapping log polling.
@@ -69,9 +69,21 @@ def ingest_console(run_id, text, offset, *, final=False):
         if offset == current.console_offset and text:
             # A stale duplicate chunk must never append duplicate markers.
             return False
-        markers, pending = consume_chunk(current.console_pending, text, final=final)
-        for marker in markers:
-            add_log(current, marker)
+        records, pending = consume_diagnostic_chunk(current.console_pending, text, final=final)
+        # The stage context is derived from trusted stage events already saved
+        # for this run, not from any user-controlled Jenkins stdout.
+        previous = (DeploymentLogEntry.objects.filter(deployment=current,
+                    message__startswith='AUTOKOM_STAGE:').order_by('-sequence')
+                    .values_list('message', flat=True).first())
+        stage_key = previous.split(':')[1] if previous else 'source'
+        for record in records:
+            if record.startswith('AUTOKOM_STAGE:'):
+                stage_key = record.split(':')[1]
+                add_log(current, record)
+            elif record.startswith('AUTOKOM_TECH:'):
+                add_log(current, 'AUTOKOM_TECH:' + stage_key + ':' + record[len('AUTOKOM_TECH:'):], level='TECH')
+            else:
+                add_log(current, record)
         current.console_offset = offset
         current.console_pending = pending
         current.save(update_fields=['console_offset', 'console_pending'])
@@ -193,6 +205,11 @@ def poll_one(client, run_id):
 
         status = state['status']
         error_message = ''
+        if status == 'FAILED':
+            # A useful status without disclosing Jenkins internals or secrets.
+            # More specifics are available in the filtered technical log.
+            error_message = ('La préparation du projet a échoué. '
+                             'Consultez le journal technique pour identifier l’étape concernée.')
         if status == 'SUCCEEDED':
             from apps.deployments.runs.autokom_socket import request_control
             try:

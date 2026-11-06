@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowLeft, ArrowRight, CheckCircle2, Clock3, FileText, GitBranch, LoaderCircle, RefreshCw, Workflow } from 'lucide-react'
+import { ArrowLeft, ArrowRight, CheckCircle2, Clock3, FileText, GitBranch, LoaderCircle, RefreshCw, Workflow, TerminalSquare, ListChecks } from 'lucide-react'
 import { getRemoteProjectDetail, errorText } from '../services/projectWorkflow.js'
 import { deploymentsApi } from '../services/deploymentsApi.js'
 import { cleanCustomerLog, phaseOrder, phaseTitles, publicationLabel } from '../services/deploymentPresentation.js'
@@ -28,6 +28,8 @@ function RunDetails({ navigate, projectId, runId }) {
   const [projectInfo,setProjectInfo] = useState(null)
   const [run,setRun] = useState(null)
   const [messages,setMessages] = useState([])
+  const [logMode,setLogMode] = useState('technical')
+  const [stageFilter,setStageFilter] = useState('all')
   const [more,setMore] = useState(false)
   const [loading,setLoading] = useState(true)
   const [busy,setBusy] = useState(false)
@@ -44,7 +46,7 @@ function RunDetails({ navigate, projectId, runId }) {
       setProjectInfo(info)
       const [result, logPage] = await Promise.all([
         deploymentsApi.detail(projectId,info.environment.id,runId),
-        deploymentsApi.logs(projectId,info.environment.id,runId,0),
+        deploymentsApi.logs(projectId,info.environment.id,runId,0,logMode),
       ])
       if (!alive) return
       setRun(result?.deployment || null)
@@ -56,14 +58,14 @@ function RunDetails({ navigate, projectId, runId }) {
     }).catch(err => { if (alive) setError(errorText(err)) })
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
-  }, [projectId,runId])
+  }, [projectId,runId,logMode])
 
   const refresh = useCallback(async () => {
     if (!projectInfo?.environment?.id) return
     try {
       const [result, logPage] = await Promise.all([
         deploymentsApi.detail(projectId,projectInfo.environment.id,runId),
-        deploymentsApi.logs(projectId,projectInfo.environment.id,runId,cursor.current),
+        deploymentsApi.logs(projectId,projectInfo.environment.id,runId,cursor.current,logMode),
       ])
       if (result?.deployment) { setRun(result.deployment); liveStatus.current = result.deployment.status }
       const batch = logPage?.logs || []
@@ -72,7 +74,7 @@ function RunDetails({ navigate, projectId, runId }) {
       setMore(batch.length === 100)
       setError('')
     } catch (err) { setError(errorText(err)) }
-  }, [projectId,projectInfo?.environment?.id,runId])
+  }, [projectId,projectInfo?.environment?.id,runId,logMode])
 
   useEffect(() => {
     if (!run || !isPublishing(run.status)) return
@@ -84,7 +86,7 @@ function RunDetails({ navigate, projectId, runId }) {
     if (busy || !projectInfo?.environment?.id) return
     setBusy(true)
     try {
-      const batchPage = await deploymentsApi.logs(projectId,projectInfo.environment.id,runId,cursor.current)
+      const batchPage = await deploymentsApi.logs(projectId,projectInfo.environment.id,runId,cursor.current,logMode)
       const batch = batchPage?.logs || []
       setMessages(current => mergeLogEntries(current,batch))
       cursor.current = batchPage?.next_after ?? cursor.current
@@ -96,7 +98,13 @@ function RunDetails({ navigate, projectId, runId }) {
   if (loading) return <section className="ak-workspace-empty" role="status"><LoaderCircle className="ak-spin" size={20}/> Chargement de la publication…</section>
   if (!run || !projectInfo) return <section className="ak-workspace-empty"><h1>Publication introuvable</h1>{error && <p role="alert">{error}</p>}<button className="button-outline" onClick={() => navigate(`/projects/${projectId}`)}>Revenir au projet</button></section>
   const sortedStages = [...(run.stages || [])].sort((a,b) => (a.position || phaseOrder.indexOf(a.stage_key)) - (b.position || phaseOrder.indexOf(b.stage_key)))
-  const safeMessages = messages.map(item => ({ ...item, safe:cleanCustomerLog(item.message) })).filter(item => item.safe)
+  const safeMessages = messages.map(item => ({ ...item, safe:cleanCustomerLog(item.message) })).filter(item => item.safe && item.level !== 'TECH')
+  const technicalMessages = messages.filter(item =>
+      (item.level === 'TECH' && /^AUTOKOM_TECH:(source|sast|sca|build|release|health):/.test(item.message)) ||
+      (item.level !== 'TECH' && item.message?.startsWith('AUTOKOM_LOG:')))
+    .map(item => ({ ...item, display:item.level === 'TECH' ? item.message.replace(/^AUTOKOM_TECH:[a-z]+:/, '') : cleanCustomerLog(item.message) }))
+    .filter(item => item.display && (stageFilter === 'all' || item.stage_key === stageFilter))
+  const selectMode = next => { if (next !== logMode) { setStageFilter('all'); setLogMode(next) } }
   return <>
     <div className="ak-back-line"><button type="button" className="button-quiet" onClick={() => navigate(`/projects/${projectId}`)}><ArrowLeft size={16}/> {projectInfo.project.name}</button></div>
     <section className="page-hero ak-workspace-hero"><div><p className="ak-page-kicker">Détails de publication</p><h1>Publication {String(run.id).slice(0,8)}</h1><p>{dateTime(run.created_at)} · {displayTrigger(run.trigger_type)}</p></div><div className="ak-project-hero-actions">{statusPill(run.status)}<button className="button-outline" type="button" onClick={refresh}><RefreshCw size={16}/> Actualiser</button></div></section>
@@ -114,9 +122,26 @@ function RunDetails({ navigate, projectId, runId }) {
       {run.error_message && <p className="ak-deployment-error" role="alert">{cleanCustomerLog(run.error_message) || 'Une erreur a interrompu la publication.'}</p>}
     </section>
     <section className="ak-workspace-sheet ak-run-detail-sheet" aria-labelledby="run-logs-title">
-      <div className="ak-workspace-sheet-heading"><div><h2 id="run-logs-title">Journal d’activité</h2><p className="ak-section-subtitle">Informations utiles sur les opérations effectuées.</p></div><FileText size={19} className="ak-muted-icon"/></div>
-      {safeMessages.length ? <ol className="ak-run-log-list">{safeMessages.map(row => <li key={row.sequence}><time>{dateTime(row.created_at)}</time><span>{row.safe}</span></li>)}</ol> : <p className="ak-deployment-hint">Aucune information disponible pour le moment.</p>}
-      {more && <button className="button-outline ak-run-loadmore" disabled={busy} onClick={loadMore}>{busy ? <LoaderCircle size={16} className="ak-spin"/> : <ArrowRight size={16}/>} Afficher les messages suivants</button>}
+      <div className="ak-workspace-sheet-heading ak-log-heading">
+        <div><h2 id="run-logs-title">Journal de publication</h2><p className="ak-section-subtitle">Suivez les événements de chaque étape, sans afficher d’identifiants secrets.</p></div>
+        <div className="ak-log-mode-toggle" role="group" aria-label="Mode des journaux">
+          <button type="button" className={logMode==='technical'?'active':''} aria-pressed={logMode==='technical'} onClick={() => selectMode('technical')}><TerminalSquare size={15}/> Technique</button>
+          <button type="button" className={logMode==='simple'?'active':''} aria-pressed={logMode==='simple'} onClick={() => selectMode('simple')}><ListChecks size={15}/> Synthèse</button>
+        </div>
+      </div>
+      {logMode === 'technical' ? <>
+        <div className="ak-log-filter"><label htmlFor="ak-stage-filter">Filtrer par étape</label><select id="ak-stage-filter" value={stageFilter} onChange={event=>setStageFilter(event.target.value)}>
+          <option value="all">Toutes les étapes</option>
+          {phaseOrder.map(key => <option key={key} value={key}>{phaseTitles[key]}</option>)}
+        </select><span>Seules les lignes de diagnostic autorisées sont affichées.</span></div>
+        <div className="ak-log-console" role="log" aria-label="Journal technique de la publication" aria-live="off">
+          {technicalMessages.length ? technicalMessages.map(row => <div key={row.sequence} className="ak-log-console-line"><time>{dateTime(row.created_at)}</time><span className="ak-log-stage-label">{phaseTitles[row.stage_key] || 'Préparation'}</span><code>{row.display}</code></div>) :
+            <p className="ak-log-console-empty">{run.status === 'FAILED' ? 'Cette ancienne publication ne contient pas de diagnostic technique conservé. Les nouvelles publications disposeront de journaux détaillés ; contactez l’assistance pour cet historique.' : 'Aucun diagnostic technique disponible pour cette étape.'}</p>}
+        </div>
+      </> : <>
+        {safeMessages.length ? <ol className="ak-run-log-list">{safeMessages.map(row => <li key={row.sequence}><time>{dateTime(row.created_at)}</time><span>{row.safe}</span></li>)}</ol> : <p className="ak-deployment-hint">Aucune information disponible pour le moment.</p>}
+      </>}
+      {more && <button className="button-outline ak-run-loadmore" disabled={busy} onClick={loadMore}>{busy ? <LoaderCircle size={16} className="ak-spin"/> : <ArrowRight size={16}/>} Charger davantage de lignes</button>}
     </section>
     <details className="ak-workspace-sheet ak-project-config-fold"><summary className="ak-workspace-sheet-heading ak-project-config-summary"><h2>Configuration utilisée</h2><span className="ak-project-config-suffix"><GitBranch size={18}/></span></summary>
       <dl className="ak-site-info-grid ak-workspace-details"><div><dt>Dépôt GitHub</dt><dd>{projectInfo.project.repository_name}</dd></div><div><dt>Branche</dt><dd>{run.branch || '—'}</dd></div><div><dt>Version</dt><dd>{run.commit_sha ? run.commit_sha.slice(0,12) : '—'}</dd></div><div><dt>Type de publication</dt><dd>{run.mode_snapshot === 'DEVSECOPS' ? 'Sécurité renforcée' : 'Standard'}</dd></div><div><dt>Début</dt><dd>{dateTime(run.started_at)}</dd></div><div><dt>Fin</dt><dd>{dateTime(run.finished_at)}</dd></div></dl>
