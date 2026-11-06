@@ -28,6 +28,8 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 from urllib.error import HTTPError, URLError
 import base64
 import urllib.request
+import threading
+import autokom_internal_ingress as ingress
 
 logger = logging.getLogger('autokom.runtime.broker')
 SOCKET = Path('/run/autokom/platform-control.sock')
@@ -140,6 +142,7 @@ def jenkins_action(action, params):
     _,job,_,_ = jenkins_config()
     if action == 'jenkins.dispatch':
         rid = valid_id(params.get('run_id'))
+        ingress.preflight(run, PROXY, ENABLED)  # fail before an unnecessary Jenkins build
         _isolated_agent_available()
         status,headers,_ = jenkins_http('POST',job+'/buildWithParameters',{'AUTOKOM_RUN_ID':rid})
         if status not in (200,201,202):raise BrokerError('Jenkins a refusé le déploiement.')
@@ -271,8 +274,11 @@ def _docker_deploy_inner(params):
         raise BrokerError('Ressources invalides ou haute disponibilité non disponible.')
     if not isinstance(health,str) or not health.startswith('/') or len(health)>128 or any(x in health for x in ('?','#','%','\\','\r','\n')):
         raise BrokerError('Healthcheck invalide.')
+    ingress.preflight(run, PROXY, ENABLED)
     current=_load_state(environment)
     if current and current.get('run_id')==rid:
+        if current.get('ingress_mode') == ingress.MODE and not ingress.probe_relay(current['name'],current['port']):
+            raise BrokerError('AUTOKOM_INGRESS_NOT_READY: Relais local interrompu.')
         return {'port':current['port'],'container':current['name'],'idempotent':True}
     name='autokom-'+rid.replace('-','')[:20]
     already=subprocess.run(['docker','container','inspect',name],capture_output=True,timeout=12)
@@ -281,6 +287,9 @@ def _docker_deploy_inner(params):
     artifact=IMAGES/(rid+'.tar')
     if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size>8*1024**3 or artifact.stat().st_size<1024:
         raise BrokerError('Archive locale Jenkins introuvable ou non autorisée.')
+    # Also refuse builds without enough free space for image import.
+    if shutil.disk_usage(IMAGES).free < max(256*1024**2, artifact.stat().st_size*2):
+        raise BrokerError('AUTOKOM_DISK_LOW: Stockage insuffisant pour importer l’image.')
     # Fixed trusted tag: only BuildKit-produced images in AUTOKOM's bounded directory.
     tag='autokom-local:'+rid
     # Open no-follow and keep the same inode throughout Docker import (prevent TOCTOU).
@@ -308,21 +317,23 @@ def _docker_deploy_inner(params):
     envfile=_env_file(environment,rid,variables)
     # Customer processes run as UID 10001, without extra capabilities, mounts or Docker socket.
     argv=['docker','run','-d','--name',name,'--network',network,
-          '--publish',f'127.0.0.1::{port}',
           '--cpus',str(cpu/1000),'--memory',f'{mem}m','--memory-swap',f'{mem}m',
           '--pids-limit','128','--cap-drop','ALL','--security-opt','no-new-privileges',
           '--read-only','--tmpfs',f'/tmp:rw,noexec,nosuid,size={min(storage,256)}m',
           '--log-driver','json-file','--log-opt','max-size=10m','--log-opt','max-file=3',
           '--user','10001:10001',
-          '--env-file',str(envfile),'--restart','unless-stopped',tag]
+           '--env-file',str(envfile),'--restart','unless-stopped',tag]
+    relay = None
     try:
         try:
             run(argv,timeout=60)
         finally:
             envfile.unlink(missing_ok=True)  # secrets are never kept as host .env files after create
-        external_port = _docker_loopback_port(name, port)
+        # Nginx owns the trusted loopback listener. Customer has NO published ports.
+        relay = ingress.create(name, network, port, execute=run, available=PROXY, enabled=ENABLED)
+        external_port = relay['port']
         from urllib.request import build_opener
-        health_opener = build_opener(NoRedirect())
+        health_opener = build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         deadline=time.monotonic()+75
         while time.monotonic()<deadline:
             try:
@@ -333,17 +344,29 @@ def _docker_deploy_inner(params):
             time.sleep(2)
         else:raise BrokerError('L’application ne répond pas à son healthcheck. Ancienne version conservée.')
         previous=_load_state(environment)
-        doc={'environment_id':environment,'run_id':rid,'port':external_port,'name':name,'network':network,'healthcheck':health}
-        _save_state(environment,doc)
-        # The previous container stays alive until all TLS proxies are installed.
+        doc={'environment_id':environment,'run_id':rid,'port':external_port,'name':name,'network':network,'healthcheck':health,**relay}
+        # Persist previous BEFORE current so a failed snapshot cannot corrupt the active state.
+        prior_path=STATE/environment/'previous.json'
         if previous:
-            (STATE/environment/'previous.json').write_text(json.dumps(previous),encoding='utf-8')
-            os.chmod(STATE/environment/'previous.json',0o600)
+            if prior_path.exists():
+                raise BrokerError('AUTOKOM_PREVIOUS_PENDING: Ancienne publication non finalisée.')
+            with tempfile.NamedTemporaryFile('w',dir=prior_path.parent,delete=False,prefix='.previous-',encoding='utf-8') as fd:
+                os.chmod(fd.name,0o600);json.dump(previous,fd);fd.write('\n');tmp=fd.name
+            os.replace(tmp,prior_path)
+        try:
+            _save_state(environment,doc)
+        except Exception:
+            if previous:prior_path.unlink(missing_ok=True)
+            raise
         return {'port':external_port,'container':name,'previous':previous.get('name') if previous else None}
     except Exception:
+        if relay is not None:
+            try:
+                ingress.remove(name, execute=run, available=PROXY, enabled=ENABLED)
+            except Exception:
+                logger.error('AUTOKOM_INGRESS_CLEANUP_FAILED')
         subprocess.run(['docker','rm','-f',name],capture_output=True,timeout=20)
         raise
-
 def _rollback(params):
     env=valid_id(params.get('environment_id'))
     rid=valid_id(params.get('run_id'))
@@ -374,6 +397,8 @@ def _rollback(params):
         run(['systemctl','reload','nginx'])
     except BrokerError:
         raise BrokerError('État Docker restauré ; réconciliation manuelle des vhosts Nginx nécessaire.')
+    if state.get('ingress_mode') == ingress.MODE:
+        ingress.remove(state['name'], execute=run, available=PROXY, enabled=ENABLED)
     old_path.unlink(missing_ok=True)
     return {'rolled_back':True,'previous_available':previous is not None}
 
@@ -388,8 +413,12 @@ def _commit(params):
     if previous_path.is_file():
         previous=json.loads(previous_path.read_text())
         if previous.get('name') and previous['name'] != state['name']:
-            try:run(['docker','rm','-f',previous['name']],timeout=20)
-            except BrokerError:pass
+            old_name=valid_container_name(previous['name'])
+            present=subprocess.run(['docker','container','inspect',old_name],capture_output=True,timeout=12)
+            if present.returncode==0:
+                run(['docker','rm','-f',old_name],timeout=20)
+            if previous.get('ingress_mode') == ingress.MODE:
+                ingress.remove(old_name, execute=run, available=PROXY, enabled=ENABLED)
         previous_path.unlink(missing_ok=True)
     return {'committed':True}
 
@@ -529,8 +558,8 @@ def handle(action,params):
     if action.startswith('jenkins.'):
         return jenkins_action(action,params)
     if action=='runtime.deploy':return _docker_deploy(params)
-    if action=='runtime.rollback':return _rollback(params)
-    if action=='runtime.commit':return _commit(params)
+    if action=='runtime.rollback':return _runtime_lock_call(_rollback,params)
+    if action=='runtime.commit':return _runtime_lock_call(_commit,params)
     if action=='runtime.status':
         env=valid_id(params.get('environment_id'))
         return {'runtime':_load_state(env)}
@@ -576,9 +605,12 @@ class Handler(socketserver.StreamRequestHandler):
             response={'ok':True,'result':result}
         except Exception as exc:
             # Only the exception CATEGORY reaches the operator journal. No OAuth, env or args.
-            logger.warning('Broker request denied: %s', type(exc).__name__)
+            safe = isinstance(exc,(BrokerError,ingress.IngressError))
+            match = re.match(r'^(AUTOKOM_[A-Z0-9_]{3,80}):',str(exc)) if safe else None
+            code = exc.code if isinstance(exc,ingress.IngressError) else (match.group(1) if match else 'AUTOKOM_BROKER_REFUSED')
+            logger.warning('Broker request denied: %s code=%s', type(exc).__name__,code)
             # No exception traceback, request content or secret values in response.
-            response={'ok':False,'error':str(exc) if isinstance(exc,BrokerError) else 'Erreur interne du service AUTOKOM.'}
+            response={'ok':False,'error':str(exc) if safe else 'Erreur interne du service AUTOKOM.', 'code':code}
         self.wfile.write((json.dumps(response,ensure_ascii=False)+'\n').encode())
 
 class Server(socketserver.ThreadingUnixStreamServer):
@@ -604,12 +636,56 @@ def _prepare_socket_directory():
     os.chmod(directory, 0o750)
 
 
+def _runtime_lock_call(action, params):
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd=os.open(STATE/'.deploy.lock',os.O_WRONLY|os.O_CREAT,0o600)
+    try:
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        return action(params)
+    finally:
+        fcntl.flock(fd,fcntl.LOCK_UN)
+        os.close(fd)
+
+def _ingress_scan(_unused):
+    # A previously approved relay is updated ONLY when its Docker IP changed.
+    # The same lock as deploy/rollback/commit prevents lost state updates.
+    for folder in STATE.iterdir():
+        if not folder.is_dir() or not UUID.fullmatch(folder.name):
+            continue
+        for filename in ('current.json','previous.json'):
+            record=folder/filename
+            if not record.is_file() or record.is_symlink():
+                continue
+            try:
+                doc=json.loads(record.read_text(encoding='utf-8'))
+                if not isinstance(doc,dict) or doc.get('environment_id')!=folder.name:
+                    continue
+                if ingress.reconcile(doc,execute=run,available=PROXY,enabled=ENABLED):
+                    with tempfile.NamedTemporaryFile('w',dir=folder,delete=False,prefix='.ingress-state-',encoding='utf-8') as fd:
+                        os.chmod(fd.name,0o600)
+                        json.dump(doc,fd)
+                        fd.write('\n')
+                        tmp=fd.name
+                    os.replace(tmp,record)
+                    logger.info('AUTOKOM_INGRESS_IP_RECONCILED')
+            except Exception:
+                logger.warning('AUTOKOM_INGRESS_RECONCILE_PENDING')
+
+def _ingress_watchdog():
+    while True:
+        try:
+            _runtime_lock_call(_ingress_scan,None)
+        except Exception:
+            logger.warning('AUTOKOM_INGRESS_WATCHDOG_UNAVAILABLE')
+        time.sleep(90)
+
 def main():
     if os.geteuid()!=0:raise SystemExit('Lancer par systemd, utilisateur root.')
     _prepare_socket_directory()
     SOCKET.unlink(missing_ok=True)
     STATE.mkdir(parents=True,exist_ok=True,mode=0o700)
     IMAGES.mkdir(parents=True,exist_ok=True,mode=0o750)
+    threading.Thread(target=_ingress_watchdog,name='autokom-ingress-watchdog',daemon=True).start()
     with Server(str(SOCKET),Handler) as server:
         os.chown(SOCKET,0,pwd.getpwnam('autokom').pw_gid)
         os.chmod(SOCKET,0o660)

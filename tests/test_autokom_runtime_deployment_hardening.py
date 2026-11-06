@@ -28,9 +28,13 @@ class DeploymentHardeningTests(TestCase):
 
     def test_port_is_not_selected_by_scanning(self):
         source=(ROOT/'scripts/lib/autokom_platform_broker.py').read_text()
-        self.assertIn("'--publish',f'127.0.0.1::{port}'",source)
+        self.assertNotIn("'--publish',f'127.0.0.1::{port}'",source)
         self.assertNotIn('_port_available()',source)
-        self.assertIn('external_port = _docker_loopback_port(name, port)',source)
+        self.assertIn('relay = ingress.create(',source)
+        self.assertIn("external_port = relay['port']",source)
+        relay=(ROOT/'scripts/lib/autokom_internal_ingress.py').read_text()
+        self.assertIn('listen 127.0.0.1:',relay)
+        self.assertNotIn('--publish',relay)
 
     def test_customer_api_does_not_reveal_ports_or_ci_provider(self):
         config=(ROOT/'platform/backend/apps/projects/configurations/serializers.py').read_text()

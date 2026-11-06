@@ -403,6 +403,14 @@ except (OSError,ValueError,KeyError,TypeError):
     except (BuildkitError, OSError, KeyError) as exc:
         raise SetupError('BuildKit rootless non opérationnel : ' + str(exc)) from exc
     print('  ✓ BuildKit rootless accessible par Jenkins : socket, worker et RUN validés.')
+    # private ingress doctor: read-only preflight and active HTTP healthcheck
+    from autokom_internal_ingress import diagnose, IngressError
+    from autokom_platform_broker import run as broker_run, PROXY, ENABLED, STATE
+    try:
+        ingress_report = diagnose(broker_run, PROXY, ENABLED, STATE)
+    except IngressError as exc:
+        raise SetupError(str(exc)) from exc
+    print('  ✓ Ingress privé : '+str(ingress_report['ingresses_checked'])+' publication(s) inspectée(s).')
     if failures:
         raise SetupError('Un ou plusieurs services ne sont pas actifs.')
     return 0
