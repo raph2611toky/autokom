@@ -1,0 +1,175 @@
+---
+# BuildKit official release checksums, pinned in Git. Never follow latest at runtime.
+- name: Refuser les environnements autres qu'Ubuntu AMD64/ARM64
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['os_family'] == 'Debian'
+      - ansible_facts['architecture'] in ['x86_64', 'aarch64']
+      - ansible_facts['virtualization_type'] | default('') != 'docker'
+    fail_msg: "BuildKit rootless AUTOKOM requiert un serveur Ubuntu x86_64 ou aarch64 (pas un conteneur Docker)."
+
+- name: Définir la version et les empreintes vérifiées de BuildKit
+  ansible.builtin.set_fact:
+    ak_bk_version: 'v0.34.2'
+    ak_bk_arch: "{{ {'x86_64':'amd64','aarch64':'arm64'}[ansible_facts['architecture']] }}"
+    ak_bk_digests:
+      amd64: b9f18b8e37eb450e9e5df03117045237cdd12d3c4a0034ffeeaa857852a15e13
+      arm64: a4ad483a33b2f1544c5ccce1c5956c559e1a6e84b8bf6cedd847d695885237a3
+
+- name: Installer les composants de rootlesskit sans toucher à Docker ni à containerd
+  ansible.builtin.apt:
+    name:
+      - uidmap
+      - rootlesskit
+      - slirp4netns
+      - fuse-overlayfs
+      - ca-certificates
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Assurer un groupe spécifique au service BuildKit
+  ansible.builtin.group:
+    name: autokom-buildkit
+    system: true
+    state: present
+
+- name: Assurer le compte du daemon différent de Jenkins
+  ansible.builtin.user:
+    name: autokom-buildkit
+    group: autokom-buildkit
+    groups: []
+    append: false
+    home: /var/lib/autokom-buildkit
+    system: true
+    create_home: true
+    shell: /usr/sbin/nologin
+
+- name: Allouer les sous-UID et sous-GID sans conflit avec les autres services
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - "{{ playbook_dir }}/../../scripts/lib/autokom_buildkit_subids.py"
+      - autokom-buildkit
+  register: ak_bk_subids
+  changed_when: "'AUTOKOM_SUBID:CHANGED' in ak_bk_subids.stdout"
+  when: not ansible_check_mode
+
+- name: Protéger les emplacements du binaire et de l'état BuildKit
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /opt/autokom/toolchains, owner: root, group: root, mode: '0755'}
+    - {path: /opt/autokom/toolchains/buildkit, owner: root, group: root, mode: '0755'}
+    - {path: /opt/autokom/toolchains/buildkit/v0.34.2, owner: root, group: root, mode: '0755'}
+    - {path: /var/cache/autokom, owner: root, group: root, mode: '0700'}
+    - {path: /var/cache/autokom/buildkit, owner: root, group: root, mode: '0700'}
+    - {path: /var/lib/autokom-buildkit, owner: autokom-buildkit, group: autokom-buildkit, mode: '0700'}
+
+- name: Télécharger la release officielle figée et contrôler SHA-256
+  ansible.builtin.get_url:
+    url: "https://github.com/moby/buildkit/releases/download/{{ ak_bk_version }}/buildkit-{{ ak_bk_version }}.linux-{{ ak_bk_arch }}.tar.gz"
+    dest: "/var/cache/autokom/buildkit/buildkit-{{ ak_bk_version }}.linux-{{ ak_bk_arch }}.tar.gz"
+    checksum: "sha256:{{ ak_bk_digests[ak_bk_arch] }}"
+    owner: root
+    group: root
+    mode: '0600'
+    timeout: 60
+  register: ak_bk_download
+
+- name: Extraire les outils dans un répertoire propre à AUTOKOM (root seul propriétaire)
+  ansible.builtin.unarchive:
+    src: "/var/cache/autokom/buildkit/buildkit-{{ ak_bk_version }}.linux-{{ ak_bk_arch }}.tar.gz"
+    dest: "/opt/autokom/toolchains/buildkit/{{ ak_bk_version }}"
+    remote_src: true
+    owner: root
+    group: root
+    creates: "/opt/autokom/toolchains/buildkit/{{ ak_bk_version }}/bin/buildkitd"
+  when: not ansible_check_mode
+
+- name: Vérifier les binaires nécessaires sans leur substituer une version globale
+  ansible.builtin.stat:
+    path: "/opt/autokom/toolchains/buildkit/{{ ak_bk_version }}/bin/{{ item }}"
+    follow: false
+  loop: [buildctl, buildkitd, buildkit-runc]
+  register: ak_bk_binaries
+  when: not ansible_check_mode
+
+- name: Exiger les trois binaires officiels (pas de symlink)
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+      - not item.stat.islnk
+      - item.stat.pw_name == 'root'
+      - item.stat.executable
+  loop: "{{ ak_bk_binaries.results }}"
+  when: not ansible_check_mode
+
+- name: Refuser le groupe Docker pour les deux identités
+  ansible.builtin.command:
+    argv: [id, -nG, "{{ item }}"]
+  loop: [autokom-builder, autokom-buildkit]
+  register: ak_bk_groups
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Bloquer l'appartenance Docker et les identités identiques
+  ansible.builtin.assert:
+    that:
+      - "'docker' not in ak_bk_groups.results[0].stdout.split()"
+      - "'docker' not in ak_bk_groups.results[1].stdout.split()"
+  when: not ansible_check_mode
+
+- name: Installer l'unité BuildKit rootless sans exposer de port TCP
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/systemd/autokom-buildkit.service"
+    dest: /etc/systemd/system/autokom-buildkit.service
+    owner: root
+    group: root
+    mode: '0644'
+  register: ak_bk_service
+
+- name: Relire les unités systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: not ansible_check_mode
+
+- name: Démarrer ou redémarrer uniquement le daemon BuildKit AUTOKOM
+  ansible.builtin.systemd_service:
+    name: autokom-buildkit.service
+    enabled: true
+    state: "{{ 'restarted' if ak_bk_service.changed else 'started' }}"
+  when: not ansible_check_mode
+
+- name: Attendre le socket Unix privé BuildKit
+  ansible.builtin.wait_for:
+    path: /run/autokom-buildkit/buildkitd.sock
+    state: present
+    timeout: 65
+  when: not ansible_check_mode
+
+- name: Vérifier les workers BuildKit sous l'identité Jenkins réelle
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - autokom-builder
+      - --
+      - env
+      - BUILDKIT_HOST=unix:///run/autokom-buildkit/buildkitd.sock
+      - /opt/autokom/toolchains/buildkit/v0.34.2/bin/buildctl
+      - debug
+      - workers
+  register: ak_bk_workers
+  changed_when: false
+  retries: 5
+  delay: 3
+  until: ak_bk_workers.rc == 0 and 'ID' in ak_bk_workers.stdout
+  when: not ansible_check_mode
+  no_log: true

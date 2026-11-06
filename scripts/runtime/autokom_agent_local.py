@@ -10,6 +10,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -54,13 +57,55 @@ def manifest():
     return doc
 
 
+def buildkit_preflight():
+    """Fail closed with an actionable, non-secret reason before building.
+
+    A client must never be given access to the host Docker socket or rootful
+    BuildKit socket. The isolated agent needs its own UNIX BuildKit endpoint.
+    """
+    if not shutil.which('buildctl'):
+        fail('Compilation indisponible : client BuildKit absent sur le serveur.')
+    endpoint = os.getenv('BUILDKIT_HOST', '').strip()
+    if not endpoint.startswith('unix:///') or '?' in endpoint or '#' in endpoint:
+        fail('Compilation indisponible : socket BuildKit isolé non configuré.')
+    address = endpoint[len('unix://'):]
+    if not address.startswith('/') or '\x00' in address:
+        fail('Compilation indisponible : adresse BuildKit locale invalide.')
+    path = Path(address)
+    # Never permit the privileged daemon's default socket as a fallback.
+    allowed = Path('/run/autokom-buildkit/buildkitd.sock')
+    if path != allowed:
+        fail('Compilation indisponible : socket BuildKit non isolé.')
+    try:
+        if path.is_symlink() or not stat.S_ISSOCK(path.stat().st_mode):
+            fail('Compilation indisponible : socket BuildKit invalide.')
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(3)
+            connection.connect(address)
+    except FileNotFoundError:
+        fail('Compilation indisponible : socket BuildKit absent, service à provisionner.')
+    except (PermissionError, ConnectionRefusedError, TimeoutError, OSError):
+        fail('Compilation indisponible : service BuildKit isolé inaccessible.')
+
+
 def execute(argv,timeout=1500):
     env={k:v for k,v in os.environ.items() if k not in ('AUTOKOM_RUNNER_SHARED_KEY',
          'JENKINS_API_TOKEN','GITHUB_TOKEN','GITHUB_APP_CLIENT_SECRET','AWS_SECRET_ACCESS_KEY','AWS_SESSION_TOKEN')}
     try:
         subprocess.run(argv,check=True,timeout=timeout,env=env)
-    except (OSError,subprocess.CalledProcessError,subprocess.TimeoutExpired):
-        fail('Commande du runner refusée; consulter les logs protégés Jenkins.')
+    except FileNotFoundError:
+        fail('Commande approuvée indisponible sur le serveur.')
+    except PermissionError:
+        fail('Exécution refusée par les permissions de l’agent isolé.')
+    except subprocess.TimeoutExpired:
+        fail('Étape de compilation expirée; vérifier les journaux administrateur.')
+    except subprocess.CalledProcessError as exc:
+        # Raw build output remains in Jenkins, not exposed through the client API.
+        if argv and argv[0] == 'buildctl':
+            fail('Compilation échouée (BuildKit, code retour %d). Vérifier le journal administrateur.' % exc.returncode)
+        fail('Analyse refusée (code retour %d). Vérifier le journal administrateur.' % exc.returncode)
+    except OSError:
+        fail('Commande du runner indisponible; vérifier le serveur.')
 
 
 def source(doc):
@@ -141,6 +186,7 @@ def build(doc):
             'EXPOSE 8080\n'
         )
     stage('build','RUNNING')
+    buildkit_preflight()
     with tempfile.NamedTemporaryFile(dir=artifact_dir,prefix='.building-',suffix='.tar',delete=False) as tmp:
         temp=Path(tmp.name)
     try:

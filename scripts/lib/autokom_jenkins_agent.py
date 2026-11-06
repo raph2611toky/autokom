@@ -251,7 +251,7 @@ def provision_system_dependencies(*, apply):
     if not apply:
         args.append('--check')
     args.append(str(playbook))
-    run_live(args, env=env, label='Préparation isolée de l’agent Jenkins', timeout=300)
+    run_live(args, env=env, label='Préparation isolée de l’agent Jenkins', timeout=900)
 
 
 def preflight(env):
@@ -333,7 +333,7 @@ def provision(env, *, apply):
     print('  › Nœud prévu : ' + NODE_NAME + ' · label : ' + LABEL)
     print('  › URL de liaison : http://127.0.0.1:8080/ (loopback uniquement)')
     if not apply:
-        print('  ✓ Prévisualisation : création du nœud, secret privé, Java et unité systemd prévus.')
+        print('  ✓ Prévisualisation : agent Jenkins, BuildKit rootless et services systemd prévus.')
         return 0
     # Caller provides the confirmation before running this mutable routine.
     provision_system_dependencies(apply=True)
@@ -353,6 +353,12 @@ def provision(env, *, apply):
     systemctl('restart', UNIT)
     print('  ✓ Service systemd : ' + UNIT)
     await_online(env)
+    from autokom_buildkit_admin import healthcheck, BuildkitError
+    try:
+        healthcheck()
+    except BuildkitError as exc:
+        raise AgentError(str(exc)) from exc
+    print('  ✓ BuildKit rootless prêt : socket privé et worker opérationnel.')
     print('  ✓ Agent isolé connecté à Jenkins (API vérifiée).')
     print('  › Ancien nœud autokom-isolated : révoquer s’il existe encore (secret déjà exposé).')
     return 0

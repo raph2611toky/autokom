@@ -1,0 +1,7 @@
+---
+- name: AUTOKOM | Provisionnement BuildKit rootless isolé
+  hosts: local
+  become: true
+  gather_facts: true
+  roles:
+    - role: ../roles/buildkit_rootless

@@ -395,6 +395,12 @@ except (OSError,ValueError,KeyError,TypeError):
         print('  ✗ Agent autokom-isolated : '+reason)
         raise SetupError('Agent de compilation isolé absent ou hors ligne. N’ajouter aucun label au contrôleur Jenkins.')
     print('  ✓ Agent autokom-isolated connecté avec au moins un exécuteur.')
+    from autokom_buildkit_admin import healthcheck, BuildkitError
+    try:
+        healthcheck()
+    except (BuildkitError, OSError, KeyError) as exc:
+        raise SetupError('BuildKit rootless non opérationnel : ' + str(exc)) from exc
+    print('  ✓ BuildKit rootless accessible par Jenkins (socket privé et worker disponible).')
     if failures:
         raise SetupError('Un ou plusieurs services ne sont pas actifs.')
     return 0
@@ -414,6 +420,10 @@ def main(argv=None):
         group=p.add_mutually_exclusive_group()
         group.add_argument('--check',action='store_true')
         group.add_argument('--apply',action='store_true')
+    buildkit=sub.add_parser('buildkit', help='Installer et vérifier BuildKit rootless isolé')
+    bk_group=buildkit.add_mutually_exclusive_group()
+    bk_group.add_argument('--check',action='store_true')
+    bk_group.add_argument('--apply',action='store_true')
     agent=sub.add_parser('agent', help='Provisionner automatiquement un agent Jenkins isolé')
     group=agent.add_mutually_exclusive_group()
     group.add_argument('--check',action='store_true')
@@ -435,6 +445,12 @@ def main(argv=None):
         return 0
     if os.geteuid():raise SetupError('Utiliser sudo autokom runtime '+opts.action)
     if opts.action=='doctor':return doctor()
+    if opts.action=='buildkit':
+        from autokom_buildkit_admin import provision, BuildkitError
+        try:
+            if opts.apply: confirm('PROVISIONNER')
+            return provision(apply=opts.apply)
+        except BuildkitError as exc: raise SetupError(str(exc)) from exc
     if opts.action=='agent':
         from autokom_jenkins_agent import provision, AgentError
         try:

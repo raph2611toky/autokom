@@ -1,0 +1,39 @@
+[Unit]
+Description=AUTOKOM - BuildKit rootless daemon (private UNIX socket)
+Documentation=https://github.com/moby/buildkit/blob/master/docs/rootless.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=6
+
+[Service]
+Type=simple
+User=autokom-buildkit
+Group=autokom-buildkit
+WorkingDirectory=/var/lib/autokom-buildkit
+Environment=HOME=/var/lib/autokom-buildkit
+Environment=XDG_RUNTIME_DIR=/run/autokom-buildkit-private
+Environment=PATH=/opt/autokom/toolchains/buildkit/v0.34.2/bin:/usr/local/bin:/usr/bin:/bin
+# The directory is created on every start under /run (tmpfs). Builder gets traverse, not write.
+ExecStartPre=+/usr/bin/install -d -m 0700 -o autokom-buildkit -g autokom-buildkit /run/autokom-buildkit-private
+ExecStartPre=+/usr/bin/install -d -m 0750 -o autokom-buildkit -g autokom-builder /run/autokom-buildkit
+ExecStart=/usr/bin/rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback /opt/autokom/toolchains/buildkit/v0.34.2/bin/buildkitd --addr unix:///run/autokom-buildkit/buildkitd.sock --root /var/lib/autokom-buildkit --oci-worker=true --oci-worker-binary /opt/autokom/toolchains/buildkit/v0.34.2/bin/buildkit-runc --oci-worker-snapshotter=native
+ExecStartPost=+/usr/bin/python3 /opt/autokom/source/scripts/lib/autokom_buildkit_socket_permissions.py
+TimeoutStartSec=85
+Restart=on-failure
+RestartSec=7
+UMask=0007
+# newuidmap/newgidmap need their normal setuid transitions for a user namespace.
+NoNewPrivileges=false
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+LimitNOFILE=65536
+TasksMax=384
+MemoryMax=3G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

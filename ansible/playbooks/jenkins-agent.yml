@@ -5,3 +5,4 @@
   gather_facts: true
   roles:
     - role: ../roles/jenkins_agent
+    - role: ../roles/buildkit_rootless
