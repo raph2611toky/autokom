@@ -61,6 +61,58 @@ def healthcheck(*, timeout=20):
 
 
 
+def _smoke_failure_code(output):
+    """Map only expected *public smoke-test* output to administrator-safe categories."""
+    value = (output or '').lower()
+    if any(fragment in value for fragment in (
+            'error mounting "proc"', "error mounting 'proc'",
+            'mount too revealing', 'mount proc:/proc')):
+        return ('PROCFS_DENIED',
+                'Montage /proc refusé : inspecter le namespace de montage du service '
+                '(ProtectKernelTunables, MountAPIVFS et autres masquages).')
+    if any(fragment in value for fragment in (
+            'apparmor', 'permission denied', 'operation not permitted')):
+        return ('HOST_POLICY_DENIED',
+                'Opération interdite par le noyau ou une politique hôte : inspecter le journal du noyau.')
+    if any(fragment in value for fragment in (
+            'failed to resolve source metadata', 'i/o timeout',
+            'network is unreachable', 'no such host', 'tls handshake timeout')):
+        return ('REGISTRY_UNAVAILABLE',
+                'Image publique de vérification inaccessible : vérifier DNS, TLS et sortie réseau du démon.')
+    if 'no space left on device' in value or 'disk quota exceeded' in value:
+        return ('STORAGE_LIMIT',
+                'Capacité de stockage ou quota de namespaces insuffisant.')
+    if any(fragment in value for fragment in ('connection refused', 'dial unix', 'permission denied on unix socket')):
+        return ('BUILDKIT_SOCKET', 'Connexion au socket BuildKit impossible.')
+    return ('OCI_RUN_FAILED',
+            'Le build OCI a échoué. Lire le journal de diagnostic privé (aucun secret client).')
+
+
+def _save_private_probe_log(output):
+    """Persist only bounded output from a fixed BusyBox probe, never a customer build.
+
+    Root-owned private path. On a read-only/unsupported host, return None.
+    """
+    import datetime
+    root = Path('/var/log/autokom/runtime')
+    try:
+        if os.geteuid() != 0 or root.is_symlink() or not root.is_dir():
+            return None
+        info = root.stat()
+        if info.st_uid != 0 or (stat.S_IMODE(info.st_mode) & 0o002):
+            return None
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        path = root / ('buildkit-smoke-' + stamp + '-' + secrets.token_hex(4) + '.log')
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, 'w', encoding='utf-8', errors='replace') as stream:
+            stream.write('AUTOKOM OCI smoke test (public BusyBox, no customer source)\n')
+            stream.write((output or '')[-131072:])
+        return str(path)
+    except (OSError, ValueError):
+        return None
+
+
 def smoke_test(*, timeout=240, workspace_base=None):
     """Exercise an actual OCI RUN through the *managed* unprivileged daemon.
 
@@ -106,20 +158,36 @@ def smoke_test(*, timeout=240, workspace_base=None):
     except OSError as exc:
         raise BuildkitError('Test RUN BuildKit non exécutable par le compte Jenkins.') from exc
     if completed.returncode:
-        # Never emit raw builder logs into an end-user response. They can be
-        # inspected by the administrator in the private BuildKit/Jenkins journal.
-        output = ((completed.stdout or '') + '\n' + (completed.stderr or '')).lower()
-        if ('mount too revealing' in output or 'error mounting "proc"' in output
-                or "error mounting 'proc'" in output):
-            raise BuildkitError('Test RUN : montage /proc refusé par le noyau. '
-                                'Vérifier ProtectKernelTunables du service AUTOKOM BuildKit.')
-        if 'failed to resolve source metadata' in output or 'i/o timeout' in output:
-            raise BuildkitError('Test RUN : récupération de l’image de vérification impossible.')
-        if 'no space left on device' in output:
-            raise BuildkitError('Test RUN : espace disque ou quota de namespace insuffisant.')
-        raise BuildkitError('Test RUN BuildKit échoué (code %d). '
-                            'Consulter les journaux privés du moteur.' % completed.returncode)
+        # The fixed probe never includes customer sources or secrets; nonetheless,
+        # publish only the bounded error category, not raw OCI traces, to the CLI.
+        output = (completed.stdout or '') + '\n' + (completed.stderr or '')
+        code, explanation = _smoke_failure_code(output)
+        private_report = _save_private_probe_log(output)
+        suffix = (' Journal privé administrateur : ' + private_report
+                  if private_report else ' Journal privé indisponible.')
+        raise BuildkitError('Test RUN : ' + code + ' (rc=' + str(completed.returncode)
+                            + '). ' + explanation + suffix)
     return True
+
+
+def main(argv=None):
+    """Stable entrypoint for Ansible: safe, diagnostic and fail-closed."""
+    import sys
+    if list(sys.argv[1:] if argv is None else argv) != ['--smoke-test']:
+        print('Usage: autokom_buildkit_admin.py --smoke-test', file=sys.stderr)
+        return 64
+    try:
+        healthcheck()
+        smoke_test()
+    except BuildkitError as exc:
+        print('AUTOKOM_BUILD_SMOKE_FAILED: ' + str(exc), file=sys.stderr)
+        return 2
+    print('AUTOKOM_BUILD_SMOKE_OK')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
 
 def provision(*, apply):
     from autokom_runtime_admin import ROOT, run_live

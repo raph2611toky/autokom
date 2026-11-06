@@ -174,15 +174,24 @@
   when: not ansible_check_mode
   no_log: true
 
-# A successful "buildctl debug workers" does not prove OCI process creation.
-# Always exercise a RUN in the same rootless runtime used by Jenkins.
+# A successful worker listing is not enough: the command below calls
+# healthcheck() then smoke_test() and emits ONLY an administrator-safe reason.
+# A root-only diagnostic report contains the bounded output of this fixed
+# public BusyBox probe, never any customer workspace or secrets.
 - name: Vérifier une exécution OCI réelle (RUN true) avant de déclarer BuildKit prêt
   ansible.builtin.command:
     argv:
       - /usr/bin/python3
-      - -c
-      - "from autokom_buildkit_admin import healthcheck, smoke_test; healthcheck(); smoke_test()"
-  environment:
-    PYTHONPATH: "{{ playbook_dir }}/../../scripts/lib"
+      - "{{ playbook_dir }}/../../scripts/lib/autokom_buildkit_admin.py"
+      - --smoke-test
+  register: ak_bk_smoke
   changed_when: false
+  failed_when: false
   when: not ansible_check_mode
+
+- name: Refuser un moteur qui ne peut pas réellement exécuter un RUN
+  ansible.builtin.fail:
+    msg: "{{ (ak_bk_smoke.stderr | default('Aucun diagnostic disponible.')) | truncate(900, true) }}"
+  when:
+    - not ansible_check_mode
+    - (ak_bk_smoke.rc | default(1) | int) != 0
