@@ -7,6 +7,7 @@ class Project(models.Model):
     class Status(models.TextChoices):
         ACTIVE = 'ACTIVE', 'Actif'
         ARCHIVED = 'ARCHIVED', 'Archivé'
+        DELETED = 'DELETED', 'Supprimé (historique conservé)'
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey('organizations.Organization', on_delete=models.PROTECT, related_name='projects')
     created_by = models.ForeignKey('accounts.User', on_delete=models.PROTECT, related_name='created_projects')

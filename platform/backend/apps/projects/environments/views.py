@@ -10,6 +10,7 @@ from apps.projects.environments.serializers import (EnvironmentSerializer, Envir
     DomainSerializer, DomainCreateSerializer, DomainReassignSerializer)
 from apps.projects.environments.services import create_environment, get_variable_or_404, validate_variable
 from apps.projects.project.services import reserve_domain
+from apps.deployments.domains.services import claim_domain, domain_summary
 from apps.deployments.domains.models import Domain
 from apps.projects.common import validate_hostname
 from helpers.responses import api_success
@@ -161,7 +162,7 @@ class EnvironmentDomainsAPIView(APIView):
     def get(self, request, project_id, environment_id):
         try:
             _, env = get_environment(request.user, project_id, environment_id)
-            return api_success({'domains': DomainSerializer(env.domains.order_by('hostname'), many=True).data}, 'Domaines de l’environnement.')
+            return api_success({'domains': [domain_summary(d, include_challenge=True) for d in env.domains.order_by('hostname')]}, 'Domaines de l’environnement.')
         except Exception as exc:
             return handle_error(exc, 'domain_list')
 
@@ -175,9 +176,14 @@ class EnvironmentDomainCreateAPIView(APIView):
             project, env = get_environment(request.user, project_id, environment_id, write=True)
             serializer = DomainCreateSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
-            domain = reserve_domain(project, env, serializer.validated_data.get('hostname', ''))
-            return api_success({'domain': DomainSerializer(domain).data},
-                               'Domaine réservé. La configuration DNS/HTTPS sera réalisée au déploiement.', 201)
+            hostname=serializer.validated_data.get('hostname', '').strip()
+            if not hostname:
+                raise ValidationError({'hostname':'Nom du domaine requis.'})
+            from apps.deployments.domains.services import _managed
+            kind=Domain.Type.SUBDOMAIN if _managed(hostname.lower().strip('.')) else Domain.Type.CUSTOM
+            domain = claim_domain(request.user, project_id, environment_id, hostname, kind)
+            return api_success({'domain': domain_summary(domain, include_challenge=True)},
+                               'Domaine réservé. Activez la vérification DNS/HTTPS.', 201)
         except Exception as exc:
             return handle_error(exc, 'domain_create')
 

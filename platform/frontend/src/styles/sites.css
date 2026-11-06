@@ -177,3 +177,22 @@
 @media(max-width: 800px) { .ak-project-row, .ak-site-list-row { grid-template-columns:40px minmax(0,1fr) auto; gap:12px; } .ak-project-open,.ak-site-list-chevron { grid-column:3; grid-row:1; } .ak-project-state { grid-column:2 / -1; justify-self:start; grid-row:2; } }
 @media(max-width: 520px) { .ak-workspace-toolbar .search-field { width:100%; } .ak-workspace-filters { width:100%; } .ak-workspace-filters button { flex:1; padding:9px 5px; font-size:10px; } .ak-project-row,.ak-site-list-row { grid-template-columns:34px minmax(0,1fr) 26px; gap:9px; padding:14px 0; } .ak-project-row-symbol { width:34px; height:34px; } .ak-project-row-main strong { font-size:13px; } .ak-project-row-main small { font-size:11px; } .ak-project-open { width:28px; height:28px; } .ak-site-detail-head { flex-wrap:wrap; } .ak-site-domain-panel { gap:10px; } }
 @media(prefers-reduced-motion:reduce) { .ak-site-list-chevron { transition:none !important; } }
+
+/* AUTOKOM: real public-site state, never a synthetic URL while DNS/TLS is pending. */
+.ak-public-site {display:flex;align-items:center;justify-content:space-between;gap:20px;border:1px solid var(--ak-border-strong);background:var(--ak-surface);padding:20px 24px;margin:18px 0;flex-wrap:wrap;min-width:0}
+.ak-public-site.compact {padding:12px 16px;margin:8px 0}
+.ak-public-site-text {min-width:0;overflow-wrap:anywhere}
+.ak-public-site-text strong,.ak-public-site-address a,.ak-public-site-actions {display:flex;align-items:center;gap:8px}
+.ak-public-site-address {font-weight:700;margin:7px 0}
+.ak-public-site-address a {color:var(--ak-accent);text-decoration:underline;text-underline-offset:3px}
+.ak-public-site-text small {display:block;color:var(--ak-muted);font-size:12px}
+.ak-public-site-actions {flex-wrap:wrap}
+.ak-domain-manager-form {display:flex;flex-wrap:wrap;gap:10px;margin:20px 0}
+.ak-domain-manager-form input {min-width:240px;flex:1;padding:12px 14px;background:var(--ak-surface);color:var(--ak-text-strong);border:1px solid var(--ak-border-strong)}
+.ak-domain-entry {padding:17px 0;border-top:1px solid var(--ak-border);overflow-wrap:anywhere}
+.ak-domain-entry-head {display:flex;gap:10px;justify-content:space-between;flex-wrap:wrap}
+.ak-domain-entry-actions {display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.ak-domain-proof {font-size:12px;color:var(--ak-muted);white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6}
+.ak-project-row-public {display:flex;flex-direction:column;align-items:flex-start;gap:5px;font-size:12px;max-width:250px;overflow-wrap:anywhere}
+.ak-project-row-public a {color:var(--ak-accent);text-decoration:underline}
+@media(max-width:700px){.ak-public-site {padding:16px}.ak-project-row-public {max-width:none}.ak-domain-manager-form input {min-width:0;width:100%}}

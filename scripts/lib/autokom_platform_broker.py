@@ -439,7 +439,7 @@ def _check_dns(host,token,managed):
     valid_hostname(host)
     ingress=os.environ.get('AUTOKOM_INGRESS_IPV4','')
     try:ipaddress.IPv4Address(ingress)
-    except ValueError:raise BrokerError('AUTOKOM_INGRESS_IPV4 requis (IP publique fixe).')
+    except ValueError:raise BrokerError('AUTOKOM_INGRESS_IPV4_MISSING: Adresse IPv4 publique non configurée.')
     if managed:
         suffix=os.environ.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX','').strip('.').lower()
         if not suffix or not host.endswith('.'+suffix) or host==suffix:
@@ -458,7 +458,7 @@ def _cloudflare_record(host):
     zone=(os.environ.get('CLOUDFLARE_ZONE_ID') or os.environ.get('AUTOKOM_CLOUDFLARE_ZONE_ID',''))
     token=(os.environ.get('CLOUDFLARE_API_TOKEN') or os.environ.get('AUTOKOM_CLOUDFLARE_TOKEN',''))
     if not suffix or not host.endswith('.'+suffix) or not re.fullmatch(r'[a-f0-9]{32}',zone) or not token:
-        raise BrokerError('Gestion Cloudflare IKOM non configurée.')
+        raise BrokerError('AUTOKOM_DOMAIN_CLOUDFLARE_CONFIG_MISSING: Accès Cloudflare ou zone gérée non configurés.')
     ingress=os.environ.get('AUTOKOM_INGRESS_IPV4','')
     try:ipaddress.IPv4Address(ingress)
     except ValueError:raise BrokerError('IP ingress non configurée.')
@@ -471,7 +471,7 @@ def _cloudflare_record(host):
     results=data.get('result') or []
     if results:
         if len(results)!=1 or results[0].get('content')!=ingress or results[0].get('proxied'):
-            raise BrokerError('Enregistrement Cloudflare existant différent : aucune modification.')
+            raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Un enregistrement différent existe déjà ; aucun remplacement automatique.')
         return {'created':False}
     payload=json.dumps({'type':'A','name':host,'content':ingress,'ttl':120,'proxied':False}).encode()
     req=Request(base,data=payload,headers=headers,method='POST')
@@ -535,7 +535,7 @@ def _proxy_apply(host,environment):
         # Certbot --keep-until-expiring reuses a currently valid certificate.
         if True:
             email=os.environ.get('AUTOKOM_ACME_EMAIL','')
-            if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email):raise BrokerError('E-mail Certbot AUTOKOM absent.')
+            if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email):raise BrokerError('AUTOKOM_ACME_EMAIL_MISSING: Adresse de contact TLS absente.')
             run(['certbot','certonly','--webroot','-w',str(WEBROOT),
                  '-d',host,'--agree-tos','--keep-until-expiring','--non-interactive','--email',email],timeout=130)
         publish(_nginx_config(host,state['port'],tls=True))
@@ -549,6 +549,106 @@ def _proxy_apply(host,environment):
         raise
     return {'active':True,'hostname':host}
 
+
+def _deactivate_owned_vhost(host, environment):
+    """Remove only a host explicitly assigned to an environment by AUTOKOM.
+
+    Never remove unrelated Nginx files; if Nginx validation/reload fails,
+    restore the exact managed configuration before returning a failure.
+    """
+    valid_hostname(host); valid_id(environment)
+    conf=PROXY/('autokom-customer-'+host+'.conf')
+    link=ENABLED/conf.name
+    owner=STATE/('domain-owner-'+host+'.txt')
+    if not owner.is_file():
+        if conf.exists() or conf.is_symlink() or link.exists() or link.is_symlink():
+            raise BrokerError('AUTOKOM_DOMAIN_OWNERSHIP_MISSING: Vhost présent sans propriété enregistrée.')
+        return False
+    if owner.is_symlink() or owner.read_text(encoding='utf-8').strip()!=environment:
+        raise BrokerError('AUTOKOM_DOMAIN_OWNERSHIP_MISMATCH: Domaine attribué ailleurs.')
+    if (conf.is_symlink() or not conf.is_file() or not link.is_symlink()
+            or link.resolve()!=conf):
+        raise BrokerError('AUTOKOM_DOMAIN_VHOST_TAMPERED: Vhost géré non conforme.')
+    original=conf.read_bytes()
+    if ('server_name '+host+';').encode() not in original:
+        raise BrokerError('AUTOKOM_DOMAIN_VHOST_TAMPERED: Configuration inattendue.')
+    link.unlink()
+    conf.unlink()
+    try:
+        run(['nginx','-t'],timeout=12)
+        run(['systemctl','reload','nginx'],timeout=15)
+    except Exception:
+        # Retain the original ownership marker while reverting.
+        with tempfile.NamedTemporaryFile('wb',dir=PROXY,delete=False,prefix='.autokom-restore-') as stream:
+            stream.write(original)
+            temporary=stream.name
+        os.chmod(temporary,0o644)
+        os.replace(temporary,conf)
+        link.symlink_to(conf)
+        try:
+            run(['nginx','-t'],timeout=12)
+            run(['systemctl','reload','nginx'],timeout=15)
+        except Exception:
+            logger.error('AUTOKOM_DOMAIN_RESTORE_INCOMPLETE')
+        raise BrokerError('AUTOKOM_DOMAIN_DEACTIVATION_FAILED: Nginx refusé, configuration restaurée.')
+    owner.unlink()
+    return True
+
+
+def _deprovision_environment(params):
+    """Explicit, owner-checked and retryable runtime teardown, not filesystem deletion.
+
+    Domain DNS records and domain ownership proofs stay in the database; no
+    Cloudflare record or Let's Encrypt certificate is deleted blindly.
+    """
+    env=valid_id(params.get('environment_id'))
+    hosts=params.get('hostnames')
+    if not isinstance(hosts,list) or len(hosts)>100 or any(not isinstance(h,str) for h in hosts):
+        raise BrokerError('AUTOKOM_DOMAIN_LIST_INVALID: Liste des domaines invalide.')
+    if len(set(hosts))!=len(hosts):
+        raise BrokerError('AUTOKOM_DOMAIN_LIST_INVALID: Doublons de domaine.')
+    for host in hosts:valid_hostname(host)
+    directory=STATE/env
+    if directory.is_symlink():
+        raise BrokerError('AUTOKOM_STATE_TAMPERED: Répertoire runtime non conforme.')
+    states=[]
+    for basename in ('current.json','previous.json'):
+        record=directory/basename
+        if record.is_symlink():
+            raise BrokerError('AUTOKOM_STATE_TAMPERED: Fichier de runtime non conforme.')
+        if record.is_file():
+            try: data=json.loads(record.read_text(encoding='utf-8'))
+            except (OSError,ValueError,UnicodeError) as exc:
+                raise BrokerError('AUTOKOM_STATE_TAMPERED: État illisible.') from exc
+            if not isinstance(data,dict) or data.get('environment_id')!=env:
+                raise BrokerError('AUTOKOM_STATE_TAMPERED: État incohérent.')
+            valid_container_name(data.get('name'))
+            states.append((record,data))
+    # Refuse unlisted managed domain ownership markers for the same environment.
+    # A partial deletion must be retriable, not erase an unknown site.
+    owned=[]
+    for marker in STATE.glob('domain-owner-*.txt'):
+        if marker.is_symlink():
+            raise BrokerError('AUTOKOM_DOMAIN_OWNERSHIP_MISMATCH: Marqueur symbolique.')
+        if marker.is_file() and marker.read_text(encoding='utf-8').strip()==env:
+            hostname=marker.name[len('domain-owner-'):-len('.txt')]
+            if hostname not in hosts:
+                raise BrokerError('AUTOKOM_DOMAIN_LIST_INCOMPLETE: Domaines gérés manquants.')
+            owned.append(hostname)
+    # Stop external exposure before touching application containers.
+    for host in owned:
+        _deactivate_owned_vhost(host,env)
+    for record,data in states:
+        name=data['name']
+        if data.get('ingress_mode')==ingress.MODE:
+            ingress.remove(name,execute=run,available=PROXY,enabled=ENABLED)
+        present=subprocess.run(['docker','container','inspect',name],capture_output=True,timeout=12)
+        if present.returncode==0:
+            run(['docker','rm','-f',name],timeout=25)
+        record.unlink(missing_ok=True)
+    return {'offline':True,'historical_state_retained':True}
+
+
 def handle(action,params):
     if not isinstance(params,dict):raise BrokerError('Paramètres invalides.')
     if action=='ping':
@@ -560,6 +660,7 @@ def handle(action,params):
     if action=='runtime.deploy':return _docker_deploy(params)
     if action=='runtime.rollback':return _runtime_lock_call(_rollback,params)
     if action=='runtime.commit':return _runtime_lock_call(_commit,params)
+    if action=='runtime.deprovision':return _runtime_lock_call(_deprovision_environment,params)
     if action=='runtime.status':
         env=valid_id(params.get('environment_id'))
         return {'runtime':_load_state(env)}
@@ -587,6 +688,8 @@ def handle(action,params):
         host=valid_hostname(params.get('hostname'))
         _check_dns(host,params.get('token'),params.get('managed') is True)
         return _proxy_apply(host,valid_id(params.get('environment_id')))
+    if action=='domain.deactivate':
+        return _runtime_lock_call(lambda p: {'deactivated':_deactivate_owned_vhost(valid_hostname(p.get('hostname')),valid_id(p.get('environment_id')))},params)
     raise BrokerError('Opération non autorisée.')
 
 class Handler(socketserver.StreamRequestHandler):

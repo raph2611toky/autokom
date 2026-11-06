@@ -39,7 +39,7 @@ def projects_for_user(user, *, write=False):
         org_q = Q(organization__owner=user) | Q(
             organization__memberships__user=user, organization__memberships__is_active=True)
         member_q = Q(members__user=user)
-    return Project.objects.filter(status=Project.Status.ACTIVE, organization__is_active=True).filter(
+    return Project.objects.exclude(status=Project.Status.DELETED).filter(organization__is_active=True).filter(
         org_q | member_q
     ).distinct()
 

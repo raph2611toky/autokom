@@ -38,7 +38,16 @@ def reserve_domain(project, environment, selected=''):
     if selected and any(hostname == suffix or hostname.endswith('.' + suffix) for suffix in reserved_suffixes):
         raise ValidationError({'domain': 'Choisir le sous-domaine automatique, pas un domaine AUTOKOM personnalisé.'})
     if Domain.objects.filter(hostname=hostname).exists():
-        raise ValidationError({'domain': 'Ce nom de domaine est déjà réservé.'})
+        if selected:
+            raise ValidationError({'domain': 'Ce nom de domaine est déjà réservé.'})
+        # Two organizations may legitimately use the same project name.
+        # Allocate a deterministic, collision-resistant managed subdomain.
+        from django.conf import settings
+        suffix = settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX.strip('.').lower()
+        label = (project.slug[:45].strip('-') or 'site')
+        hostname = validate_hostname(f'{label}-{str(project.pk).replace("-", "")[:12]}.{suffix}')
+        if Domain.objects.filter(hostname=hostname).exists():
+            raise ValidationError({'domain': 'Aucun sous-domaine AUTOKOM disponible.'})
     domain = Domain.objects.create(
         organization=project.organization, environment=environment, hostname=hostname,
         domain_type=Domain.Type.CUSTOM if selected else Domain.Type.SUBDOMAIN,
@@ -83,5 +92,8 @@ def create_project(user, data):
         environment=environment, created_by=user, version=1, is_draft=True,
         branch=project.default_branch,
     )
-    reserve_domain(project, environment, data.get('domain', ''))
+    # Always reserve a managed public address, even when a custom domain was supplied.
+    reserve_domain(project, environment)
+    if data.get('domain', '').strip():
+        reserve_domain(project, environment, data['domain'])
     return project

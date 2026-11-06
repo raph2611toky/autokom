@@ -132,12 +132,14 @@ test('Détails réels : configurations et derniers runs Django', async () => {
     [`GET ${p}/`]: { project: { id: UUIDS.project, name: 'Test', repository_name: 'org/test' }, environments: [{ id: UUIDS.env, slug: 'production' }] },
     [`GET ${p}/environments/${UUIDS.env}/configurations/`]: { configurations: [{ id: UUIDS.cfg, is_draft: true }] },
     [`GET ${p}/environments/${UUIDS.env}/deployments/?page=1&page_size=10`]: { runs: [{ id: 'deployment-1', status: 'QUEUED' }], count: 37 },
+    [`GET ${p}/environments/${UUIDS.env}/domains/`]: { domains: [{ id: 'domain-1', hostname: 'test.auto.ikom.mg', status: 'PENDING', https: false }] },
   })
   try {
     const details = await getRemoteProjectDetail(UUIDS.project)
     assert.equal(details.configurations[0].is_draft, true)
     assert.equal(details.runs[0].status, 'QUEUED')
     assert.equal(details.runCount, 37)
+    assert.equal(details.domains[0].hostname, 'test.auto.ikom.mg')
   } finally { restore() }
 })
 

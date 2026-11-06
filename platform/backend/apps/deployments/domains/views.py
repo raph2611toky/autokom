@@ -6,7 +6,7 @@ from apps.accounts.user.permissions import IsClientUser
 from apps.projects.common import get_environment
 from apps.deployments.domains.models import Domain
 from apps.deployments.domains.serializers import DomainCreateSerializer
-from apps.deployments.domains.services import claim_domain,domain_summary,verify_and_activate
+from apps.deployments.domains.services import claim_domain,domain_summary,verify_and_activate,choose_primary_domain,deactivate_domain
 from apps.deployments.domains.swagger.domain_list import schema as list_schema
 from apps.deployments.domains.swagger.domain_create import schema as create_schema
 from apps.deployments.domains.swagger.domain_verify import schema as verify_schema
@@ -63,3 +63,31 @@ class DomainVerifyAPIView(APIView):
             return api_success({'domain':domain_summary(d)},message)
         except Exception as exc:
             return handle_error(exc,'domain_verify')
+
+
+class DomainPrimaryAPIView(APIView):
+    permission_classes=[IsClientUser]
+    parser_classes=[JSONParser]
+    throttle_classes=[ScopedRateThrottle]
+    throttle_scope='domains'
+
+    def post(self,request,project_id,environment_id,domain_id):
+        try:
+            d=choose_primary_domain(request.user,project_id,environment_id,domain_id)
+            return api_success({'domain':domain_summary(d)}, 'Domaine principal mis à jour.')
+        except Exception as exc:
+            return handle_error(exc,'domain_primary')
+
+
+class DomainDeactivateAPIView(APIView):
+    permission_classes=[IsClientUser]
+    parser_classes=[JSONParser]
+    throttle_classes=[ScopedRateThrottle]
+    throttle_scope='domains'
+
+    def post(self,request,project_id,environment_id,domain_id):
+        try:
+            d=deactivate_domain(request.user,project_id,environment_id,domain_id)
+            return api_success({'domain':domain_summary(d)}, 'Domaine désactivé. Son nom reste réservé.')
+        except Exception as exc:
+            return handle_error(exc,'domain_deactivate')

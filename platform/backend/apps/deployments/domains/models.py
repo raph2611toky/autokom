@@ -21,6 +21,8 @@ class Domain(models.Model):
     verification_token_hash = models.CharField(max_length=64, blank=True)
     verified_at = models.DateTimeField(null=True, blank=True)
     tls_status = models.CharField(max_length=40, blank=True)
+    is_primary = models.BooleanField(default=False)
+    is_disabled = models.BooleanField(default=False)
     certificate_expires_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -30,3 +32,4 @@ class Domain(models.Model):
 
     class Meta:
         db_table = 'domains_domain'
+        constraints = [models.UniqueConstraint(fields=['environment'], condition=models.Q(is_primary=True), name='autokom_one_primary_domain_per_env')]

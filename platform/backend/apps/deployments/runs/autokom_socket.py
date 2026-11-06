@@ -4,6 +4,7 @@ No subprocess, Docker SDK, Nginx/Certbot writes, SSH or shell in backend.
 """
 import json
 import logging
+import re
 
 logger = logging.getLogger("autokom.runtime.control")
 import socket
@@ -19,8 +20,8 @@ class AutokomControlUnavailable(APIException):
 def request_control(action, params=None, *, timeout=30):
     if action not in {
         'ping', 'jenkins.dispatch','jenkins.state','jenkins.console','jenkins.cancel',
-        'runtime.deploy','runtime.status','runtime.logs','runtime.rollback','runtime.commit',
-        'domain.verify','domain.dns.create','domain.activate',
+        'runtime.deploy','runtime.status','runtime.logs','runtime.rollback','runtime.commit','runtime.deprovision',
+        'domain.verify','domain.dns.create','domain.activate','domain.deactivate',
     }:
         raise AutokomControlUnavailable('Opération non autorisée.')
     body = (json.dumps({'action':action,'params':params or {}},separators=(',',':'))+'\n').encode('utf-8')
@@ -40,8 +41,12 @@ def request_control(action, params=None, *, timeout=30):
         reply=json.loads(buffer)
         if not reply.get('ok'):
             # Error text is generic, never reveal socket path, process args or secrets.
-            logger.warning('Broker refuse %s (category=broker_refusal)', action)
-            raise AutokomControlUnavailable()
+            code = reply.get('code','')
+            safe_code = code if isinstance(code,str) and re.fullmatch(r'AUTOKOM_[A-Z0-9_]{3,80}',code) else None
+            logger.warning('Broker refuse %s code=%s', action, safe_code or 'AUTOKOM_BROKER_REFUSED')
+            error=AutokomControlUnavailable()
+            error.safe_code=safe_code
+            raise error
         return reply['result']
     except AutokomControlUnavailable:
         raise

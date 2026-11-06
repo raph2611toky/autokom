@@ -76,7 +76,7 @@ export function backendProjectRecord(p) {
     id: String(p.id), name: p.name, repository: p.repository_name || '', branch: p.default_branch || '',
     workdir: './', environment: 'production', mode: 'devops', offer: 'free', pricingPlan: 'free',
     domainMode: 'autokom', domain: '', updatedAt: p.updated_at || p.created_at || '',
-    status: p.status, live: true, preview: null, draft: null,
+    status: p.status, publicSite: p.public_site || null, live: true, preview: null, draft: null,
   }
 }
 
@@ -98,11 +98,12 @@ export async function getRemoteProjectDetail(id) {
   const environments = detail.environments || []
   const env = environments.find(item => item.slug === 'production') || environments[0]
   if (!env) throw new Error('Environnement du projet introuvable.')
-  const [configsResponse, runsResponse] = await Promise.all([
+  const [configsResponse, runsResponse, domainsResponse] = await Promise.all([
     projectsApi.configurations(project.id, env.id),
     deploymentsApi.list(project.id, env.id, 1, 10),
+    projectsApi.domains(project.id, env.id),
   ])
-  return { project, environment: env, configurations: configsResponse?.configurations || [], runs: runsResponse?.runs || [], runCount: runsResponse?.count ?? (runsResponse?.runs || []).length }
+  return { project, environment: env, configurations: configsResponse?.configurations || [], runs: runsResponse?.runs || [], domains: domainsResponse?.domains || [], runCount: runsResponse?.count ?? (runsResponse?.runs || []).length }
 }
 
 /** Création d'un projet puis mise à jour de son unique configuration initiale.

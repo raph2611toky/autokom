@@ -233,7 +233,9 @@ def poll_one(client, run_id):
                 logger.warning('Publication AUTOKOM refusée pour %s (%s)',
                                run.pk, type(exc).__name__)
                 status = 'FAILED'
+                code=getattr(exc, 'safe_code', None)
                 error_message = 'La mise en ligne a échoué. La version précédente est conservée.'
+                if code: error_message += ' Code de diagnostic : ' + code
                 PipelineStageRun.objects.filter(deployment=run,
                     stage_key__in=('release', 'health')).update(
                         status='FAILED', finished_at=timezone.now())
@@ -271,7 +273,7 @@ def _release_docker_and_proxy(run):
     from apps.deployments.runs.autokom_socket import request_control
     from apps.deployments.runs.runner_manifest import fetch_runner_manifest
     from apps.deployments.domains.models import Domain
-    from apps.deployments.domains.services import _challenge
+    from apps.deployments.domains.services import _challenge, activate_managed_domains_for_release
     manifest=fetch_runner_manifest(run.id,include_secrets=True)
     resource=manifest['resources']
     cfg=manifest['build']
@@ -287,7 +289,14 @@ def _release_docker_and_proxy(run):
     },timeout=280)
     PipelineStageRun.objects.filter(deployment=run,stage_key='release').update(status='SUCCESS',finished_at=timezone.now())
     PipelineStageRun.objects.filter(deployment=run,stage_key='health').update(status='RUNNING',started_at=timezone.now())
-    domains=Domain.objects.filter(environment=run.environment,verified_at__isnull=False,status__in=[Domain.Status.VERIFYING,Domain.Status.ACTIVE])
+    # Managed subdomains are activated automatically after the first healthy Docker build.
+    # Failure aborts the release so that SUCCEEDED never means an inaccessible public site.
+    # Reconcile old projects created with only a custom domain.
+    if not Domain.objects.filter(environment=run.environment, domain_type=Domain.Type.SUBDOMAIN).exists():
+        from apps.projects.project.services import reserve_domain
+        reserve_domain(run.environment.project, run.environment)
+    activate_managed_domains_for_release(run.environment)
+    domains=Domain.objects.filter(environment=run.environment,domain_type=Domain.Type.CUSTOM,verified_at__isnull=False,status__in=[Domain.Status.VERIFYING,Domain.Status.ACTIVE])
     for domain in domains:
         request_control('domain.activate',{
             'hostname':domain.hostname,'environment_id':str(run.environment_id),

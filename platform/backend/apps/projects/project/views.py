@@ -119,10 +119,62 @@ class ProjectArchiveAPIView(APIView):
             project = get_project(request.user, project_id, write=True)
             project.status = Project.Status.ARCHIVED
             project.save(update_fields=['status', 'updated_at'])
-            return api_success({'project': ProjectSerializer(project).data}, 'Projet archivé : aucun déploiement exécuté.')
+            return api_success({'project': ProjectSerializer(project).data}, 'Projet archivé : les nouvelles publications sont désactivées.')
         except Exception as exc:
             return handle_error(exc, 'project_archive')
 
+
+
+class ProjectRestoreAPIView(APIView):
+    parser_classes = [JSONParser]
+    permission_classes = [IsClientUser]
+
+    def post(self, request, project_id):
+        try:
+            project=get_project(request.user,project_id,write=True)
+            if project.status!=Project.Status.ARCHIVED:
+                raise ValidationError({'project':'Seuls les projets archivés peuvent être restaurés.'})
+            project.status=Project.Status.ACTIVE
+            project.save(update_fields=['status','updated_at'])
+            return api_success({'project':ProjectSerializer(project).data},'Projet restauré. Nouvelle publication autorisée.')
+        except Exception as exc:
+            return handle_error(exc,'project_restore')
+
+
+class ProjectDeleteAPIView(APIView):
+    """Safely take a project offline and hide it; preserve immutable release and audit history.
+
+    We deliberately do not cascade-delete PROTECT-related releases, accounts or domain
+    ownership proofs. Deprovisioning is retriable if the broker becomes unavailable.
+    """
+    parser_classes = [JSONParser]
+    permission_classes = [IsClientUser]
+
+    def post(self, request, project_id):
+        try:
+            from apps.deployments.runs.autokom_socket import request_control
+            from apps.deployments.runs.models import DeploymentRun
+            project=get_project(request.user,project_id,write=True)
+            if not (project.organization.owner_id == request.user.id or
+                    OrganizationMembership.objects.filter(organization=project.organization,user=request.user,
+                        role__in=['OWNER','ADMIN'],is_active=True).exists()):
+                raise PermissionDenied('Suppression réservée au propriétaire ou administrateur de l’organisation.')
+            if request.data.get('confirm_name') != project.name:
+                raise ValidationError({'confirm_name':'Saisissez le nom exact du projet pour confirmer.'})
+            environments=list(project.environments.all())
+            if DeploymentRun.objects.filter(environment__in=environments,status__in=['QUEUED','RUNNING']).exists():
+                raise ValidationError({'project':'Publication en cours : attendre sa fin avant la suppression.'})
+            for env in environments:
+                request_control('runtime.deprovision', {
+                    'environment_id':str(env.id),
+                    'hostnames':list(env.domains.values_list('hostname',flat=True)),
+                },timeout=65)
+            project.status=Project.Status.DELETED
+            project.save(update_fields=['status','updated_at'])
+            return api_success({'deleted':True,'history_retained':True},
+                'Projet retiré, publications arrêtées et domaines désactivés. Historique conservé pour audit.')
+        except Exception as exc:
+            return handle_error(exc,'project_delete')
 
 
 def can_manage_members(project, user):
