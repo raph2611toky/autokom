@@ -82,6 +82,8 @@ def ingest_console(run_id, text, offset, *, final=False):
                 add_log(current, record)
             elif record.startswith('AUTOKOM_TECH:'):
                 add_log(current, 'AUTOKOM_TECH:' + stage_key + ':' + record[len('AUTOKOM_TECH:'):], level='TECH')
+                if 'Référence d’identifiants du job introuvable' in record:
+                    add_log(current, 'AUTOKOM_LOG: Le service de publication doit être configuré par un administrateur.')
             else:
                 add_log(current, record)
         current.console_offset = offset

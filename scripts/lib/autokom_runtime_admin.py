@@ -239,6 +239,16 @@ def jenkins_sync(*,apply):
     env=load_env()
     job=env.get('AUTOKOM_JENKINS_JOB','autokom-client-deploy')
     if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',job):raise SetupError('Nom de job Jenkins invalide.')
+    # Credentials are not contained in the job XML. Check even if the job
+    # itself is already synchronized; no manual Jenkins UI action is required.
+    from autokom_jenkins_credentials import provision, CredentialSetupError
+    try:
+        cred = provision(env, jenkins_request, apply=apply)
+    except CredentialSetupError as exc:
+        raise SetupError(str(exc)) from exc
+    print('  ' + ('✓ Credential runner créé et vérifié.' if cred == 'created' else
+                   '✓ Credential runner déjà conforme.' if cred == 'managed' else
+                   '› Credential runner manquant : création prévue avec --apply.'))
     if not JOB_SCRIPT.is_file():raise SetupError('Jenkinsfile AUTOKOM approuvé absent.')
     source=JOB_SCRIPT.read_text(encoding='utf-8')
     if 'buildctl' not in source and 'autokom_agent_local.py' not in source:
@@ -372,6 +382,14 @@ except (OSError,ValueError,KeyError,TypeError):
     if status!=200:
         raise SetupError('Le job Jenkins n’est pas accessible au compte de service (code HTTP '+str(status)+').')
     print('  ✓ Job Jenkins accessible avec les identifiants du runtime.')
+    from autokom_jenkins_credentials import provision, CredentialSetupError
+    try:
+        cred = provision(env, jenkins_request, apply=False)
+    except CredentialSetupError as exc:
+        raise SetupError(str(exc)) from exc
+    if cred != 'managed':
+        raise SetupError('Credential runner absent : sudo autokom runtime jenkins --apply')
+    print('  ✓ Credential runner Jenkins présent (clé non affichée).')
     ready, reason = isolated_agent_status(env)
     if not ready:
         print('  ✗ Agent autokom-isolated : '+reason)

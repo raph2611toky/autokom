@@ -14,11 +14,16 @@ pipeline {
                         def meta = new groovy.json.JsonSlurperClassic().parseText(sourceJson)
                         if (!(meta.repo ==~ /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/) ||
                             !(meta.sha ==~ /^[0-9a-f]{40}$/)) { error('Dépôt ou commit non autorisé') }
+                        // A public repository can be cloned without a static token.
+                        // The private-repository path requires a separate scoped credential.
+                        def repositoryUrl = 'https://github.com/' + meta.repo + '.git'
+                        def publicRepo = (sh(script: 'set +x; git ls-remote --exit-code ' + repositoryUrl + ' HEAD >/dev/null 2>&1', returnStatus: true) == 0)
+                        def remoteConfig = [url:repositoryUrl]
+                        if (!publicRepo) { remoteConfig.credentialsId = 'autokom-github-app' }
                         checkout([$class:'GitSCM',branches:[[name:meta.sha]],
                            doGenerateSubmoduleConfigurations:false,
                            extensions:[[$class:'CloneOption',shallow:true,depth:1,noTags:true]],
-                           userRemoteConfigs:[[url:'https://github.com/'+meta.repo+'.git',
-                                              credentialsId:'autokom-github-app']]])
+                           userRemoteConfigs:[remoteConfig]])
                     }
                     echo 'AUTOKOM_STAGE:source:SUCCESS'
                 }

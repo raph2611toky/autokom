@@ -4,6 +4,7 @@ import { getRemoteProjectDetail, errorText } from '../services/projectWorkflow.j
 import { deploymentsApi } from '../services/deploymentsApi.js'
 import { cleanCustomerLog, phaseOrder, phaseTitles, publicationLabel } from '../services/deploymentPresentation.js'
 import { isPublishing, sortRecentRuns } from '../services/deploymentHistory.js'
+import { technicalTimeline } from '../services/deploymentLogTimeline.js'
 
 const PAGE_SIZE = 20
 function dateTime(value) {
@@ -99,11 +100,8 @@ function RunDetails({ navigate, projectId, runId }) {
   if (!run || !projectInfo) return <section className="ak-workspace-empty"><h1>Publication introuvable</h1>{error && <p role="alert">{error}</p>}<button className="button-outline" onClick={() => navigate(`/projects/${projectId}`)}>Revenir au projet</button></section>
   const sortedStages = [...(run.stages || [])].sort((a,b) => (a.position || phaseOrder.indexOf(a.stage_key)) - (b.position || phaseOrder.indexOf(b.stage_key)))
   const safeMessages = messages.map(item => ({ ...item, safe:cleanCustomerLog(item.message) })).filter(item => item.safe && item.level !== 'TECH')
-  const technicalMessages = messages.filter(item =>
-      (item.level === 'TECH' && /^AUTOKOM_TECH:(source|sast|sca|build|release|health):/.test(item.message)) ||
-      (item.level !== 'TECH' && item.message?.startsWith('AUTOKOM_LOG:')))
-    .map(item => ({ ...item, display:item.level === 'TECH' ? item.message.replace(/^AUTOKOM_TECH:[a-z]+:/, '') : cleanCustomerLog(item.message) }))
-    .filter(item => item.display && (stageFilter === 'all' || item.stage_key === stageFilter))
+  const technicalMessages = technicalTimeline(messages)
+    .filter(item => stageFilter === 'all' || item.stage_key === stageFilter)
   const selectMode = next => { if (next !== logMode) { setStageFilter('all'); setLogMode(next) } }
   return <>
     <div className="ak-back-line"><button type="button" className="button-quiet" onClick={() => navigate(`/projects/${projectId}`)}><ArrowLeft size={16}/> {projectInfo.project.name}</button></div>
