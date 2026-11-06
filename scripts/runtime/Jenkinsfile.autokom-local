@@ -10,17 +10,22 @@ pipeline {
                 script {
                     echo 'AUTOKOM_STAGE:source:RUNNING'
                     withCredentials([string(credentialsId:'autokom-runner-key', variable:'AUTOKOM_RUNNER_SHARED_KEY')]) {
-                        def sourceJson = sh(script:'set +x; python3 /opt/autokom/source/scripts/runtime/autokom_agent_local.py metadata', returnStdout:true).trim()
-                        def meta = new groovy.json.JsonSlurperClassic().parseText(sourceJson)
-                        if (!(meta.repo ==~ /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/) ||
-                            !(meta.sha ==~ /^[0-9a-f]{40}$/)) { error('Dépôt ou commit non autorisé') }
+                        // Le manifeste est verifie par le helper Python. Le retour
+                        // est une seule ligne : owner/repo + espace + sha40.
+                        def metadataLine = sh(script:'set +x; python3 /opt/autokom/source/scripts/runtime/autokom_agent_local.py metadata-line', returnStdout:true).trim()
+                        if (!(metadataLine ==~ /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+ [0-9a-f]{40}$/)) {
+                            error('Depot ou commit non autorise')
+                        }
+                        def metadataParts = metadataLine.split(' ', 2)
+                        def repositoryName = metadataParts[0]
+                        def commitSha = metadataParts[1]
                         // A public repository can be cloned without a static token.
                         // The private-repository path requires a separate scoped credential.
-                        def repositoryUrl = 'https://github.com/' + meta.repo + '.git'
+                        def repositoryUrl = 'https://github.com/' + repositoryName + '.git'
                         def publicRepo = (sh(script: 'set +x; git ls-remote --exit-code ' + repositoryUrl + ' HEAD >/dev/null 2>&1', returnStatus: true) == 0)
                         def remoteConfig = [url:repositoryUrl]
                         if (!publicRepo) { remoteConfig.credentialsId = 'autokom-github-app' }
-                        checkout([$class:'GitSCM',branches:[[name:meta.sha]],
+                        checkout([$class:'GitSCM',branches:[[name:commitSha]],
                            doGenerateSubmoduleConfigurations:false,
                            extensions:[[$class:'CloneOption',shallow:true,depth:1,noTags:true]],
                            userRemoteConfigs:[remoteConfig]])

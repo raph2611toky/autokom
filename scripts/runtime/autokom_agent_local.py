@@ -166,11 +166,14 @@ def build(doc):
 
 
 def main():
-    if len(sys.argv)!=2 or sys.argv[1] not in ('metadata','sast','sca','build'):
+    if len(sys.argv)!=2 or sys.argv[1] not in ('metadata','metadata-line','sast','sca','build'):
         fail('Phase de build inconnue.')
     doc=manifest()
     if sys.argv[1]=='metadata':
         print(json.dumps({'repo':doc['repository'],'sha':doc['commit_sha']}))
+    elif sys.argv[1]=='metadata-line':
+        # Strict single-line protocol; repo and SHA are validated in manifest().
+        print(f"{doc['repository']} {doc['commit_sha']}")
     elif sys.argv[1] in ('sast','sca'):scan(doc,sys.argv[1])
     else:build(doc)
 

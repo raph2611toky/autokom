@@ -88,6 +88,10 @@ def safe_technical_line(line):
     # A known Jenkins configuration problem is returned without its identifier.
     if value.startswith('ERROR: Could not find credentials entry'):
         return 'Référence d’identifiants du job introuvable : intervention administrateur nécessaire.'
+    # Exact sandbox rejection; no untrusted stack trace is returned.
+    if value in ('Scripts not permitted to use new groovy.json.JsonSlurperClassic.',
+                 'Scripts not permitted to use new groovy.json.JsonSlurperClassic'):
+        return 'Sandbox Jenkins : lecture JSON Groovy non autorisée (JsonSlurperClassic).'
     if _PRIVATE_URI.search(value) or _SENSITIVE.search(value) or _OPAQUE_SECRET.search(value):
         return None
     if not any(pattern.fullmatch(value) for pattern in _TECH_SAFE):
