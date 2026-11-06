@@ -411,16 +411,26 @@ except (OSError,ValueError,KeyError,TypeError):
     except IngressError as exc:
         raise SetupError(str(exc)) from exc
     print('  ✓ Ingress privé : '+str(ingress_report['ingresses_checked'])+' publication(s) inspectée(s).')
-    from autokom_platform_broker import _cloudflare_settings, BrokerError
+    from autokom_platform_broker import _cloudflare_settings, _domain_config_check, BrokerError
     try:
         _cloudflare_settings()
-        print('  ✓ Cloudflare DNS : configuration privée vérifiée (jeton non affiché).')
+        from autokom_env_manager import file_path, read_env
+        backend = read_env(file_path('backend'))
+        declared = (backend.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX')
+                    or backend.get('AUTOKOM_BASE_DOMAIN'))
+        if declared:
+            _domain_config_check({'managed_suffix': declared.strip('.').lower()})
+        print('  ✓ Cloudflare DNS : zone et suffixe runtime/backend vérifiés (jeton non affiché).')
     except BrokerError as exc:
         code = str(exc).split(':',1)[0]
         print('  ! Cloudflare DNS / HTTPS automatique indisponible : '+code)
         print('  › Vérifier : sudo autokom dns cloudflare env show')
         print('  › Configurer une seule fois : sudo autokom dns cloudflare env setup')
         print('  › Vérifier le suffixe et l’IPv4 : sudo autokom runtime env show')
+        print('  › Corriger le suffixe autorisé : sudo autokom runtime env edit AUTOKOM_MANAGED_DOMAIN_SUFFIX')
+        if code in ('AUTOKOM_DOMAIN_SUFFIX_MISMATCH', 'AUTOKOM_CF_ZONE_MISMATCH',
+                    'AUTOKOM_RUNTIME_ENV_PERMISSIONS', 'AUTOKOM_RUNTIME_ENV_INVALID'):
+            raise SetupError('Configuration DNS incohérente : ' + code) from exc
     if failures:
         raise SetupError('Un ou plusieurs services ne sont pas actifs.')
     return 0

@@ -39,6 +39,7 @@ PROXY = Path('/etc/nginx/sites-available')
 ENABLED = Path('/etc/nginx/sites-enabled')
 WEBROOT = Path('/var/lib/autokom/acme')
 CLOUDFLARE_CONFIG = Path('/etc/autokom/secrets/cloudflare-dns.env')
+RUNTIME_CONFIG = Path('/etc/autokom/secrets/runtime.env')
 UUID = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
 HOSTNAME = re.compile(r'^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
 KEY = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,127}$')
@@ -438,11 +439,11 @@ def _dig(record,hostname):
 
 def _check_dns(host,token,managed):
     valid_hostname(host)
-    ingress=os.environ.get('AUTOKOM_INGRESS_IPV4','')
+    ingress=_runtime_dns_env().get('AUTOKOM_INGRESS_IPV4','')
     try:ipaddress.IPv4Address(ingress)
     except ValueError:raise BrokerError('AUTOKOM_INGRESS_IPV4_MISSING: Adresse IPv4 publique non configurée.')
     if managed:
-        suffix=os.environ.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX','').strip('.').lower()
+        suffix=_runtime_dns_env().get('AUTOKOM_MANAGED_DOMAIN_SUFFIX','').strip('.').lower()
         if not suffix or not host.endswith('.'+suffix) or host==suffix:
             raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH: Sous-domaine hors de la zone gérée.')
     else:
@@ -453,6 +454,61 @@ def _check_dns(host,token,managed):
     if ingress not in _dig('A',host):
         raise BrokerError('A record DNS ne pointe pas vers l’ingress AUTOKOM.')
     return {'verified':True,'ipv4':ingress}
+
+def _runtime_dns_env():
+    """Read authoritative root-owned runtime DNS settings for *every* request.
+
+    A CLI env edit must not leave DNS/HTTPS using the stale systemd process
+    environment. Reject unexpected permissions and symlinks; never print secrets.
+    The process environment is only a backward-compatible fallback when no
+    centralized runtime file exists (including the isolated test environment).
+    """
+    path = RUNTIME_CONFIG
+    if path.is_symlink():
+        raise BrokerError('AUTOKOM_RUNTIME_ENV_PERMISSIONS: Lien symbolique interdit.')
+    if not path.exists():
+        return os.environ
+    try:
+        details = path.stat()
+        if not stat.S_ISREG(details.st_mode) or details.st_uid != 0 or (stat.S_IMODE(details.st_mode) & 0o077):
+            raise BrokerError('AUTOKOM_RUNTIME_ENV_PERMISSIONS: Configuration runtime attendue root:0600.')
+        from autokom_env_manager import read_env
+        return read_env(path)
+    except BrokerError:
+        raise
+    except (OSError, ValueError, ImportError) as exc:
+        raise BrokerError('AUTOKOM_RUNTIME_ENV_INVALID: Configuration runtime illisible.') from exc
+
+
+def _domain_config_check(params):
+    """Compare actual reserved names and Django settings to the broker policy.
+
+    This is strictly read-only and must run BEFORE Jenkins dispatch. Do not
+    weaken the allowed suffix or silently authorize a different Cloudflare zone.
+    """
+    config = _cloudflare_settings()
+    suffix = config['suffix']
+    declared = params.get('managed_suffix')
+    if declared is not None:
+        if not isinstance(declared, str) or declared != declared.strip('.').lower() or not HOSTNAME.fullmatch('probe.' + declared):
+            raise BrokerError('AUTOKOM_DOMAIN_PREFLIGHT_INVALID: Suffixe applicatif invalide.')
+        if declared != suffix:
+            raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH: Suffixes Django et broker différents.')
+    hosts = params.get('managed_hosts')
+    if hosts is not None:
+        if (not isinstance(hosts, list) or not 1 <= len(hosts) <= 20
+                or len(set(map(str, hosts))) != len(hosts)):
+            raise BrokerError('AUTOKOM_DOMAIN_PREFLIGHT_INVALID: Liste des domaines gérés invalide.')
+        for host in hosts:
+            valid_hostname(host)
+            if (host != host.strip('.').lower() or not host.endswith('.' + suffix)
+                    or (config['zone_name'] and not host.endswith('.' + config['zone_name']))):
+                raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH: Domaine réservé hors de la zone autorisée.')
+        email = _runtime_dns_env().get('AUTOKOM_ACME_EMAIL', '')
+        if not isinstance(email, str) or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email):
+            raise BrokerError('AUTOKOM_ACME_EMAIL_MISSING: Adresse de contact TLS absente.')
+    return {'ready': True}
+
 
 def _cloudflare_settings():
     """Resolve the root-only DNS configuration for *each* request.
@@ -483,8 +539,9 @@ def _cloudflare_settings():
         zone = (os.environ.get('CLOUDFLARE_ZONE_ID') or os.environ.get('AUTOKOM_CLOUDFLARE_ZONE_ID') or '').strip().lower()
         token = (os.environ.get('CLOUDFLARE_API_TOKEN') or os.environ.get('AUTOKOM_CLOUDFLARE_TOKEN') or '').strip()
         zone_name = os.environ.get('CLOUDFLARE_ZONE_NAME','').strip('.').lower()
-    suffix = os.environ.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX','').strip('.').lower()
-    address = os.environ.get('AUTOKOM_INGRESS_IPV4','').strip()
+    runtime = _runtime_dns_env()
+    suffix = runtime.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX','').strip('.').lower()
+    address = runtime.get('AUTOKOM_INGRESS_IPV4','').strip()
     if not suffix or not HOSTNAME.fullmatch('probe.'+suffix):
         raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISSING: Suffixe des sites AUTOKOM absent.')
     if not re.fullmatch(r'[a-f0-9]{32}',zone) or not token:
@@ -596,7 +653,7 @@ def _proxy_apply(host,environment):
         publish(_nginx_config(host,state['port'],tls=False))
         # Certbot --keep-until-expiring reuses a currently valid certificate.
         if True:
-            email=os.environ.get('AUTOKOM_ACME_EMAIL','')
+            email=_runtime_dns_env().get('AUTOKOM_ACME_EMAIL','')
             if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email):raise BrokerError('AUTOKOM_ACME_EMAIL_MISSING: Adresse de contact TLS absente.')
             try:
                 run(['certbot','certonly','--webroot','-w',str(WEBROOT),
@@ -641,7 +698,7 @@ def _domain_inspect(params):
             (Path('/etc/letsencrypt/live')/host/'fullchain.pem').is_file())
     if active:
         # A valid local vhost is NOT proof of publicly reachable DNS.
-        expected_ip=os.environ.get('AUTOKOM_INGRESS_IPV4','')
+        expected_ip=_runtime_dns_env().get('AUTOKOM_INGRESS_IPV4','')
         try:ipaddress.IPv4Address(expected_ip)
         except ValueError:
             raise BrokerError('AUTOKOM_INGRESS_IPV4_MISSING: IPv4 publique non configurée.')
@@ -780,8 +837,7 @@ def handle(action,params):
                if not re.search(r'(?i)password|secret|token|authorization|api[_-]?key|gh[us]_|xsmtpsib-',line)]
         return {'logs':lines}
     if action=='domain.config.check':
-        _cloudflare_settings()  # no external request and never disclose secrets
-        return {'ready':True}
+        return _domain_config_check(params)  # validates actual reserved names before Jenkins
     if action=='domain.inspect':return _domain_inspect(params)
     if action=='domain.verify':
         return _check_dns(params.get('hostname'),params.get('token'),params.get('managed') is True)

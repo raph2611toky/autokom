@@ -112,7 +112,19 @@ def dispatch_one(client):
         # Jenkins build *before* consuming CI minutes when DNS credentials
         # are missing. The privileged broker validates the root-only config.
         from apps.deployments.runs.autokom_socket import request_control
-        request_control('domain.config.check', timeout=10)
+        from apps.deployments.domains.models import Domain
+        from django.conf import settings
+        managed_hosts = list(Domain.objects.filter(
+            environment_id=run.environment_id, domain_type=Domain.Type.SUBDOMAIN,
+            is_disabled=False).order_by('hostname').values_list('hostname', flat=True)[:21])
+        if not managed_hosts or len(managed_hosts) > 20:
+            error = AutokomControlUnavailable('Réservation du domaine AUTOKOM absente ou incohérente.')
+            error.safe_code = 'AUTOKOM_DOMAIN_RESERVATION_INVALID'
+            raise error
+        request_control('domain.config.check', {
+            'managed_suffix': settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX,
+            'managed_hosts': managed_hosts,
+        }, timeout=10)
         external_id = client.dispatch(run)
         DeploymentRun.objects.filter(pk=run.pk, status='RUNNING').update(external_run_id=external_id)
         add_log(run, 'AUTOKOM_LOG: Exécution Jenkins mise en file ; aucun jeton GitHub transmis.')
@@ -120,15 +132,21 @@ def dispatch_one(client):
         code = getattr(exc, 'safe_code', '')
         is_cf = code in {'AUTOKOM_DOMAIN_CLOUDFLARE_CONFIG_MISSING','AUTOKOM_CF_SECRETS_PERMISSIONS',
                          'AUTOKOM_CF_SECRETS_INVALID','AUTOKOM_DOMAIN_SUFFIX_MISSING',
-                         'AUTOKOM_INGRESS_IPV4_MISSING','AUTOKOM_CF_ZONE_MISMATCH'}
+                         'AUTOKOM_INGRESS_IPV4_MISSING','AUTOKOM_CF_ZONE_MISMATCH',
+                         'AUTOKOM_DOMAIN_SUFFIX_MISMATCH','AUTOKOM_DOMAIN_PREFLIGHT_INVALID',
+                         'AUTOKOM_DOMAIN_RESERVATION_INVALID','AUTOKOM_RUNTIME_ENV_PERMISSIONS',
+                         'AUTOKOM_RUNTIME_ENV_INVALID','AUTOKOM_ACME_EMAIL_MISSING'}
         logger.warning('Dispatch blocked for run %s: %s code=%s', run.pk, type(exc).__name__,
                        code if is_cf else 'AUTOKOM_DISPATCH_BLOCKED')
         DeploymentRun.objects.filter(pk=run.pk).update(status='BLOCKED', finished_at=timezone.now(),
               error_message=('AUTOKOM_DOMAIN_PREFLIGHT_BLOCKED '+code if is_cf else
                              'Dispatch Jenkins indisponible ou résultat incertain. Vérifier le job avant de retenter.'))
         if is_cf:
+            advice = ('autokom runtime env show / edit AUTOKOM_MANAGED_DOMAIN_SUFFIX'
+                      if code in {'AUTOKOM_DOMAIN_SUFFIX_MISMATCH', 'AUTOKOM_DOMAIN_SUFFIX_MISSING'}
+                      else 'autokom dns cloudflare env show / autokom runtime env show')
             add_log(run, 'AUTOKOM_LOG: Publication bloquée avant Jenkins : '+code+
-                    ' · administrateur : autokom dns cloudflare env setup.', level='ERROR')
+                    ' · administrateur : '+advice+'.', level='ERROR')
         else:
             add_log(run, 'AUTOKOM_LOG: Dispatch impossible ; vérifier Jenkins (aucune relance automatique).', level='ERROR')
     return True
