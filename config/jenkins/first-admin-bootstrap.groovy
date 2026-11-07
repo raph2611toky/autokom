@@ -21,12 +21,41 @@ if (!secret.isFile() || auth.exists()) {
 if (!(j.securityRealm instanceof HudsonPrivateSecurityRealm) || j.securityRealm.allowsSignup()) {
     throw new IllegalStateException('AUTOKOM_FIRSTBOOT: nonstandard Jenkins security realm')
 }
-final def otherUsers = User.getAll().findAll { it.id != 'admin' }
+// User.getAll() also includes passive SCM/metadata identities that cannot
+// log in. Only accounts with a local password are relevant to first-boot.
+final def realm = (HudsonPrivateSecurityRealm) j.securityRealm
+final def otherUsers = realm.getAllUsers().findAll { it.id != 'admin' }
+final def legacyProof = new File(base, 'legacy.auto-credential')
+final def legacyPreserved = new File(base, 'legacy.preserved')
 if (!otherUsers.isEmpty()) {
-    throw new IllegalStateException('AUTOKOM_FIRSTBOOT: existing Jenkins users; refusing to replace identities')
+    if (otherUsers.size() != 1 || otherUsers[0].id != 'autokom-admin' ||
+        !legacyProof.isFile()) {
+        throw new IllegalStateException('AUTOKOM_FIRSTBOOT: existing configured accounts not managed by AUTOKOM; preserved')
+    }
+    final def prior = legacyProof.readLines('UTF-8')
+    final def existing = User.getById('autokom-admin', false)
+    final def detail = existing?.getProperty(HudsonPrivateSecurityRealm.Details.class)
+    if (prior.size() != 2 || prior[0] != 'autokom-admin' ||
+        detail == null || !detail.isPasswordCorrect(prior[1])) {
+        throw new IllegalStateException('AUTOKOM_FIRSTBOOT: prior AUTOKOM identity could not be authenticated; preserved')
+    }
+    // Only an existing AUTOKOM account proven with the unchanged password
+    // may be retained as a second administrator during this interrupted setup.
+    if (legacyPreserved.exists()) {
+        if (!legacyPreserved.isFile() || legacyPreserved.text != 'autokom-admin\n') {
+            throw new IllegalStateException('AUTOKOM_FIRSTBOOT: prior account marker mismatch')
+        }
+    } else {
+        if (!legacyPreserved.createNewFile()) {
+            throw new IllegalStateException('AUTOKOM_FIRSTBOOT: prior account marker collision')
+        }
+        Files.setPosixFilePermissions(legacyPreserved.toPath(), PosixFilePermissions.fromString('rw-------'))
+        legacyPreserved.setText('autokom-admin\n', 'UTF-8')
+    }
 }
+legacyProof.delete()
 final def pair = secret.readLines('UTF-8')
-if (pair.size() != 4 || !(pair[0] ==~ /[A-Za-z][A-Za-z0-9_.-]{2,39}/) ||
+if (pair.size() != 4 || !(pair[0] ==~ /[A-Za-z][A-Za-z0-9_-]{2,39}/) ||
     pair[0] in ['admin', 'autokom-metrics'] || pair[1].length() < 16 ||
     pair[2].length() < 1 || pair[2].length() > 100 || !(pair[3] ==~ /[^\s@]+@[^\s@]+\.[^\s@]+/)) {
     throw new IllegalStateException('AUTOKOM_FIRSTBOOT: invalid bootstrap secret')
@@ -35,7 +64,6 @@ if (User.getById(pair[0], false) != null) {
     throw new IllegalStateException('AUTOKOM_FIRSTBOOT: administrator already exists')
 }
 
-final def realm = (HudsonPrivateSecurityRealm) j.securityRealm
 final def person = realm.createAccount(pair[0], pair[1])
 person.setFullName(pair[2])
 person.save()

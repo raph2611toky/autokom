@@ -24,6 +24,7 @@ from menu import pick, ask
 from nginx_discovery import inventory as nginx_inventory, jenkins_domains, domain_plan
 from firewall import secure_firewall, ufw_active, docker_bridges
 from tool_banner import render as autokom_banner, first_install, section, Activity
+from autokom_install_permissions import private_install_directory
 
 ROOT = Path(__file__).resolve().parents[2]
 MANAGED = '# Managed by AUTOKOM: phase-2'
@@ -108,9 +109,7 @@ def save_choices(options, *, path=CHOICES_FILE):
     # Save only after explicit validation, never during --check.
     data = {key: getattr(options, key, None) for key in SAVED_CHOICES}
     data['allow'] = list(data['allow']) if isinstance(data['allow'], (list, tuple)) else data['allow']
-    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-    if path.parent.is_symlink() or path.parent.stat().st_uid != os.geteuid():
-        raise RuntimeError('Dossier de reprise non fiable')
+    private_install_directory(path.parent)
     if path.is_symlink():
         raise RuntimeError('Refus d’écraser un lien symbolique de configuration')
     if path.exists():
@@ -121,7 +120,7 @@ def save_choices(options, *, path=CHOICES_FILE):
 
 
 def mark_incomplete(path=INCOMPLETE_FILE):
-    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    private_install_directory(path.parent)
     atomic_write(path, 'AUTOKOM services installation incomplete\n', 0o600)
 
 

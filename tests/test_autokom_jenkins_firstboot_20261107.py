@@ -38,6 +38,8 @@ class BootstrapTests(unittest.TestCase):
             mock.patch.object(b, 'STAGING', self.home / '.autokom-firstboot'),
             mock.patch.object(b, 'SEED', self.home / '.autokom-firstboot/admin.seed'),
             mock.patch.object(b, 'TOKEN', self.home / '.autokom-firstboot/admin.auth.pending'),
+            mock.patch.object(b, 'LEGACY_PROOF', self.home / '.autokom-firstboot/legacy.auto-credential'),
+            mock.patch.object(b, 'LEGACY_PRESERVED', self.home / '.autokom-firstboot/legacy.preserved'),
             mock.patch.object(b, 'SCRIPT', self.home / 'init.groovy.d/95-autokom-first-admin.groovy'),
             mock.patch.object(b, 'MATRIX_SCRIPT', self.home / 'init.groovy.d/96-autokom-first-admin-matrix.groovy'),
             mock.patch.object(b, 'MATRIX_PENDING', self.home / '.autokom-firstboot/matrix.pending'),
@@ -185,7 +187,7 @@ class BootstrapTests(unittest.TestCase):
 
     def test_matrix_groovy_guards_existing_users(self):
         txt = b.MATRIX_TEMPLATE.read_text()
-        for phrase in ('isSetupComplete()', 'User.getAll()',
+        for phrase in ('isSetupComplete()', 'getAllUsers()',
                        'FullControlOnceLoggedInAuthorizationStrategy',
                        'matrix-auth', 'GlobalMatrixAuthorizationStrategy',
                        "strategy.add(Jenkins.ADMINISTER, adminUser)",

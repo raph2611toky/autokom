@@ -26,9 +26,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from menu import pick, ask
 from tool_banner import section, Activity
 from observability_config import load as load_observability_settings
+from autokom_install_permissions import private_install_directory
 from jenkins_firstboot import (bootstrap as bootstrap_first_admin, auth_file_if_available,
                                stage_matrix_restriction, matrix_restriction_pending,
-                               selected_admin, save_admin_choice, admin_username)
+                               selected_admin, save_admin_choice, admin_username, interrupted_managed_bootstrap)
 
 ROOT = Path(__file__).resolve().parents[2]
 JENKINS_HOME = Path('/var/lib/jenkins')
@@ -112,6 +113,11 @@ def jenkins_state():
     # New wizard: the only expected account is temporary 'admin'.
     users = active_users()
     if len(users) <= 1 and all(u.name == 'admin' or u.name.startswith('admin_') for u in users):
+        return 'wizard'
+    if interrupted_managed_bootstrap():
+        # The earlier AUTOKOM first-boot hook may have been interrupted.
+        # Groovy must still prove any existing account's *old password* before
+        # creating the operator-selected account, and never replaces users.
         return 'wizard'
     return 'unsafe'
 
@@ -707,12 +713,7 @@ def _save_plugin_selection(args):
     record={'schema':1, 'profile':args.profile, 'multibranch_scan':bool(args.multibranch_scan),
             'harden':bool(args.harden), 'controller_zero':bool(args.controller_zero),
             'disable_inbound_agents':bool(args.disable_inbound_agents)}
-    directory=PLUGIN_SELECTION.parent
-    if directory.is_symlink():
-        raise RuntimeError('Répertoire de sélection Jenkins symbolique interdit')
-    directory.mkdir(parents=True,exist_ok=True,mode=0o700)
-    if directory.stat().st_uid != 0 or directory.stat().st_mode & 0o077:
-        raise RuntimeError('Répertoire d’installation AUTOKOM non privé')
+    directory=private_install_directory(PLUGIN_SELECTION.parent)
     if PLUGIN_SELECTION.exists() or PLUGIN_SELECTION.is_symlink():
         secure_file(PLUGIN_SELECTION)
     temp=directory/('.jenkins-selection-' + secrets.token_hex(10))

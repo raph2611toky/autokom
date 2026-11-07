@@ -8,8 +8,6 @@ import hudson.security.GlobalMatrixAuthorizationStrategy
 import jenkins.security.ApiTokenProperty
 import java.nio.file.Files
 import java.nio.file.attribute.PosixFilePermissions
-import java.nio.file.Files
-import java.nio.file.attribute.PosixFilePermissions
 
 final def j = Jenkins.get()
 final def home = new File(j.rootDir, '.autokom-firstboot')
@@ -27,18 +25,25 @@ if (!(j.authorizationStrategy instanceof FullControlOnceLoggedInAuthorizationStr
     throw new IllegalStateException('AUTOKOM_MATRIX: authorization strategy already changed; preserved')
 }
 final def adminUser = pending.text.trim()
-if (!(adminUser ==~ /[A-Za-z][A-Za-z0-9_.-]{2,39}/) || adminUser in ['admin', 'autokom-metrics']) {
+if (!(adminUser ==~ /[A-Za-z][A-Za-z0-9_-]{2,39}/) || adminUser in ['admin', 'autokom-metrics']) {
     throw new IllegalStateException('AUTOKOM_MATRIX: invalid administrator identity')
 }
-final def ids = User.getAll().collect { it.id }
-if (ids.size() != 1 || ids[0] != adminUser) {
-    throw new IllegalStateException('AUTOKOM_MATRIX: unexpected users; refusing authorization changes')
+final def legacyPreserved = new File(home, 'legacy.preserved')
+final def expectedIds = legacyPreserved.isFile() ? [adminUser, 'autokom-admin'] : [adminUser]
+if (legacyPreserved.isFile() && legacyPreserved.text != 'autokom-admin\n') {
+    throw new IllegalStateException('AUTOKOM_MATRIX: previous administrator marker invalid')
+}
+// Passive Jenkins users without a local credential are not administrators.
+final def ids = ((HudsonPrivateSecurityRealm)j.securityRealm).getAllUsers().collect { it.id }
+if (ids.sort() != expectedIds.sort()) {
+    throw new IllegalStateException('AUTOKOM_MATRIX: configured users differ from verified AUTOKOM administrators; no permissions changed')
 }
 if (j.pluginManager.getPlugin('matrix-auth')?.active != true) {
     throw new IllegalStateException('AUTOKOM_MATRIX: matrix-auth not active')
 }
 final def strategy = new GlobalMatrixAuthorizationStrategy()
 strategy.add(Jenkins.ADMINISTER, adminUser)
+if (legacyPreserved.isFile()) strategy.add(Jenkins.ADMINISTER, 'autokom-admin')
 // Apply the email chosen by the operator once Mailer is available.
 if (adminProfile.isFile()) {
     final def data = adminProfile.readLines('UTF-8')

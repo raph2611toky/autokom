@@ -6,6 +6,8 @@ Secrets remain root:0600; Jenkins sees a transient local seed only at restart.
 """
 import os
 import json
+import hashlib
+import shutil
 import urllib.request
 import urllib.error
 import base64
@@ -20,6 +22,12 @@ ROOT = Path(__file__).resolve().parents[2]
 JENKINS_HOME = Path('/var/lib/jenkins')
 SECRETS = Path('/etc/autokom/secrets')
 USER = 'autokom-admin'
+# Exact SHA-256 of AUTOKOM's published e39c first-boot hook and c070 hook.
+# No arbitrary Groovy file may be replaced by a newer AUTOKOM version.
+OLDER_AUTOKOM_HOOKS = frozenset({
+    'b0462bffe8cdf82bea7c1bc26abb7e509abb10393ccbb4a5d948a430d09ea5e8',
+    '27d47e705f7cf44277b6c0b859d0233d848a16ba43f5cb638da10a94dc8e6789',
+})
 PASSWORD = SECRETS / 'jenkins-first-admin.password'
 PROFILE = SECRETS / 'jenkins-first-admin.profile.json'
 OLD_PASSWORD = SECRETS / 'jenkins-first-admin.password.previous-auto'
@@ -27,6 +35,8 @@ AUTH = SECRETS / 'jenkins-admin.auth'
 STAGING = JENKINS_HOME / '.autokom-firstboot'
 SEED = STAGING / 'admin.seed'
 TOKEN = STAGING / 'admin.auth.pending'
+LEGACY_PROOF = STAGING / 'legacy.auto-credential'
+LEGACY_PRESERVED = STAGING / 'legacy.preserved'
 SCRIPT = JENKINS_HOME / 'init.groovy.d' / '95-autokom-first-admin.groovy'
 TEMPLATE = ROOT / 'config/jenkins/first-admin-bootstrap.groovy'
 MATRIX_TEMPLATE = ROOT / 'config/jenkins/first-admin-matrix.groovy'
@@ -66,6 +76,30 @@ def _private_root_directory():
         raise RuntimeError('AUTOKOM Jenkins: /etc/autokom/secrets doit appartenir à root et être privé')
 
 
+def known_bootstrap_hook(path=None):
+    path = Path(path) if path is not None else SCRIPT
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        stat_result = path.stat()
+        return (stat_result.st_uid == os.geteuid() and not stat_result.st_mode & 0o022
+                and (digest in OLDER_AUTOKOM_HOOKS or digest == hashlib.sha256(TEMPLATE.read_bytes()).hexdigest()))
+    except OSError:
+        return False
+
+
+def interrupted_managed_bootstrap():
+    """Evidence to classify a partial AUTOKOM first-run, NOT permission to replace users."""
+    try:
+        if not (SCRIPT.is_file() and known_bootstrap_hook() and PASSWORD.is_file()):
+            return False
+        _secure_file(PASSWORD)
+        return bool(PASSWORD.read_text(encoding='utf-8').strip())
+    except (OSError, RuntimeError):
+        return False
+
+
 def _password():
     _private_root_directory()
     if PASSWORD.exists() or PASSWORD.is_symlink():
@@ -98,8 +132,8 @@ def selected_admin():
 
 
 def validate_admin_identity(username, full_name, email):
-    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]{2,39}', username or '') or username.lower() in ('admin', 'autokom-metrics'):
-        raise ValueError('Identifiant Jenkins : 3-40 caractères (lettres, chiffres, ._-), sauf admin temporaire et autokom-metrics')
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{2,39}', username or '') or username.lower() in ('admin', 'autokom-metrics'):
+        raise ValueError('Identifiant Jenkins : 3-40 caractères (lettres, chiffres, _-), sauf admin temporaire et autokom-metrics')
     if not isinstance(full_name, str) or not 1 <= len(full_name.strip()) <= 100 or any(ord(ch)<32 for ch in full_name):
         raise ValueError('Nom complet Jenkins invalide (1 à 100 caractères)')
     if not isinstance(email, str) or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email) or len(email)>254:
@@ -114,6 +148,8 @@ def save_admin_choice(username, full_name, email, password):
     """
     _private_root_directory()
     validate_admin_identity(username, full_name, email)
+    if username == USER and (PASSWORD.exists() or OLD_PASSWORD.exists()):
+        raise ValueError('Identifiant déjà utilisé par AUTOKOM lors de la tentative précédente : choisir un autre administrateur')
     if not isinstance(password, str) or not 16 <= len(password) <= 256 or any(ch in password for ch in '\r\n\x00'):
         raise ValueError('Mot de passe Jenkins invalide : entre 16 et 256 caractères, sans retour à la ligne')
     if selected_admin() is not None:
@@ -123,7 +159,7 @@ def save_admin_choice(username, full_name, email, password):
     if PROFILE.is_symlink() or OLD_PASSWORD.exists() or OLD_PASSWORD.is_symlink():
         raise RuntimeError('Conflit de sauvegarde des identifiants Jenkins : aucun fichier remplacé')
     if SCRIPT.exists() or SCRIPT.is_symlink():
-        if SCRIPT.is_symlink() or SCRIPT.read_text(encoding='utf-8') != TEMPLATE.read_text(encoding='utf-8'):
+        if not known_bootstrap_hook():
             raise RuntimeError('Hook Jenkins étranger existant : aucun remplacement')
     if PASSWORD.exists() or PASSWORD.is_symlink():
         _secure_file(PASSWORD)
@@ -162,8 +198,23 @@ def _stage():
         raise RuntimeError('AUTOKOM Jenkins: staging non privé')
     SCRIPT.parent.mkdir(mode=0o755, exist_ok=True)
     if SCRIPT.exists() or SCRIPT.is_symlink():
-        if SCRIPT.is_symlink() or SCRIPT.read_text(encoding='utf-8') != expected:
+        if not known_bootstrap_hook():
             raise RuntimeError('AUTOKOM Jenkins: hook de démarrage existant non géré ; préservé')
+        if SCRIPT.read_text(encoding='utf-8') != expected:
+            # Only the EXACT previously published AUTOKOM hook can be upgraded.
+            # Keep its original bytes under root:0600 for recoverability.
+            _private_root_directory()
+            backup = SECRETS / ('jenkins-bootstrap-hook-' + hashlib.sha256(SCRIPT.read_bytes()).hexdigest()[:16] + '.backup')
+            if backup.exists() or backup.is_symlink():
+                _secure_file(backup)
+                if backup.read_bytes() != SCRIPT.read_bytes():
+                    raise RuntimeError('AUTOKOM Jenkins: sauvegarde hook contradictoire ; aucun remplacement')
+                SCRIPT.unlink()
+            else:
+                shutil.copy2(SCRIPT, backup, follow_symlinks=False)
+                os.chmod(backup, 0o600)
+                SCRIPT.unlink()
+            _write_new(SCRIPT, expected, owner=0, group=gid, mode=0o640)
     else:
         _write_new(SCRIPT, expected, owner=0, group=gid, mode=0o640)
     identity = selected_admin()
@@ -179,6 +230,21 @@ def _stage():
             raise RuntimeError('AUTOKOM Jenkins: seed de démarrage différent ; préservé')
     else:
         _write_new(SEED, seed_data, owner=uid, group=gid)
+    # A prior AUTOKOM revision may have created 'autokom-admin' before its
+    # first-boot token could be recovered. Prove that *specific* existing
+    # identity with its unchanged old password; never reset unknown users.
+    if OLD_PASSWORD.is_file() and not OLD_PASSWORD.is_symlink():
+        _secure_file(OLD_PASSWORD)
+        old = OLD_PASSWORD.read_text(encoding='utf-8').strip()
+        if not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', old):
+            raise RuntimeError('AUTOKOM Jenkins: mot de passe précédent non vérifiable')
+        proof = USER + '\n' + old + '\n'
+        if LEGACY_PROOF.exists() or LEGACY_PROOF.is_symlink():
+            _secure_file(LEGACY_PROOF, uid)
+            if LEGACY_PROOF.read_text(encoding='utf-8') != proof:
+                raise RuntimeError('AUTOKOM Jenkins: preuve historique incompatible ; aucun compte remplacé')
+        else:
+            _write_new(LEGACY_PROOF, proof, owner=uid, group=gid)
 
 
 def _recover_auth():
@@ -195,6 +261,7 @@ def _recover_auth():
     _write_new(AUTH, raw)
     TOKEN.unlink()
     SEED.unlink(missing_ok=True)
+    LEGACY_PROOF.unlink(missing_ok=True)
     if SCRIPT.is_file() and not SCRIPT.is_symlink() and SCRIPT.read_text(encoding='utf-8') == TEMPLATE.read_text(encoding='utf-8'):
         SCRIPT.unlink()
     return AUTH
@@ -372,6 +439,12 @@ def finalize_matrix_restriction():
         raise RuntimeError('AUTOKOM Jenkins: stratégie Matrix non confirmée sur disque')
     if not any('Administer:' + admin_username() in (e.text or '') for e in strategy.iter()):
         raise RuntimeError('AUTOKOM Jenkins: droits administrateur AUTOKOM non confirmés')
+    if LEGACY_PRESERVED.exists() or LEGACY_PRESERVED.is_symlink():
+        _secure_file(LEGACY_PRESERVED, pwd.getpwnam('jenkins').pw_uid)
+        if LEGACY_PRESERVED.read_text(encoding='utf-8') != USER + '\n':
+            raise RuntimeError('AUTOKOM Jenkins: ancien compte conservé non reconnu')
+        if not any('Administer:' + USER in (e.text or '') for e in strategy.iter()):
+            raise RuntimeError('AUTOKOM Jenkins: droits de l’ancien administrateur non conservés')
     if METRICS_PASSWORD.exists() and not METRICS_AUTH.exists():
         _secure_file(METRICS_TOKEN, pwd.getpwnam('jenkins').pw_uid)
         raw = METRICS_TOKEN.read_text(encoding='utf-8')

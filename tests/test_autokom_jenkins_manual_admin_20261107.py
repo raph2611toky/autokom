@@ -30,6 +30,8 @@ class AdminChoices(unittest.TestCase):
             'STAGING':self.home/'.autokom-firstboot',
             'SEED':self.home/'.autokom-firstboot/admin.seed',
             'TOKEN':self.home/'.autokom-firstboot/admin.auth.pending',
+            'LEGACY_PROOF':self.home/'.autokom-firstboot/legacy.auto-credential',
+            'LEGACY_PRESERVED':self.home/'.autokom-firstboot/legacy.preserved',
             'SCRIPT':self.home/'init.groovy.d/95-autokom-first-admin.groovy',
             'MATRIX_SCRIPT':self.home/'init.groovy.d/96-autokom-first-admin-matrix.groovy',
             'MATRIX_PENDING':self.home/'.autokom-firstboot/matrix.pending',
