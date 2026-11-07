@@ -1105,7 +1105,8 @@ def ensure_jenkins_exporter(args):
         if jenkins_state() != 'secure':
             raise SetupError('Jenkins non initialisé ou non sécurisé : terminer le post-install Jenkins d’abord')
         from types import SimpleNamespace
-        authargs = SimpleNamespace(auth_file=None, interactive=True)
+        from jenkins_firstboot import auth_file_if_available
+        authargs = SimpleNamespace(auth_file=auth_file_if_available(), interactive=True)
         with authorization_context(authargs, trusted_web_url(), apply=True) as auth_file:
             ensure_cli_jar(True)
             cli(auth_file, ['install-plugin', 'prometheus', '-deploy'], timeout=420,
@@ -1128,8 +1129,24 @@ def ensure_jenkins_exporter(args):
         out('!', 'Endpoint Jenkins protégé : compte lecture Metrics.VIEW requis pour Prometheus')
         if args.mode == 'check':
             return None
-        username = prompt_text('Utilisateur Jenkins lecture métriques', noninteractive=args.non_interactive)
-        password = secret('Token Jenkins lecture métriques (pas le token admin)', args.non_interactive)
+        from jenkins_firstboot import METRICS_AUTH, _secure_file
+        if METRICS_AUTH.is_file():
+            # Only the new AUTOKOM-controlled Jenkins gets an automatically
+            # provisioned, unprivileged Metrics.VIEW account. Never reuse its
+            # administrator token for Prometheus scraping.
+            _secure_file(METRICS_AUTH)
+            try:
+                username, password = METRICS_AUTH.read_text(encoding='utf-8').strip().split(':', 1)
+            except (ValueError, OSError):
+                raise SetupError('Secret du compte Jenkins Metrics AUTOKOM invalide') from None
+            if username != 'autokom-metrics' or len(password) < 20:
+                raise SetupError('Compte Jenkins Metrics AUTOKOM non conforme')
+            out('›', 'Authentification de l’exporter avec le compte Metrics.VIEW AUTOKOM')
+        else:
+            # Foreign/previous Jenkins controllers retain their established
+            # credentials; AUTOKOM must not reset or infer those secrets.
+            username = prompt_text('Utilisateur Jenkins lecture métriques', noninteractive=args.non_interactive)
+            password = secret('Token Jenkins lecture métriques (pas le token admin)', args.non_interactive)
         code2, body = get_local(cfg().jenkins_metrics_url, username=username, password=password)
         if code2 != 200 or ('# HELP ' not in body and '# TYPE ' not in body):
             raise SetupError('Compte lecture métriques invalide ; aucune autorisation Jenkins n’a été contournée')

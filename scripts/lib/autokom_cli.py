@@ -115,6 +115,7 @@ class Snapshot:
     alertmanager_ready: bool = True
     dashboards_ready: bool = True
     logs_ready: bool = True
+    jenkins_matrix_pending: bool = False
 
 
 def domains_ok(cfg):
@@ -204,6 +205,7 @@ def snapshot(cfg):
         ufw_active=bool(ufw and 'Status: active' in ufw.stdout),
         docker_ready=docker_ready,
         services_pending=services_setup_pending() if installed else False,
+        jenkins_matrix_pending=__import__('jenkins_firstboot').matrix_restriction_pending() if installed else False,
         domains_ready=domains_ok(cfg),
         node_ready=(works(['systemctl','is-active','--quiet','prometheus-node-exporter']) and
                     private_listener(bindings(9100)) and http_code('http://127.0.0.1:9100/metrics') == 200),
@@ -220,7 +222,8 @@ def actions(state: Snapshot):
         'services': (not state.jenkins_installed or not state.jenkins_active or
                      not state.jenkins_private or not getattr(state, 'docker_ready', True) or
                      getattr(state, 'services_pending', False)),
-        'plugins': not state.jenkins_installed or not state.jenkins_active or bool(state.jenkins_plugins_missing),
+        'plugins': (not state.jenkins_installed or not state.jenkins_active or
+                    bool(state.jenkins_plugins_missing) or getattr(state, 'jenkins_matrix_pending', False)),
         'observability': (not state.prometheus_active or not state.grafana_active or
                           not state.metrics_up or not state.datasource_ok or not state.domains_ready or
                           not state.node_ready or not state.alertmanager_ready or not state.dashboards_ready),
@@ -397,6 +400,8 @@ def apply_stage(stage, state, cfg, *, logs_backend='both', logs_runtime='docker'
                 if (not old_pid or (new_pid and new_pid != old_pid)) and \
                         works(['systemctl', 'is-active', '--quiet', 'jenkins']) and \
                         private_listener(bindings(cfg.jenkins_port)):
+                    from jenkins_firstboot import finalize_matrix_restriction
+                    finalize_matrix_restriction()
                     return
                 time.sleep(3)
         raise CLIError('safe-restart Jenkins non confirmé (jobs peut-être actifs) : relancer sudo autokom install après le redémarrage.')

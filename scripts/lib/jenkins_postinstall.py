@@ -26,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from menu import pick, ask
 from tool_banner import section, Activity
 from observability_config import load as load_observability_settings
+from jenkins_firstboot import (bootstrap as bootstrap_first_admin, auth_file_if_available,
+                               stage_matrix_restriction, matrix_restriction_pending)
 
 ROOT = Path(__file__).resolve().parents[2]
 JENKINS_HOME = Path('/var/lib/jenkins')
@@ -132,28 +134,11 @@ def trusted_web_url(override=''):
 
 
 def first_run_guidance(web_url, *, apply, timeout=900):
-    if web_url:
-        output('›', 'Premier démarrage Jenkins : ' + web_url)
-    else:
-        output('⚠', f'Aucun domaine Jenkins HTTPS validé. Utiliser un tunnel SSH vers 127.0.0.1:{JENKINS_PORT}.')
-        output('›', f'Depuis votre ordinateur : ssh -L {JENKINS_PORT}:127.0.0.1:{JENKINS_PORT} utilisateur@serveur')
-        output('›', f'Puis ouvrir http://127.0.0.1:{JENKINS_PORT}/')
-    output('›', '1. Déverrouiller Jenkins avec le mot de passe initial :')
-    output('›', '   sudo cat /var/lib/jenkins/secrets/initialAdminPassword')
-    output('›', '2. Dans le wizard : « Select plugins to install » → « None » → « Install »')
-    output('›', '   (AUTOKOM installera ensuite le profil de plugins choisi.)')
-    output('›', '3. Créer le PREMIER administrateur et terminer l’assistant officiel.')
-    if not apply:
-        output('›', 'Simulation : aucun assistant attendu, aucune configuration modifiée.')
-        return False
-    output('›', 'AUTOKOM surveille la fin de la configuration, puis reprend automatiquement.')
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if jenkins_state() == 'secure':
-            output('✓', 'Jenkins initialisé : sécurité active, accès administrateur prêt.')
-            return True
-        time.sleep(2)
-    raise RuntimeError('Assistant Jenkins non terminé dans le délai. Relancer --apply après création du compte ; aucun compte n’a été remplacé.')
+    """Deprecated compatibility check: first boot is automated by AUTOKOM."""
+    output('›', 'Premier administrateur Jenkins : AUTOKOM gère automatiquement le démarrage sécurisé.')
+    if apply:
+        raise RuntimeError('Utiliser la configuration AUTOKOM automatique ; aucun assistant Web manuel requis.')
+    return False
 
 
 def read_masked(label):
@@ -529,18 +514,38 @@ def configure(args):
         output('›', 'État Jenkins : ' + {'wizard': 'premier démarrage', 'unsafe': 'sécurité incertaine'}[state])
     if state == 'unsafe':
         raise RuntimeError('Sécurité Jenkins absente ou incohérente : aucune modification automatique autorisée')
+    first_admin_created = (state == 'wizard' and apply)
     if state == 'wizard':
-        if not first_run_guidance(web_url, apply=apply, timeout=args.wizard_timeout):
-            output('✓', 'Simulation Jenkins neuf terminée (assistant à réaliser avant application).')
+        if not apply:
+            output('+', 'Premier administrateur AUTOKOM : création automatique après validation du redémarrage')
+            output('›', 'Mot de passe généré, root:0600 ; aucun assistant Web ni token API manuel.')
             return
+        if not args.confirm_restart:
+            raise RuntimeError('Autorisation de redémarrage Jenkins requise pour le premier administrateur')
+        # The official wizard is replaced only on a fresh, recognizable Jenkins
+        # controller. Unknown users or security models are never overwritten.
+        with Activity('Initialisation automatique du premier administrateur Jenkins'):
+            args.auth_file = bootstrap_first_admin(approved=True, timeout=args.wizard_timeout)
+        state = jenkins_state()
+        if state != 'secure':
+            raise RuntimeError('Jenkins ne confirme pas la sécurité après création du premier administrateur')
+        output('✓', 'Compte initial : autokom-admin · mot de passe privé : /etc/autokom/secrets/jenkins-first-admin.password')
+        output('✓', 'Jeton de configuration AUTOKOM généré et protégé ; aucun assistant Web nécessaire')
+    if not args.auth_file and state == 'secure':
+        args.auth_file = auth_file_if_available()
     plugins = plugin_ids(args.profile, args.multibranch_scan)
+    # Existing installations are never reconfigured automatically. Only the
+    # pristine AUTOKOM first admin is promoted to explicit Matrix Administer.
+    if apply and first_admin_created and 'matrix-auth' in plugins:
+        stage_matrix_restriction(include_metrics=('prometheus' in plugins))
+        output('›', 'Après installation : accès administrateur limité par Matrix Authorization')
     present = local_plugin_ids()
     missing = [p for p in plugins if p.split(':',1)[0] not in present]
     _short_step('PLUGINS ET SÉCURITÉ')
     output('+' if missing else '✓', f'Profil {args.profile} · {len(plugins) - len(missing)} présents · {len(missing)} à installer')
     if args.multibranch_scan:
         output('⚠', 'Webhook Multibranch optionnel : SECURITY-2875 ; filtrer son endpoint.')
-    changes = bool(missing or args.admin_user or args.harden)
+    changes = bool(missing or args.admin_user or args.harden or matrix_restriction_pending())
     if apply and not args.confirm_restart and changes:
         raise RuntimeError('Option --confirm-restart requise AVANT toute modification')
     if args.controller_zero and not args.harden:
@@ -608,7 +613,7 @@ def parse(argv=None):
     p.add_argument('--interactive', action='store_true', help='Menus avec flèches et chiffres 1–9')
     p.add_argument('--auth-file', default='', help='Option automatisation : fichier root 0600 avec username:API_TOKEN')
     p.add_argument('--public-url', default='', help='URL HTTPS Jenkins pour la création du token, si Nginx non détectable')
-    p.add_argument('--wizard-timeout', type=int, default=900, help='Attente max du wizard initial en secondes (défaut 900)')
+    p.add_argument('--wizard-timeout', type=int, default=900, help='Délai maximal de l’initialisation automatique Jenkins (défaut 900 s)')
     p.add_argument('--admin-user', default='', help='Nouvel admin à créer si absent (pas de reset)')
     p.add_argument('--admin-password-file', default='', help='Mot de passe du nouvel admin en mode 0600')
     p.add_argument('--harden', action='store_true', help='Durcir la sécurité sans changer les droits existants')
@@ -654,8 +659,8 @@ def interactive_configure(args):
              hint='Les plugins déjà installés ne sont ni effacés ni rétrogradés.')
     args.profile = ('devsecops','baseline','minimal')[i-1]
     choose_optional_multibranch(args)
-    # The initial setup wizard creates the FIRST admin. Do not ask for a
-    # second administrator on a controller not yet initialized.
+    # AUTOKOM creates the first administrator on a pristine controller.
+    # Existing secure controllers keep their administrators unchanged.
     if jenkins_state() != 'wizard':
         i = pick('Jenkins — administrateurs',
                  ['Conserver les administrateurs existants', 'Créer un administrateur supplémentaire'],
