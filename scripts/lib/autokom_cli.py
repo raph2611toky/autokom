@@ -135,6 +135,7 @@ def domains_ok(cfg):
 
 def services_setup_pending(*,
                            completed=Path('/var/lib/autokom/install/services.complete'),
+                           incomplete=Path('/var/lib/autokom/install/services.incomplete'),
                            override=Path('/etc/systemd/system/jenkins.service.d/20-autokom-loopback.conf'),
                            location=Path('/var/lib/jenkins/init.groovy.d/90-autokom-location.groovy')):
     """Recognize a partially installed AUTOKOM Jenkins host without changing it.
@@ -146,7 +147,11 @@ def services_setup_pending(*,
     A completed run creates a marker after MySQL, Nginx and Certbot succeed.
     """
     try:
-        if completed.is_file() or override.is_symlink() or not override.is_file():
+        if completed.is_file():
+            return False
+        if incomplete.is_file():
+            return True
+        if override.is_symlink() or not override.is_file():
             return False
         if '# Managed by AUTOKOM: phase-2' not in override.read_text(encoding='utf-8'):
             return False
@@ -347,18 +352,18 @@ def call_module(path: str, *args):
         raise CLIError(f'Phase interrompue ({p.returncode}) : {LABELS.get(Path(path).stem, path)}')
 
 
-def apply_stage(stage, state, cfg, *, logs_backend='both', logs_runtime='docker'):
+def apply_stage(stage, state, cfg, *, logs_backend='both', logs_runtime='docker', reconfigure=False):
     section(LABELS[stage], 'AUTOKOM · traitement uniquement des écarts')
     if stage == 'foundation':
         call_module('scripts/bootstrap/preflight.sh')
         call_module('scripts/bootstrap/ansible.sh')
         call_module('scripts/install/foundation.sh', '--apply')
     elif stage == 'services':
-        if (not state.jenkins_installed or not getattr(state, 'docker_ready', True) or
+        if (reconfigure or not state.jenkins_installed or not getattr(state, 'docker_ready', True) or
                 getattr(state, 'services_pending', False)):
             # Le choix d'une BDD, du domaine et de l'accès Docker reste interactif
             # uniquement lors d'une première installation Jenkins.
-            call_module('scripts/install/services.sh', '--apply')
+            call_module('scripts/install/services.sh', '--apply', *(['--reconfigure'] if reconfigure else []))
         elif not state.jenkins_active:
             raise CLIError('Jenkins installé mais arrêté : diagnostic requis (journalctl -u jenkins). Aucun redémarrage automatique.')
         elif not state.jenkins_private:
@@ -444,7 +449,8 @@ def perform(args, cfg):
         with Activity(f'Contrôle {LABELS[stage]}'):
             state = snapshot(cfg)
         should = (not __import__('logging_stack').install_complete(logs_backend,logs_runtime)
-                  if stage == 'logs' else actions(state)[stage])
+                  if stage == 'logs' else (getattr(args, 'reconfigure', False) or actions(state)[stage])
+                  if stage == 'services' else actions(state)[stage])
         if not should:
             message(f'  - {LABELS[stage]} : déjà conforme, ignoré')
             phase_progress(index, len(stages), LABELS[stage], skipped=True)
@@ -459,7 +465,8 @@ def perform(args, cfg):
             apply_monitoring()
             sync_grafana_after_install(changed=changed)
         else:
-            apply_stage(stage, state, cfg, logs_backend=logs_backend,logs_runtime=logs_runtime)
+            apply_stage(stage, state, cfg, logs_backend=logs_backend,logs_runtime=logs_runtime,
+                        reconfigure=getattr(args, 'reconfigure', False))
         # Avancement par phases TERMINEES (pas un pourcentage temporel).
         # La conformité réelle de tous les services est revérifiée ensuite.
         message(f'  ✓ {LABELS[stage]} : module exécuté, vérification finale à venir')
@@ -634,6 +641,7 @@ Une phase Jenkins interrompue reste à terminer, même si le paquet est install�
     i.add_argument('module', nargs='?', choices=STAGES+OPTIONAL_STAGES+tuple(INSTALL_ALIASES),
                    help='Module facultatif : ex. `autokom install logs`')
     i.add_argument('--check', action='store_true', help='Afficher le plan sans rien modifier')
+    i.add_argument('--reconfigure', action='store_true', help='Redemander explicitement les paramètres Jenkins et SQL')
     i.add_argument('--from', dest='start_at', choices=STAGES+OPTIONAL_STAGES, help='Reprendre à partir de cette phase')
     i.add_argument('--only', choices=STAGES+OPTIONAL_STAGES+tuple(INSTALL_ALIASES), help='Installer uniquement le module ou alias indiqué')
     i.add_argument('--backend', choices=('loki','opensearch','both'), help='Pour logs : installer un backend ou les deux (défaut : both)')
@@ -852,7 +860,8 @@ def main(argv=None):
         names = {'services': 'services.sh', 'plugins': 'jenkins.sh',
                  'observability': 'observability.sh', 'logs':'logs.sh'}
         flags = ('--interactive',) if a.service not in ('services','logs') else ()
-        call_module('scripts/install/' + names[a.service], '--apply', *flags)
+        call_module('scripts/install/' + names[a.service], '--apply',
+                    *(['--reconfigure'] if a.service == 'services' else []), *flags)
         return 0
     return perform(a, cfg)
 

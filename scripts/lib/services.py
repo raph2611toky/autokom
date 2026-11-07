@@ -14,17 +14,115 @@ import shutil
 import socket
 import subprocess
 import sys
+import stat
+import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from menu import pick, ask
 from nginx_discovery import inventory as nginx_inventory, jenkins_domains, domain_plan
 from firewall import secure_firewall, ufw_active, docker_bridges
-from tool_banner import render as autokom_banner, first_install, section
+from tool_banner import render as autokom_banner, first_install, section, Activity
 
 ROOT = Path(__file__).resolve().parents[2]
 MANAGED = '# Managed by AUTOKOM: phase-2'
 SECRETS = Path('/etc/autokom/secrets')
+# Configuration et état d'installation : données administratives, sans mot de passe.
+INSTALL_STATE = Path('/var/lib/autokom/install')
+CHOICES_FILE = INSTALL_STATE / 'services-selection.json'
+INCOMPLETE_FILE = INSTALL_STATE / 'services.incomplete'
+EVENT_LOG = None
+SAVED_CHOICES = ('db', 'bind', 'allow', 'create_app_db', 'docker_access',
+                 'domain', 'tls', 'email', 'cert', 'key')
+
+
+def installation_event(component, status, *, detail=''):
+    """JSONL root-only: no secrets, commands, tokens, stdout/stderr or env."""
+    if EVENT_LOG is None:
+        return
+    row = {'time': datetime.now(timezone.utc).isoformat(), 'component': component,
+           'status': status}
+    if detail:
+        row['detail'] = detail
+    with open(EVENT_LOG, 'a', encoding='utf-8') as handle:
+        handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + '\n')
+
+
+def start_event_log():
+    global EVENT_LOG
+    folder = Path('/var/log/autokom/install')
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if folder.is_symlink() or folder.stat().st_uid != 0:
+        raise RuntimeError('Dossier des journaux non fiable')
+    os.chmod(folder, 0o700)
+    target = folder / f'services-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{os.getpid()}.jsonl'
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
+    EVENT_LOG = target
+    say(f'Journal des opérations : {target}')
+    installation_event('install', 'started')
+
+
+def _trust_selection(path):
+    if path.is_symlink():
+        raise RuntimeError('Configuration enregistrée : lien symbolique refusé')
+    st = path.stat()
+    if st.st_uid != os.geteuid() or not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077:
+        raise RuntimeError('Configuration enregistrée : propriétaire ou permissions non sûrs')
+    if st.st_size > 8192:
+        raise RuntimeError('Configuration enregistrée trop volumineuse')
+
+
+def load_choices(path=CHOICES_FILE):
+    if not path.exists() and not path.is_symlink():
+        return {}
+    _trust_selection(path)
+    try:
+        body = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(body, dict) or body.get('schema') != 1:
+            raise ValueError('Version de configuration non reconnue')
+        data = body.get('selection')
+        if not isinstance(data, dict) or set(data).difference(SAVED_CHOICES):
+            raise ValueError('Champs de configuration non reconnus')
+        if not isinstance(data.get('db'), str) or not isinstance(data.get('domain'), str):
+            raise ValueError('Configuration partielle')
+        return data
+    except (UnicodeError, ValueError, TypeError) as exc:
+        raise RuntimeError(f'Configuration enregistrée invalide : {exc}') from exc
+
+
+def restore_choices(options, *, path=CHOICES_FILE):
+    saved = load_choices(path)
+    if not saved:
+        return False
+    # Explicit CLI choices always win. Do not retain session-level restart consent.
+    for key, value in saved.items():
+        current = getattr(options, key, None)
+        if current in (None, '') and not (key == 'domain' and current == ''):
+            setattr(options, key, value)
+    return True
+
+
+def save_choices(options, *, path=CHOICES_FILE):
+    # Save only after explicit validation, never during --check.
+    data = {key: getattr(options, key, None) for key in SAVED_CHOICES}
+    data['allow'] = list(data['allow']) if isinstance(data['allow'], (list, tuple)) else data['allow']
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    if path.parent.is_symlink() or path.parent.stat().st_uid != os.geteuid():
+        raise RuntimeError('Dossier de reprise non fiable')
+    if path.is_symlink():
+        raise RuntimeError('Refus d’écraser un lien symbolique de configuration')
+    if path.exists():
+        _trust_selection(path)
+    atomic_write(path, json.dumps({'schema': 1, 'selection': data},
+                                  ensure_ascii=False, sort_keys=True, indent=2) + '\n', 0o600)
+    os.chmod(path, 0o600)
+
+
+def mark_incomplete(path=INCOMPLETE_FILE):
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    atomic_write(path, 'AUTOKOM services installation incomplete\n', 0o600)
+
 
 
 def say(text, mark='›'):
@@ -40,8 +138,32 @@ def fail(message):
 
 
 def run(args, *, input_text=None, capture=True, check=True, env=None):
-    ret = subprocess.run(args, input=input_text, text=True, capture_output=capture, check=False, env=env)
+    service_action = (len(args) >= 3 and args[0] == 'systemctl'
+                      and args[1] in ('restart', 'reload'))
+    acme_action = len(args) > 1 and args[0] == 'certbot'
+    observed = service_action or acme_action
+    label = ('Redémarrage de ' + args[2] if service_action and args[1] == 'restart'
+             else 'Rechargement de ' + args[2] if service_action
+             else 'Validation HTTPS Let’s Encrypt')
+    component = ('service:' + args[2] if service_action else 'certbot') if observed else ''
+    if observed:
+        say(label + ' · exécution en cours')
+        installation_event(component, 'running')
+    begin = time.monotonic()
+    if observed:
+        with Activity(label, delay=0.25):
+            ret = subprocess.run(args, input=input_text, text=True, capture_output=capture,
+                                 check=False, env=env)
+    else:
+        ret = subprocess.run(args, input=input_text, text=True, capture_output=capture,
+                             check=False, env=env)
+    if observed:
+        status = 'succeeded' if ret.returncode == 0 else 'failed'
+        installation_event(component, status, detail=f'exit_code={ret.returncode}')
+        say(f'{label} · {status} ({int(time.monotonic()-begin)}s)',
+            '✓' if ret.returncode == 0 else '✗')
     if check and ret.returncode:
+        # Certbot output can contain challenge tokens; do not persist raw logs.
         output = (ret.stderr or ret.stdout or '').strip()
         raise RuntimeError(f"Commande en échec ({args[0]}): {output[-1200:]}")
     return ret
@@ -176,13 +298,15 @@ def interactive(options):
         idx = pick('Adresse d’écoute de la base', choices,
                    default=1, hint='0.0.0.0 = écoute, pas accès libre. Pare-feu obligatoire.')
         options.bind = ('local','all')[idx - 1]
-    if options.db in ('mysql','postgresql') and not options.create_app_db:
+    if (options.db in ('mysql','postgresql') and
+            (options.create_app_db is None or
+             (options.create_app_db is False and not getattr(options, '_restored_saved', False)))):
         idx = pick('Créer une base AUTOKOM et son utilisateur ?',
                    ['Non : conserver les comptes et bases existants',
                     'Oui : créer autokom_apps et autokom_app'],
                    hint='Non n’altère aucune permission SQL existante.')
         options.create_app_db = idx == 2
-    if options.create_app_db and options.bind == 'all' and not options.allow:
+    if options.create_app_db and options.bind == 'all' and not options.allow and not getattr(options, '_restored_saved', False):
         options.allow = ask('Réseaux clients SQL autorisés (CIDR)', '',
                             hint='Séparer par virgule, ; ou espace. Ex : 172.18.0.0/16, 172.19.0.0/16. Vide = compte localhost seul.')
         # Validate early, avoiding an error after the Jenkins questions.
@@ -802,7 +926,7 @@ def main():
     parser.add_argument('--bind', choices=('local','private','all'))
     parser.add_argument('--allow', default='', help='Réseaux SQL pour les NOUVEAUX comptes; séparateurs virgule, point-virgule, espace')
     parser.add_argument('--unsafe-all', action='store_true', help='Obsolète : la sécurité est maintenant assurée par UFW / règles WAN')
-    parser.add_argument('--create-app-db', action='store_true', help='Créer explicitement autokom_apps et son compte dédié')
+    parser.add_argument('--create-app-db', action='store_true', default=None, help='Créer explicitement autokom_apps et son compte dédié')
     parser.add_argument('--confirm-restart', action='store_true', help='Autoriser les redémarrages de services actifs en cas de changement')
     parser.add_argument('--docker-access', choices=('yes','no'))
     parser.add_argument('--domain', default=None)
@@ -811,6 +935,7 @@ def main():
     parser.add_argument('--key')
     parser.add_argument('--email')
     parser.add_argument('--non-interactive', action='store_true')
+    parser.add_argument('--reconfigure', action='store_true', help='Redemander les choix administratifs enregistrés')
     parser.add_argument('--enable-ufw', action='store_true', help='Autoriser explicitement activation UFW avec garde SSH')
     parser.add_argument('--ssh-cidr', default='', help='Adresse ou CIDR de gestion SSH exigé pour activation UFW')
     parser.add_argument('--ssh-port', type=int, default=22, help='Port SSH à préserver, défaut 22')
@@ -821,6 +946,10 @@ def main():
         fail('Exécuter en root/sudo')
     section('Jenkins & Bases de données', 'Découverte → configuration → validation')
     if not args.non_interactive:
+        if not args.reconfigure and restore_choices(args):
+            args._restored_saved = True
+            say('Choix administratifs sauvegardés : réutilisés sans nouvelle saisie.', '✓')
+            say('Pour changer ces choix : sudo autokom configure services (mode reconfiguration).')
         args = interactive(args)
     elif args.db is None or args.docker_access is None or args.domain is None:
         parser.error('--non-interactive exige --db, --docker-access, --domain (chaîne vide autorisée)')
@@ -828,7 +957,13 @@ def main():
         # Noninteractive callers should also reuse valid Nginx+TLS without ACME options.
         if domain_plan(valid_domain(args.domain), nginx_inventory()) == 'existing':
             args.tls = 'existing'
+    args.create_app_db = bool(args.create_app_db)
     args = effective_option_defaults(args)
+    if args.mode == 'apply':
+        save_choices(args)
+        mark_incomplete()
+        start_event_log()
+        installation_event('configuration', 'saved')
     if args.mode == 'apply' and not ufw_active() and args.enable_ufw and not args.non_interactive and not args.confirm_firewall:
         args.confirm_firewall = (ask('Activation UFW sur SSH : saisir ACTIVER-PAREFEU') == 'ACTIVER-PAREFEU')
     print('\n  \033[1;36mAUTOKOM · Jenkins & Databases\033[0m')
@@ -872,6 +1007,8 @@ def main():
     # activation prematuree lorsque APT, Docker, Nginx ou Certbot echouent.
     completed = Path('/var/lib/autokom/install/services.complete')
     atomic_write(completed, 'AUTOKOM services phase complete\n', 0o644)
+    INCOMPLETE_FILE.unlink(missing_ok=True)
+    installation_event('install', 'completed')
     say('Module terminé ; contrôler TLS, listeners et services.', '✓')
 
 
@@ -879,5 +1016,8 @@ if __name__ == '__main__':
     try:
         main()
     except (ValueError, RuntimeError, KeyboardInterrupt, FileNotFoundError) as exc:
+        installation_event('install', 'failed', detail=type(exc).__name__)
+        if EVENT_LOG is not None:
+            say(f'Journal de cette tentative : {EVENT_LOG}', '!')
         say(str(exc) or 'Interrompu', '✗')
         sys.exit(1)
