@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 from observability_config import Settings, ConfigError, load as load_settings, validate as validate_settings
 from tool_banner import render as autokom_banner, first_install, section, Activity
 from jenkins_network import private_listener
-from domain_validation import DomainRoutingError, check_direct_ec2_domain, check_http01_local
+from domain_validation import DomainRoutingError, check_direct_instance_domain as check_direct_ec2_domain, check_http01_local
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -44,6 +44,7 @@ GRAFANA_DS = Path('/etc/grafana/provisioning/datasources/autokom-prometheus.yaml
 SECRETS = Path('/etc/autokom/secrets')
 PROM_HTPASSWD = Path('/etc/nginx/.autokom-prometheus.htpasswd')
 CONFIG_STATE = Path('/etc/autokom/state/observability.json')
+CONFIG_PENDING = Path('/var/lib/autokom/install/observability-selection.json')
 TIMEOUT = 20
 
 # Validated once at startup; functions also accept Settings in unit tests.
@@ -65,6 +66,50 @@ def previous_state():
     if not isinstance(record, dict) or record.get('schema') != 1:
         raise SetupError('Version d’état AUTOKOM inconnue : intervention manuelle requise')
     return record
+
+
+
+def previous_selection():
+    """Only non-secret, root-owned wizard choices; no passwords or API tokens."""
+    path = CONFIG_PENDING
+    if not path.exists():
+        return {}
+    if path.is_symlink() or not path.is_file():
+        raise SetupError('Choix observabilité non fiable (lien symbolique ou fichier non régulier)')
+    st = path.stat()
+    if st.st_uid != 0 or st.st_mode & 0o077:
+        raise SetupError('Choix observabilité non privés : propriétaire root et mode 0600 requis')
+    try:
+        record = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(record, dict) or record.get('schema') != 1:
+            raise ValueError('schema')
+        allowed = ('prometheus_domain', 'grafana_domain', 'email', 'grafana_user')
+        if any(not isinstance(record.get(key, ''), str) for key in allowed):
+            raise ValueError('format')
+        validate_domain(record.get('prometheus_domain', ''))
+        validate_domain(record.get('grafana_domain', ''))
+        return record
+    except (ValueError, OSError) as exc:
+        raise SetupError('Choix observabilité illisibles : utiliser sudo autokom configure observability') from exc
+
+
+def save_selection(args):
+    if args.mode != 'apply':
+        return
+    from autokom_install_permissions import private_install_directory
+    try:
+        private_install_directory(CONFIG_PENDING.parent)
+    except RuntimeError as exc:
+        raise SetupError(str(exc)) from exc
+    record = {
+        'schema': 1,
+        'prometheus_domain': args.prometheus_domain or '',
+        'grafana_domain': args.grafana_domain or '',
+        'email': args.email or '',
+        'grafana_user': args.grafana_user or '',
+    }
+    owned_write(CONFIG_PENDING, json.dumps(record, sort_keys=True, indent=2) + '\n', mode=0o600)
+    out('✓', 'Choix Prometheus/Grafana enregistrés (sans mot de passe) pour la reprise')
 
 
 def save_state():
@@ -1192,19 +1237,19 @@ def prompt_domain(label, *, max_attempts=3, expected_ipv4=None, unavailable=()):
     """Valide chaque saisie AVANT de passer à la question suivante.
 
     Refuse sans effet de bord : domaine vide, syntaxe erronée, DNS non résolu,
-    A/AAAA qui ne pointent pas vers l'EC2, domaine déjà utilisé par un autre
+    A/AAAA qui ne pointent pas vers cette VM, domaine déjà utilisé par un autre
     composant. Le compteur de tentatives reste volontairement invisible.
     """
     for _ in range(max_attempts):
         response = prompt_text(
-            label, hint='Nom DNS complet (sans https://). Contrôle DNS/IP EC2 immédiat.')
+            label, hint='Nom DNS complet (sans https://). Contrôle DNS/IP de la VM (GCP ou AWS) immédiat.')
         try:
             domain = validate_domain(response)
             if not domain:
                 raise SetupError('Domaine obligatoire après sélection « Oui »')
             if domain in unavailable:
                 raise SetupError(f'{domain} est déjà réservé à un autre service AUTOKOM')
-            with Activity(f'Vérification DNS / IP publique EC2 · {domain}', delay=0.4):
+            with Activity(f'Vérification DNS / IP publique GCP/AWS · {domain}', delay=0.4):
                 addresses = check_direct_ec2_domain(domain, expected_ipv4=expected_ipv4)
         except (SetupError, DomainRoutingError) as exc:
             out('!', f'{label} : {exc}')
@@ -1352,15 +1397,15 @@ def preflight(args):
 def preflight_domains(args):
     """Contrôles réseau avant tout redémarrage/installation/Certbot.
 
-    Sur EC2 direct, DNS A doit pointer vers l'IP publique IMDSv2.
+    Sur VM directe GCP ou AWS, DNS A doit pointer vers l’IP publique détectée.
     Pour les déploiements ALB/CDN, préférer un profil d'infrastructure dédié.
     """
     requested = [x for x in (args.prometheus_domain, args.grafana_domain) if x]
     if not requested:
         return
-    out('›', 'Vérification DNS des domaines et de l’IP publique AWS…')
+    out('›', 'Vérification DNS des domaines et de l’IP publique GCP/AWS…')
     for domain in requested:
-        with Activity(f'DNS / IP publique EC2 · {domain}', delay=0.4):
+        with Activity(f'DNS / IP publique GCP/AWS · {domain}', delay=0.4):
             try:
                 ips = check_direct_ec2_domain(domain, expected_ipv4=args.public_ip)
             except DomainRoutingError as exc:
@@ -1375,7 +1420,7 @@ def preflight_domains(args):
             except DomainRoutingError as exc:
                 raise SetupError(str(exc)) from exc
         out('✓', 'Nginx/TCP 80 accessible localement')
-        out('!', 'HTTP-01 doit aussi être joignable depuis Internet (AWS SG/UFW) ; Certbot le vérifiera')
+        out('!', 'HTTP-01 doit aussi être joignable depuis Internet (pare-feu VPC/SG et UFW) ; Certbot le vérifiera')
 
 
 def interactive_prometheus_password(args):
@@ -1394,13 +1439,14 @@ def main(argv=None):
     mode_flags.add_argument('--apply', dest='mode', action='store_const', const='apply')
     parser.set_defaults(mode='check')
     parser.add_argument('--interactive', action='store_true')
+    parser.add_argument('--reconfigure', action='store_true', help='Redemander explicitement les domaines et comptes')
     parser.add_argument('--non-interactive', action='store_true')
     parser.add_argument('--prometheus-domain', default=None)
     parser.add_argument('--grafana-domain', default=None)
     parser.add_argument('--email', default=None)
     parser.add_argument('--grafana-user', default='')
     parser.add_argument('--public-ip', default=None,
-                        help='IP publique IPv4 directe, seulement si IMDSv2 indisponible (jamais une IP privée)')
+                        help='IPv4 publique directement attachée, si métadonnées GCP/AWS indisponibles (jamais privée)')
     parser.add_argument('--config', default=os.environ.get('AUTOKOM_OBSERVABILITY_CONFIG'),
                         help='Fichier INI privé de surcharges non sensibles')
     parser.add_argument('--set', action='append', default=[], metavar='SECTION.KEY=VALUE',
@@ -1413,10 +1459,11 @@ def main(argv=None):
     # Reuse validated AUTOKOM-owned domains on subsequent runs; the operator
     # should not have to re-enter domains after installing Node Exporter later.
     stored = previous_state() if args.mode == 'apply' else {}
+    pending = previous_selection() if args.mode == 'apply' and not args.reconfigure else {}
     def adopted_domain(kind, existing):
         if existing:
             return existing
-        last=stored.get(f'{kind}_domain','')
+        last=pending.get(f'{kind}_domain','') or stored.get(f'{kind}_domain','')
         if last:
             return validate_domain(last)
         # Upgrade from pre-v16 installations where domains weren't persisted.
@@ -1432,9 +1479,11 @@ def main(argv=None):
                 continue
         return found[0] if len(found)==1 else ''
     SETTINGS = validate_settings(replace(SETTINGS,
-        prometheus_domain=adopted_domain('prometheus', SETTINGS.prometheus_domain) if args.prometheus_domain is None else args.prometheus_domain,
-        grafana_domain=adopted_domain('grafana', SETTINGS.grafana_domain) if args.grafana_domain is None else args.grafana_domain,
-        email=SETTINGS.email if args.email is None else args.email))
+        prometheus_domain=(('' if args.reconfigure else adopted_domain('prometheus', SETTINGS.prometheus_domain))
+                           if args.prometheus_domain is None else args.prometheus_domain),
+        grafana_domain=(('' if args.reconfigure else adopted_domain('grafana', SETTINGS.grafana_domain))
+                        if args.grafana_domain is None else args.grafana_domain),
+        email=(pending.get('email', SETTINGS.email) if args.email is None else args.email)))
     if args.show_config:
         print('AUTOKOM · Configuration d’observabilité (aucun secret)')
         for key, value in SETTINGS.display().items():
@@ -1446,6 +1495,7 @@ def main(argv=None):
     args.prometheus_password = ''
     args.prometheus_user = ''
     args.grafana_new_password = ''
+    args.grafana_user = args.grafana_user or pending.get('grafana_user', '')
     args.setup_node = False
     args.setup_alertmanager = False
     args.smtp = None
@@ -1469,6 +1519,7 @@ def main(argv=None):
     preflight(args)
     preflight_domains(args)
     preflight_credentials(args)
+    save_selection(args)
     if args.mode == 'check':
         check_only(args)
         return 0

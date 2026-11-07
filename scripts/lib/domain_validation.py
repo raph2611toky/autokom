@@ -45,6 +45,42 @@ def ec2_public_ipv4(*, timeout=1.5):
         return None
 
 
+
+# GCP metadata is separate from EC2 IMDSv2. Do not query arbitrary URLs or
+# follow caller-controlled redirects; the fixed endpoint is link-local.
+GCP_METADATA = ('http://metadata.google.internal/computeMetadata/v1/'
+                'instance/network-interfaces/0/access-configs/0/external-ip')
+
+
+def gcp_public_ipv4(*, timeout=1.5):
+    """External IPv4 of this Compute Engine VM, with required Google header."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    req = urllib.request.Request(GCP_METADATA,
+                                 headers={'Metadata-Flavor': 'Google'})
+    try:
+        with opener.open(req, timeout=timeout) as response:
+            if response.headers.get('Metadata-Flavor', '').lower() != 'google':
+                # Google metadata replies contain this header. Never trust
+                # unrelated HTTP responses masquerading as VM metadata.
+                return None
+            value = response.read(100).decode('ascii').strip()
+        ip = ipaddress.ip_address(value)
+        return str(ip) if ip.version == 4 and ip.is_global else None
+    except (OSError, UnicodeError, ValueError, urllib.error.URLError):
+        return None
+
+
+def instance_public_ipv4(*, gcp=gcp_public_ipv4, ec2=ec2_public_ipv4):
+    """Return (provider, external IP) without falling back to ifconfig.me."""
+    gcp_ip = gcp()
+    if gcp_ip:
+        return 'GCP', gcp_ip
+    ec2_ip = ec2()
+    if ec2_ip:
+        return 'AWS', ec2_ip
+    return None, None
+
+
 def global_interface_ipv6():
     """IPv6 réellement assignées aux interfaces hôte (pas celles des bridges)."""
     try:
@@ -73,6 +109,38 @@ def resolved_addresses(domain, *, resolver=socket.getaddrinfo):
         raise DomainRoutingError(f'{domain}: les enregistrements DNS ne sont pas tous publics : {sorted(ips)}')
     return ips
 
+
+def check_direct_instance_domain(domain, *, expected_ipv4=None,
+                                 resolver=socket.getaddrinfo,
+                                 metadata=instance_public_ipv4,
+                                 ipv6_addresses=global_interface_ipv6):
+    """Validate direct DNS routing for a GCP or EC2 VM (not CDN/ALB)."""
+    provider, current = metadata()
+    if expected_ipv4:
+        try:
+            manual = ipaddress.ip_address(expected_ipv4)
+        except ValueError as exc:
+            raise DomainRoutingError('--public-ip doit être une adresse IPv4 publique valide') from exc
+        if manual.version != 4 or not manual.is_global:
+            raise DomainRoutingError('--public-ip doit être une adresse IPv4 publique valide')
+        if current and current != str(manual):
+            raise DomainRoutingError(
+                f'--public-ip {manual} diffère de l’IP publique {provider} détectée : {current}')
+        current = str(manual)
+    if not current:
+        raise DomainRoutingError('IP publique de l’instance indisponible via GCP metadata / AWS IMDSv2. '
+                                 'Renseigner --public-ip uniquement pour une IP directement attachée '
+                                 'à la VM ; un ALB/CDN exige un déploiement dédié.')
+    ips = resolved_addresses(domain, resolver=resolver)
+    ipv4 = {x for x in ips if ipaddress.ip_address(x).version == 4}
+    ipv6 = {x for x in ips if ipaddress.ip_address(x).version == 6}
+    if ipv4 != {current}:
+        raise DomainRoutingError(f'{domain}: DNS A={", ".join(sorted(ipv4)) or "absent"}, '
+                                 f'IPv4 publique {provider or "directe"}={current} : corriger DNS avant Certbot')
+    if ipv6 and not ipv6.issubset(ipv6_addresses()):
+        raise DomainRoutingError(f'{domain}: AAAA={", ".join(sorted(ipv6))} ne correspond pas '
+                                 'aux IPv6 publiques de cette machine ; corriger AAAA avant Certbot')
+    return sorted(ips)
 
 def check_direct_ec2_domain(domain, *, expected_ipv4=None, resolver=socket.getaddrinfo,
                             metadata=ec2_public_ipv4, ipv6_addresses=global_interface_ipv6):

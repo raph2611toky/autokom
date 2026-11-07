@@ -743,6 +743,8 @@ def main(argv=None):
         dns_write = cmd=='dns' and (len(arguments)==1 or
             (len(arguments)==2 and arguments[1] in ('record','tsig','cloudflare')) or (
             len(arguments)>1 and arguments[1] in ('install','setup') and '--check' not in arguments) or
+            (len(arguments)>2 and arguments[1:3]==['migrate','import'] and '--apply' in arguments) or
+            (len(arguments)>2 and arguments[1:3]==['migrate','export']) or
             (len(arguments)>2 and arguments[1] == 'record' and arguments[2] in ('add','delete') and '--apply' in arguments) or
             (len(arguments)>2 and arguments[1] == 'tsig' and arguments[2] == 'generate') or
             (len(arguments)>2 and arguments[1] == 'cloudflare' and arguments[2] in ('add','delete') and '--apply' in arguments))
@@ -866,7 +868,7 @@ def main(argv=None):
                  'observability': 'observability.sh', 'logs':'logs.sh'}
         flags = ('--interactive',) if a.service not in ('services','logs') else ()
         call_module('scripts/install/' + names[a.service], '--apply',
-                    *(['--reconfigure'] if a.service in ('services', 'plugins') else []), *flags)
+                    *(['--reconfigure'] if a.service in ('services', 'plugins', 'observability') else []), *flags)
         return 0
     return perform(a, cfg)
 

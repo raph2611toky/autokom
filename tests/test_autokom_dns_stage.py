@@ -50,7 +50,7 @@ class TestStagedPrimary(unittest.TestCase):
                  patch('sys.stdin.isatty', return_value=False):
                 with redirect_stdout(io.StringIO()) as stdout:
                     self.assertEqual(dns.bind_setup(setup_args()), 0)
-            self.assertIn('AWS seul', stdout.getvalue())
+            self.assertIn('primaire seul', stdout.getvalue())
             self.assertFalse(statefile.exists())
 
     def test_upgrade_with_gcp_keeps_records_and_bumps_serial(self):
@@ -95,7 +95,7 @@ class TestStagedPrimary(unittest.TestCase):
             with redirect_stdout(io.StringIO()) as stdout:
                 self.assertEqual(dns.verify(argparse.Namespace(zone='infra.ikom.mg')), 0)
         self.assertEqual(run.call_count, 2)
-        self.assertIn('pas encore configuré', stdout.getvalue())
+        self.assertIn('non configuré', stdout.getvalue())
 
 
 class TestAnsibleRoles(unittest.TestCase):

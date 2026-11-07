@@ -88,6 +88,18 @@ def local_listen_ips() -> list[str]:
     return [entry for entry in re.findall(r'\binet\s+([0-9.]+)/\d+', p.stdout)]
 
 
+
+def route_listen_ip(local_ips=None):
+    """Choose the routed VM address (ens4 on GCP), not docker0 or wg0."""
+    local_ips = local_ips if local_ips is not None else local_listen_ips()
+    p = run(['ip', '-4', 'route', 'get', '1.1.1.1'], timeout=8)
+    if p.returncode == 0:
+        m = re.search(r'\bsrc\s+([0-9.]+)', p.stdout)
+        if m and m.group(1) in local_ips:
+            return m.group(1)
+    return local_ips[0] if len(local_ips) == 1 else None
+
+
 def bound_options(text: str, listen_ip: str) -> str:
     """Apply authoritative-only settings to stock-like options, preserve extras.
 
@@ -160,7 +172,7 @@ def _ensure_tsig_primary(zone: str):
 
 def _zone_state(zone, env, role, primary_ip, secondary_ip, ns1, ns2):
     if role == 'secondary' and not secondary_ip:
-        raise DNSError('Le DNS secondaire exige son IP publique GCP (--secondary-ip).')
+        raise DNSError('Le serveur DNS secondaire exige son IP publique (--secondary-ip).')
     return dict(zone=core.validate_zone(zone), environment=env,
                 role=role, primary_ip=core.validate_ip(primary_ip, 4),
                 secondary_ip=core.validate_ip(secondary_ip, 4) if secondary_ip else None,
@@ -198,7 +210,7 @@ def bind_setup(args):
     env = args.environment
     if not role:
         if not sys.stdin.isatty(): raise DNSError('Préciser --role primary ou secondary.')
-        i = choose('Mode DNS BIND9', ['Primaire · AWS', 'Secondaire · GCP'])
+        i = choose('Mode DNS BIND9', ['Primaire autoritaire · ce serveur', 'Secondaire autoritaire · ce serveur'])
         if not i: return 0
         role = ('primary', 'secondary')[i-1]
     if not zone:
@@ -211,7 +223,9 @@ def bind_setup(args):
             if not i: return 0
             env = ('production', 'staging', 'development')[i-1]
         else: env = 'production'
-    primary_ip = args.primary_ip or ('56.228.86.160' if sys.stdin.isatty() else '')
+    from domain_validation import instance_public_ipv4
+    provider, detected_ip = instance_public_ipv4()
+    primary_ip = args.primary_ip or (detected_ip if role == 'primary' else '')
     secondary_ip = args.secondary_ip
     ns1, ns2 = args.ns1 or 'ns1.ikom.mg', args.ns2 or 'ns2.ikom.mg'
     desired_state = core.state_path(zone)
@@ -221,31 +235,29 @@ def bind_setup(args):
         secondary_ip = previous['secondary_ip']
         ns2 = previous['ns2']
     if not primary_ip and sys.stdin.isatty():
-        primary_ip = ask('IP publique du DNS primaire AWS', '56.228.86.160')
+        primary_ip = ask('IPv4 publique du DNS primaire', detected_ip or '')
     if not primary_ip:
         raise DNSError('Adresse publique du primaire obligatoire (--primary-ip).')
     if not secondary_ip and role == 'primary' and not previous and sys.stdin.isatty():
-        i = choose('Serveur secondaire GCP', [
-            'Configurer AWS seul pour le moment (défaut)',
-            'J’ai déjà un serveur GCP disponible',
+        i = choose('Serveur DNS secondaire', [
+            'Aucun secondaire pour le moment (défaut)',
+            'J’ai déjà un serveur secondaire disponible',
         ])
         if not i: return 0
         if i == 2:
-            secondary_ip = ask('IP publique du DNS secondaire GCP')
+            secondary_ip = ask('IP publique du DNS secondaire')
             if not secondary_ip:
                 raise DNSError('IP publique GCP nécessaire pour activer un secondaire.')
     if role == 'secondary' and not secondary_ip:
-        raise DNSError('Préciser --secondary-ip pour configurer le secondaire GCP.')
+        raise DNSError('Préciser --secondary-ip pour configurer un serveur secondaire.')
     state = _zone_state(zone, env, role, primary_ip, secondary_ip, ns1, ns2)
     local_ips = local_listen_ips()
-    listen_ip = args.listen_ip
+    listen_ip = args.listen_ip or route_listen_ip(local_ips)
     if not listen_ip:
-        if not local_ips:
-            raise DNSError('IP privée du serveur indéterminée. Utiliser --listen-ip (IP présente sur l’interface).')
-        listen_ip = local_ips[0]
+        raise DNSError('IP locale de routage indéterminée. Préciser --listen-ip (IP présente sur ens4/eth0).')
     listen_ip = core.validate_ip(listen_ip, 4)
     if listen_ip not in local_ips:
-        raise DNSError('L’IP --listen-ip doit être configurée sur une interface locale (sur AWS, utiliser l’IP privée NAT).')
+        raise DNSError('L’IP --listen-ip doit être configurée sur une interface locale (sur GCP/AWS, utiliser l’IP privée NAT).')
     existing = bool(previous)
     activate_secondary = False
     if existing:
@@ -260,7 +272,7 @@ def bind_setup(args):
             raise DNSError('Un secondaire existant ne peut pas être supprimé par setup.')
         if not old_secondary and new_secondary:
             if role != 'primary':
-                raise DNSError('La mise à niveau vers deux NS doit être initiée sur le primaire AWS.')
+                raise DNSError('La mise à niveau vers deux NS doit être initiée sur le primaire.')
             activate_secondary = True
             state = previous.copy()
             state['secondary_ip'] = new_secondary
@@ -272,13 +284,13 @@ def bind_setup(args):
         core.bump_serial(state)
     title('PLAN DE CONFIGURATION')
     for k, v in [('Zone', zone), ('Environnement', env), ('Rôle', role),
-                 ('DNS primaire AWS', primary_ip), ('DNS secondaire GCP', secondary_ip or 'non configuré'),
+                 ('DNS primaire autoritaire', primary_ip), ('DNS secondaire autoritaire', secondary_ip or 'non configuré'),
                  ('Écoute BIND locale', listen_ip), ('Clé TSIG', str(core.tsig_path(zone))),
                  ('État de la zone', 'ajout secondaire GCP' if activate_secondary else ('existe déjà' if existing else 'nouvelle'))]:
         info(f'{k:<24} {v}')
     if not secondary_ip:
-        info('MODE PRÉPARATION : AWS seul, NS1 uniquement, aucun transfert TSIG / NOTIFY actif.')
-        info('Ne pas déléguer infra.ikom.mg dans Cloudflare avant un second NS fonctionnel.')
+        info('MODE PRÉPARATION : primaire seul, NS1 uniquement, aucun transfert TSIG / NOTIFY actif.')
+        info('Vérifier l’état réel de la délégation Cloudflare et prévoir un DNS secondaire fiable.')
     info('Pas de modification de dot.mg, Cloudflare, Nginx, Docker ou MySQL.')
     if args.check or (not args.apply and not sys.stdin.isatty()):
         good('Prévisualisation terminée, aucun changement.'); return 0
@@ -333,12 +345,12 @@ def bind_setup(args):
             core.tsig_path(zone).unlink(missing_ok=True)
         raise
     good('BIND configuré et zone contrôlée.')
-    info('Ouvrir TCP/UDP 53 dans les pare-feu AWS (non automatique).')
+    info('Autoriser UDP/TCP 53 sur le pare-feu hôte et le VPC/SG du fournisseur cloud.')
     if not secondary_ip:
-        info('AWS seul : ne PAS encore déléguer ' + zone + ' vers un NS unique.')
-        info('Quand GCP sera prêt : configurer le secondaire et ajouter son IP via autokom dns setup.')
+        info('Primaire seul : prévoir un secondaire fiable pour la disponibilité de la zone ' + zone + '.')
+        info('Configurer un secondaire indépendant avant de retirer définitivement l’ancien DNS.')
     else:
-        info('Ouvrir TCP/UDP 53 dans le pare-feu GCP également.')
+        info('Ouvrir UDP/TCP 53 sur les pare-feu hôte et cloud des deux serveurs.')
         info('Après contrôle des deux serveurs : délégation Cloudflare ' + zone + ' vers ' + ns1 + ' et ' + ns2)
     return 0
 
@@ -440,7 +452,7 @@ def list_zones(only_environments=False):
     directory = STATE / 'zones'
     for path in sorted(directory.glob('*.json')) if directory.exists() else []:
         item = json.loads(path.read_text())
-        stage = ' · AWS seul / GCP en attente' if item['role'] == 'primary' and not item.get('secondary_ip') else ''
+        stage = ' · primaire seul / secondaire en attente' if item['role'] == 'primary' and not item.get('secondary_ip') else ''
         print(f'  ✓ {item["zone"]:<30} {item["environment"]:<14} {item["role"]:<10} SOA {item["serial"]}{stage}')
     info('La zone racine ikom.mg est administrée sur Cloudflare.')
     return 0
@@ -464,11 +476,11 @@ def verify(args):
     title('VÉRIFICATION AUTORITAIRE · ' + zone)
     if not shutil.which('dig'):
         raise DNSError('dig absent. Exécuter autokom dns install.')
-    targets = [('local', '127.0.0.1'), ('AWS', state['primary_ip'])]
+    targets = [('local', '127.0.0.1'), ('primaire', state['primary_ip'])]
     if state.get('secondary_ip'):
-        targets.append(('GCP', state['secondary_ip']))
+        targets.append(('secondaire', state['secondary_ip']))
     else:
-        info('GCP : pas encore configuré — aucune requête envoyée.')
+        info('Secondaire : non configuré — aucune requête envoyée.')
     for place, addr in targets:
         p = run(['dig', '+norecurse', '+time=3', '+tries=1', '@'+addr, zone, 'SOA', '+noall', '+answer'], timeout=9)
         values = p.stdout.strip()
@@ -499,14 +511,14 @@ def cloudflare(args):
     if args.action == 'delegation':
         title('DÉLÉGATION CLOUDFLARE')
         info('ikom.mg : deux NS Cloudflare uniquement chez dot.mg.')
-        info('ns1.ikom.mg A = 56.228.86.160 (DNS only, non proxifié)')
+        info('ns1.ikom.mg doit pointer sur l’IP publique actuelle du primaire BIND (DNS only).')
         zone_path = core.state_path('infra.ikom.mg')
         secondary_ready = zone_path.is_file() and core.load_state('infra.ikom.mg').get('secondary_ip')
         if not secondary_ready:
-            info('AWS seul : délégation infra.ikom.mg NON recommandée pour le moment.')
-            info('Attendre le DNS secondaire GCP, son IP statique et la vérification des deux NS.')
+            info('Primaire seul : disponibilité DNS non redondante ; vérifier la délégation avant arrêt de l’ancien.')
+            info('Prévoir un DNS secondaire indépendant et une IP publique statique.')
         else:
-            info('ns2.ikom.mg A = IP_PUBLIQUE_GCP (DNS only, non proxifié)')
+            info('ns2.ikom.mg A = IP publique du secondaire (DNS only, non proxifié)')
             info('infra.ikom.mg NS = ns1.ikom.mg et ns2.ikom.mg (après tests GCP)')
         return 0
     cf = Cloudflare()
@@ -617,10 +629,22 @@ def parse(argv=None):
             c.add_argument('--zone')
             c.add_argument('--environment', choices=('production','staging','development'))
             c.add_argument('--primary-ip')
-            c.add_argument('--secondary-ip', help='Facultatif sur AWS primaire; obligatoire pour secondaire GCP')
+            c.add_argument('--secondary-ip', help='IPv4 publique de l’éventuel serveur secondaire')
             c.add_argument('--ns1', default='ns1.ikom.mg')
             c.add_argument('--ns2', default='ns2.ikom.mg')
-            c.add_argument('--listen-ip', help='IP sur l’interface locale (EC2 : IP privée)')
+            c.add_argument('--listen-ip', help='IPv4 locale de l’interface VM, sous NAT GCP/AWS')
+    mig = sub.add_parser('migrate', help='Exporter AWS et promouvoir la zone AUTOKOM sur GCP')
+    ms = mig.add_subparsers(dest='action')
+    exp = ms.add_parser('export', help='Créer sur AWS une archive privée des zones BIND AUTOKOM')
+    exp.add_argument('--zone', default='infra.ikom.mg')
+    exp.add_argument('--archive', required=True)
+    imp = ms.add_parser('import', help='Restaurer sans écraser une zone existante sur GCP')
+    imp.add_argument('--zone', default='infra.ikom.mg')
+    imp.add_argument('--archive', required=True)
+    imp.add_argument('--public-ip', default=None)
+    imp.add_argument('--listen-ip', default=None)
+    imp.add_argument('--apply', action='store_true')
+    imp.add_argument('--yes', action='store_true')
     sub.add_parser('status')
     sub.add_parser('list')
     sub.add_parser('environments')
@@ -658,6 +682,30 @@ def main(argv=None):
     args = parse(argv)
     try:
         if args.cmd is None: return menu()
+        if args.cmd == 'migrate':
+            from autokom_dns_migrate import export_zone, import_zone
+            if args.action == 'export':
+                export_zone(args.zone, args.archive)
+                return 0
+            if args.action == 'import':
+                from domain_validation import instance_public_ipv4
+                provider, detected = instance_public_ipv4()
+                addr = args.public_ip or detected
+                if not addr:
+                    raise DNSError('IP publique de ce serveur introuvable (GCP/AWS metadata) : fournir --public-ip.')
+                interfaces = local_listen_ips()
+                listen = args.listen_ip or route_listen_ip(interfaces)
+                if not listen:
+                    raise DNSError('Plusieurs interfaces : fournir --listen-ip avec l’IPv4 locale GCP.')
+                authorized = False
+                if args.apply:
+                    authorized = confirmation('Promouvoir sur ce serveur la zone DNS importée ?', expected='MIGRER', yes=args.yes)
+                    if not authorized:
+                        raise DNSError('Migration DNS non confirmée ; aucun changement.')
+                import_zone(zone=args.zone, archive=args.archive, public_ip=addr,
+                            listen_ip=listen, apply=args.apply, confirmed=authorized)
+                return 0
+            raise DNSError('Utiliser autokom dns migrate export ou import.')
         if args.cmd == 'install': return install(args)
         if args.cmd == 'setup': return bind_setup(args)
         if args.cmd == 'status': return status()
