@@ -11,6 +11,9 @@ import argparse
 import base64
 import configparser
 import getpass
+import http.client
+import secrets
+import stat
 import grp
 import ipaddress
 import json
@@ -43,6 +46,7 @@ GRAFANA_DROPIN = Path('/etc/systemd/system/grafana-server.service.d/90-autokom.c
 GRAFANA_DS = Path('/etc/grafana/provisioning/datasources/autokom-prometheus.yaml')
 SECRETS = Path('/etc/autokom/secrets')
 PROM_HTPASSWD = Path('/etc/nginx/.autokom-prometheus.htpasswd')
+ACME_WEBROOT = Path('/var/www/autokom-acme')
 CONFIG_STATE = Path('/etc/autokom/state/observability.json')
 CONFIG_PENDING = Path('/var/lib/autokom/install/observability-selection.json')
 TIMEOUT = 20
@@ -569,12 +573,92 @@ def valid_cert(domain):
                             '-noout', '-checkhost', domain], capture_output=True).returncode == 0)
 
 
+def _acme_location():
+    # Use a dedicated, readable webroot. `^~` takes priority over the generic
+    # HTTP 503 gate, 301 redirect, and other regex locations (e.g. dotfiles).
+    return ('    location ^~ /.well-known/acme-challenge/ {\n'
+            f'        root {ACME_WEBROOT};\n'
+            '        default_type text/plain;\n'
+            '        try_files $uri =404;\n'
+            '        access_log off;\n'
+            '    }\n')
+
+
+def _old_gated_vhost(domain, port):
+    # Exact AUTOKOM HTTP 503 placeholder deployed before webroot support.
+    return (f'# AUTOKOM MANAGED {domain} : {port} — TLS PENDING\n'
+            'server {\n    listen 80;\n'
+            f'    server_name {domain};\n'
+            '    location / { return 503; }\n}\n')
+
+
+def ensure_acme_webroot():
+    """Create only AUTOKOM's isolated ACME directory, never follow symlinks.
+
+    The challenge must be readable by www-data, but not writable by it or by
+    other accounts. Existing foreign directories are never reowned/chmodded.
+    """
+    root = ACME_WEBROOT
+    if not root.is_absolute():
+        raise SetupError('Répertoire ACME non absolu')
+    parents = [root.parent, root, root / '.well-known',
+               root / '.well-known' / 'acme-challenge']
+    for path in parents:
+        if path.is_symlink():
+            raise SetupError(f'Chemin ACME symbolique interdit : {path}')
+        if not path.exists():
+            path.mkdir(mode=0o755)
+        st = path.lstat()
+        if (not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or
+                stat.S_IMODE(st.st_mode) & 0o022 or
+                stat.S_IMODE(st.st_mode) & 0o005 != 0o005):
+            raise SetupError(f'Répertoire ACME non fiable ou illisible par Nginx : {path}')
+    return root
+
+
+def check_acme_http01_local(domain):
+    """Test actual matching Nginx vhost/route before placing ACME order.
+
+    Check Nginx through 127.0.0.1:80 with the requested Host header. This
+    proves local routing, not public accessibility through GCP firewall/CDN.
+    """
+    root = ACME_WEBROOT / '.well-known' / 'acme-challenge'
+    name = 'autokom-check-' + secrets.token_hex(12)
+    marker = 'autokom-acme-ready-' + secrets.token_hex(14)
+    dest = root / name
+    fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    try:
+        with os.fdopen(fd, 'w', encoding='ascii') as handle:
+            os.fchmod(handle.fileno(), 0o644)
+            handle.write(marker)
+        connection = http.client.HTTPConnection('127.0.0.1', 80, timeout=6)
+        try:
+            connection.request('GET', '/.well-known/acme-challenge/' + name,
+                               headers={'Host': domain})
+            response = connection.getresponse()
+            body = response.read(256).decode('utf-8', 'replace')
+        finally:
+            connection.close()
+        if response.status != 200 or body != marker:
+            raise SetupError(f'Préflight HTTP-01 {domain} : Nginx renvoie '
+                             f'HTTP {response.status} ou un contenu inattendu. '
+                             'Vérifier server_name, site actif et chemin ACME ; '
+                             'aucune nouvelle demande Let’s Encrypt envoyée.')
+        out('✓', f'{domain} : défi HTTP-01 servi en local par le bon virtual host (HTTP 200)')
+    except (OSError, http.client.HTTPException) as exc:
+        raise SetupError(f'Préflight HTTP-01 {domain} impossible : '
+                         'Nginx sur 127.0.0.1:80 inaccessible ou réponse invalide') from exc
+    finally:
+        dest.unlink(missing_ok=True)
+
+
 def vhost_content(domain, port, *, prometheus=False, gated=True):
     """Start HTTP gated, then publish HTTPS only after certonly succeeds."""
     if gated:
         return (f'# AUTOKOM MANAGED {domain} : {port} — TLS PENDING\n'
                 'server {\n    listen 80;\n'
                 f'    server_name {domain};\n'
+                + _acme_location() +
                 '    location / { return 503; }\n}\n')
     auth = ('        auth_basic "AUTOKOM Metrics";\n'
             '        auth_basic_user_file /etc/nginx/.autokom-prometheus.htpasswd;\n') if prometheus else ''
@@ -587,7 +671,8 @@ def vhost_content(domain, port, *, prometheus=False, gated=True):
             'server {\n'
             '    listen 80;\n'
             f'    server_name {domain};\n'
-            '    return 301 https://$host$request_uri;\n'
+            + _acme_location() +
+            '    location / { return 301 https://$host$request_uri; }\n'
             '}\n'
             'server {\n'
             '    listen 443 ssl;\n'
@@ -643,7 +728,21 @@ def configure_nginx(domain, port, kind, args):
         return
     existing = existing_vhosts(domain)
     managed = NGINX_AVAIL / f'autokom-{kind}-{domain}.conf'
-    if existing:
+    enabled_link = NGINX_ENABLED / managed.name
+    # A previous failed HTTP-01 leaves an AUTOKOM-managed HTTP 503 gate.
+    # It is *not* a foreign vhost: reuse it, never overwrite a different site.
+    # A valid certificate may also exist when the previous run stopped between
+    # ACME issuance and the final Nginx deployment.
+    gated_content = vhost_content(domain, port, prometheus=(kind == 'prometheus'), gated=True)
+    old_gated = _old_gated_vhost(domain, port)
+    owned_pending = (len(existing) == 1 and managed.is_file() and
+                     not managed.is_symlink() and enabled_link.is_symlink() and
+                     enabled_link.resolve() == managed.resolve() and
+                     managed.read_text(encoding='utf-8') in (gated_content, old_gated) and
+                     'TLS PENDING' in existing[0])
+    if owned_pending:
+        out('›', f'{domain} : reprise du virtual host AUTOKOM TLS PENDING (pas de réinitialisation)')
+    if existing and not owned_pending:
         if not vhost_target_ok(existing, port):
             # Only update an AUTOKOM-owned vhost; never rewrite another service.
             enabled_link = NGINX_ENABLED / managed.name
@@ -703,7 +802,7 @@ def configure_nginx(domain, port, kind, args):
     if args.mode == 'check':
         out('+', f'Créer le proxy HTTPS sécurisé : {domain} → 127.0.0.1:{port}')
         return
-    if managed.exists():
+    if managed.exists() and not owned_pending:
         raise SetupError(f'Un fichier Nginx AUTOKOM préexiste mais n’est pas actif : {managed}')
     # Une adresse de contact est recommandée, mais Certbot peut fonctionner sans.
     # Ne jamais transmettre --email avec une chaîne vide ; utiliser le drapeau
@@ -712,9 +811,15 @@ def configure_nginx(domain, port, kind, args):
         raise SetupError('Format d’e-mail Let’s Encrypt invalide')
     link = NGINX_ENABLED / managed.name
     try:
+        # Readable, dedicated webroot. Existing foreign paths are never changed.
+        ensure_acme_webroot()
         # Stage gated HTTP-only site: never expose Grafana credentials on HTTP.
-        owned_write(managed, vhost_content(domain, port, prometheus=(kind == 'prometheus'), gated=True))
-        link.symlink_to(managed)
+        # Upgrade the exact old AUTOKOM 503 placeholder in-place after failure.
+        if not owned_pending:
+            owned_write(managed, gated_content)
+            link.symlink_to(managed)
+        elif managed.read_text(encoding='utf-8') == old_gated:
+            owned_write(managed, gated_content)
         run(['nginx', '-t'])
         run(['systemctl', 'reload', 'nginx'])
         # Certbot only obtains a certificate and temporarily configures nginx
@@ -728,8 +833,21 @@ def configure_nginx(domain, port, kind, args):
             if not args.email and not getattr(args, '_cert_email_warning_emitted', False):
                 out('!', 'Certbot sans e-mail : aucune notification ACME d’expiration ou de révocation')
                 args._cert_email_warning_emitted = True
-            run(['certbot', 'certonly', '--nginx', '--non-interactive',
-                 '--agree-tos', '--no-eff-email', *email_args, '-d', domain], timeout=300)
+            # Test the matching HTTP vhost before consuming an ACME attempt.
+            check_acme_http01_local(domain)
+            from observability_acme import acme_log_offset, acme_failure_detail
+            log_offset = acme_log_offset()
+            try:
+                run(['certbot', 'certonly', '--webroot', '-w', str(ACME_WEBROOT), '--non-interactive',
+                     '--agree-tos', '--no-eff-email', *email_args, '-d', domain], timeout=300)
+            except SetupError as exc:
+                detail = acme_failure_detail(domain, since=log_offset)
+                raise SetupError(f'Échec HTTPS {domain} : {detail}. '
+                                 'Le certificat et les identifiants existants sont conservés. '
+                                 'Diagnostic : sudo grep -Ei "detail:|Challenge failed|Invalid response|'
+                                 'Timeout during connect|DNS problem|CAA|rateLimited" '
+                                 '/var/log/letsencrypt/letsencrypt.log | tail -20') from exc
+
         if not valid_cert(domain):
             raise SetupError(f'Certificat de {domain} non confirmé')
         owned_write(managed, vhost_content(domain, port,

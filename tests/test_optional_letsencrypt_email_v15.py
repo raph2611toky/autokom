@@ -94,7 +94,9 @@ class OptionalAcmeEmail(unittest.TestCase):
                  patch.object(o, 'resolve_domain', return_value=['203.0.113.9']), \
                  patch.object(o, 'valid_cert', side_effect=[False, True]), \
                  patch.object(o, 'run') as run, patch.object(o, 'out'), \
-                 patch.object(o, 'owned_write'):
+                 patch.object(o, 'owned_write'), \
+                 patch.object(o, 'ensure_acme_webroot'), \
+                 patch.object(o, 'check_acme_http01_local'):
                 o.configure_nginx('prom.example.org', 9090, 'prometheus', args)
             cert_calls=[call.args[0] for call in run.call_args_list if call.args[0][0]=='certbot']
             self.assertEqual(len(cert_calls),1)

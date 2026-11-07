@@ -154,10 +154,41 @@ server {
                     '--grafana-domain','same.example.com'])
 
     def test_disable_live_without_tty(self):
-        p = MagicMock(returncode=0, stdout='ok', stderr='')
-        with patch.object(o.subprocess, 'run', return_value=p) as r:
-            self.assertEqual(o.run(['printf','ok']), 'ok')
-            self.assertEqual(r.call_count, 1)
+        # Do not infer the test's execution mode from the developer's terminal.
+        # AUTOKOM deliberately uses Popen with a live loader on a real TTY.
+        result = MagicMock(returncode=0, stdout='ok', stderr='')
+        with patch.object(o.sys, 'stdout', io.StringIO()), \
+             patch.dict(o.os.environ, {'AUTOKOM_LIVE': '1', 'NO_COLOR': ''}), \
+             patch.object(o.subprocess, 'run', return_value=result) as run, \
+             patch.object(o.subprocess, 'Popen') as popen:
+            self.assertEqual(o.run(['printf', 'ok']), 'ok')
+            run.assert_called_once()
+            popen.assert_not_called()
+
+    def test_live_loader_uses_popen_with_tty(self):
+        terminal = MagicMock()
+        terminal.isatty.return_value = True
+        process = MagicMock(returncode=0)
+        process.communicate.return_value = ('ok', '')
+        with patch.object(o.sys, 'stdout', terminal), \
+             patch.dict(o.os.environ, {'AUTOKOM_LIVE': '1', 'NO_COLOR': ''}), \
+             patch.object(o.subprocess, 'run') as run, \
+             patch.object(o.subprocess, 'Popen', return_value=process) as popen:
+            self.assertEqual(o.run(['printf', 'ok']), 'ok')
+            popen.assert_called_once()
+            run.assert_not_called()
+
+    def test_explicit_disable_live_even_with_tty(self):
+        terminal = MagicMock()
+        terminal.isatty.return_value = True
+        result = MagicMock(returncode=0, stdout='ok', stderr='')
+        with patch.object(o.sys, 'stdout', terminal), \
+             patch.dict(o.os.environ, {'AUTOKOM_LIVE': '0', 'NO_COLOR': ''}), \
+             patch.object(o.subprocess, 'run', return_value=result) as run, \
+             patch.object(o.subprocess, 'Popen') as popen:
+            self.assertEqual(o.run(['printf', 'ok']), 'ok')
+            run.assert_called_once()
+            popen.assert_not_called()
 
 
 
