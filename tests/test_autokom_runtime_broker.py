@@ -77,7 +77,7 @@ class BrokerTests(unittest.TestCase):
     def test_runtime_preview_does_not_start_uninstalled_systemd_units(self):
         role=(ROOT/'ansible/roles/platform_runtime/tasks/main.yml').read_text()
         # Broker, worker and the autonomous DNS timer must remain check-mode safe.
-        self.assertEqual(role.count('when: not ansible_check_mode'), 3)
+        self.assertEqual(role.count('when: not ansible_check_mode'), 4)
         self.assertIn('name: autokom-domain-reconciler.timer', role)
 
     def test_backend_runtime_contract_has_shared_runner_key_and_managed_suffix(self):

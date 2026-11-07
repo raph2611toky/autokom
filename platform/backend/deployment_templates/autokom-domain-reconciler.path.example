@@ -1,0 +1,13 @@
+[Unit]
+Description=AUTOKOM · Relancer le diagnostic DNS/HTTPS quand la configuration change
+
+[Path]
+# Le timer assure les tentatives périodiques si un évènement n'est pas observé.
+# Surveiller les valeurs d'autorisation sans lire ni révéler les secrets ici.
+PathChanged=/etc/autokom/secrets/runtime.env
+PathChanged=/etc/autokom/secrets/cloudflare-dns.env
+PathChanged=/etc/autokom/secrets/backend.env
+Unit=autokom-domain-reconciler.service
+
+[Install]
+WantedBy=multi-user.target

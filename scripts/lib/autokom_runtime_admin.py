@@ -403,6 +403,13 @@ except (OSError,ValueError,KeyError,TypeError):
     except (BuildkitError, OSError, KeyError) as exc:
         raise SetupError('BuildKit rootless non opérationnel : ' + str(exc)) from exc
     print('  ✓ BuildKit rootless accessible par Jenkins : socket, worker et RUN validés.')
+    # Verify the automatic repair mechanism, not only the Docker/Jenkins path.
+    # No secrets, network mutation or manual trigger during this check.
+    for unit in ('autokom-domain-reconciler.timer', 'autokom-domain-reconciler.path'):
+        state = systemctl_state(unit)
+        print(f'  {"✓" if state == "active" else "✗"} {unit} : {state}')
+        if state != 'active':
+            failures.append(unit)
     # private ingress doctor: read-only preflight and active HTTP healthcheck
     from autokom_internal_ingress import diagnose, IngressError
     from autokom_platform_broker import run as broker_run, PROXY, ENABLED, STATE

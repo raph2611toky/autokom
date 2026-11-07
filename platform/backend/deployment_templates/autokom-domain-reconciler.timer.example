@@ -2,9 +2,10 @@
 Description=AUTOKOM · Retenter automatiquement DNS/HTTPS pour les sites publiés
 
 [Timer]
-OnBootSec=70s
-OnUnitInactiveSec=3min
-RandomizedDelaySec=20s
+OnBootSec=45s
+OnActiveSec=45s
+OnUnitInactiveSec=2min
+RandomizedDelaySec=15s
 Persistent=true
 AccuracySec=15s
 Unit=autokom-domain-reconciler.service

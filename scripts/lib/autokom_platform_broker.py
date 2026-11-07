@@ -805,6 +805,13 @@ def _deprovision_environment(params):
     return {'offline':True,'historical_state_retained':True}
 
 
+def _activate_owned_domain(params):
+    host=valid_hostname(params.get('hostname'))
+    env=valid_id(params.get('environment_id'))
+    _check_dns(host,params.get('token'),params.get('managed') is True)
+    return _proxy_apply(host,env)
+
+
 def handle(action,params):
     if not isinstance(params,dict):raise BrokerError('Paramètres invalides.')
     if action=='ping':
@@ -844,9 +851,9 @@ def handle(action,params):
     if action=='domain.dns.create':
         return _cloudflare_record(valid_hostname(params.get('hostname')))
     if action=='domain.activate':
-        host=valid_hostname(params.get('hostname'))
-        _check_dns(host,params.get('token'),params.get('managed') is True)
-        return _proxy_apply(host,valid_id(params.get('environment_id')))
+        # Serialise Nginx / Certbot with runtime deploy, rollback and removal.
+        # A domain retry cannot rewrite a vhost while another release changes state.
+        return _runtime_lock_call(_activate_owned_domain,params)
     if action=='domain.deactivate':
         return _runtime_lock_call(lambda p: {'deactivated':_deactivate_owned_vhost(valid_hostname(p.get('hostname')),valid_id(p.get('environment_id')))},params)
     raise BrokerError('Opération non autorisée.')

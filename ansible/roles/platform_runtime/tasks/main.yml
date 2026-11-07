@@ -89,6 +89,14 @@
     group: root
     mode: '0644'
 
+- name: Installer la veille des changements de configuration DNS et HTTPS
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../platform/backend/deployment_templates/autokom-domain-reconciler.path.example"
+    dest: /etc/systemd/system/autokom-domain-reconciler.path
+    owner: root
+    group: root
+    mode: '0644'
+
 - name: Recharger systemd
   ansible.builtin.systemd_service:
     daemon_reload: true
@@ -103,6 +111,13 @@
 - name: Activer les tentatives DNS/HTTPS automatiques (aucune publication Jenkins)
   ansible.builtin.systemd_service:
     name: autokom-domain-reconciler.timer
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+- name: Réactiver automatiquement DNS et HTTPS après changement de configuration
+  ansible.builtin.systemd_service:
+    name: autokom-domain-reconciler.path
     enabled: true
     state: started
   when: not ansible_check_mode

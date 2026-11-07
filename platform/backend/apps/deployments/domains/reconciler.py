@@ -17,6 +17,14 @@ SAFE = re.compile(r'^AUTOKOM_[A-Z0-9_]{3,80}$')
 RETRY = timedelta(minutes=5)
 
 
+def matches_active_release(runtime, environment_id, release):
+    """Only repair the image registered as the active release; no CI or rollback here."""
+    return (isinstance(runtime, dict)
+            and runtime.get("environment_id") == str(environment_id)
+            and release is not None
+            and str(release.source_deployment_id) == runtime.get("run_id"))
+
+
 def reconcile_domains(*, limit=5, now=None):
     """Repair old reserved domains and missing public vhosts without a Jenkins rebuild.
 
@@ -31,7 +39,7 @@ def reconcile_domains(*, limit=5, now=None):
         environment__project__status='ACTIVE', environment__kind='PRODUCTION',
         environment__hosted_application__observed_state='RUNNING',
         environment__hosted_application__current_release__status='ACTIVE',
-    ).select_related('environment').order_by('created_at'))
+    ).select_related('environment', 'environment__hosted_application__current_release').order_by('created_at'))
     checked = attempted = repaired = 0
     processed = set()
     from apps.deployments.runs.models import DeploymentRun
@@ -67,8 +75,7 @@ def reconcile_domains(*, limit=5, now=None):
         try:
             # Check that a real runtime exists before touching DNS/ACME.
             state = request_control('runtime.status',{'environment_id':str(env.pk)},timeout=12).get('runtime')
-            if (not state or state.get('environment_id') != str(env.pk) or
-                    str(env.hosted_application.current_release.version) != state.get('run_id')):
+            if not matches_active_release(state, env.pk, env.hosted_application.current_release):
                 raise AutokomControlUnavailable('Runtime et publication active incohérents.')
             activate_managed_domains_for_release(env)
             repaired += 1
