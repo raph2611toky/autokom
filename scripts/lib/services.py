@@ -81,6 +81,43 @@ def valid_domain(domain):
     return domain.lower()
 
 
+def valid_acme_email(value):
+    """Validate the email that Certbot needs, before any host changes.
+
+    A missing/invalid address is never silently replaced with an admin-selected
+    default. The interactive wizard lets the administrator correct it.
+    """
+    email = (value or '').strip()
+    if (not email or len(email) > 254 or email.count('@') != 1
+            or any(ord(ch) < 33 or ord(ch) > 126 for ch in email)):
+        raise ValueError('Adresse e-mail Let’s Encrypt obligatoire et valide')
+    local, host = email.rsplit('@', 1)
+    if (not local or len(local) > 64 or local.startswith('.') or local.endswith('.')
+            or '..' in local or not re.fullmatch(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~.\-]+", local)):
+        raise ValueError('Adresse e-mail Let’s Encrypt invalide')
+    try:
+        valid_domain(host.lower())
+    except ValueError as exc:
+        raise ValueError('Domaine de l’adresse e-mail Let’s Encrypt invalide') from exc
+    return email
+
+
+def prompt_acme_email(current=None):
+    """Retry a blank/invalid interactive email without losing wizard choices."""
+    if current:
+        try:
+            return valid_acme_email(current)
+        except ValueError as exc:
+            say(f'{exc} : veuillez corriger cette adresse.', '!')
+    while True:
+        candidate = ask('Adresse e-mail pour Let’s Encrypt',
+                        hint='Obligatoire pour Certbot. Entrée vide : ressaisir. Ctrl+C : annuler.')
+        try:
+            return valid_acme_email(candidate)
+        except ValueError as exc:
+            say(f'{exc} : saisissez une adresse valide pour continuer.', '!')
+
+
 def cidrs(value):
     """Accept comma, semicolon or whitespace; never hyphen/underscore as separator."""
     if not value or not value.strip():
@@ -119,8 +156,8 @@ def check_user_input(options):
         raise ValueError('--tls existing exige un domaine Nginx et un certificat valides')
     if options.tls == 'provided' and (not options.cert or not options.key):
         raise ValueError('Certificat ET clé privée requis pour --tls provided')
-    if options.tls == 'certbot' and options.domain and not options.email:
-        raise ValueError('E-mail Let’s Encrypt requis seulement pour un nouveau domaine')
+    if options.tls == 'certbot' and options.domain:
+        options.email = valid_acme_email(options.email)
     # 0.0.0.0 is an address to LISTEN on, NOT a client authorization.
     # Actual exposure is checked and denied by secure_firewall() before apply.
     return options
@@ -173,7 +210,7 @@ def interactive(options):
                 options.tls = 'existing'
             elif idx == len(found) + 1:
                 options.domain = ask('Nouveau domaine Jenkins',
-                                     hint='Enregistrement DNS A vers le serveur requis pour Certbot')
+                                     hint='DNS A ou CNAME résolvant vers l’IPv4 publique du serveur pour Certbot')
             else:
                 options.domain = ''
         else:
@@ -192,9 +229,8 @@ def interactive(options):
                        ['Certbot / Let’s Encrypt', 'Certificat déjà disponible', 'HTTP uniquement'],
                        hint='Certbot uniquement si aucun certificat valide n’est installé.')
             options.tls = ('certbot','provided','none')[idx - 1]
-    if options.domain and options.tls == 'certbot' and not options.email:
-        options.email = ask('Adresse e-mail pour Let’s Encrypt',
-                            hint='Requise pour un nouveau certificat ACME')
+    if options.domain and options.tls == 'certbot':
+        options.email = prompt_acme_email(options.email)
     if options.domain and options.tls == 'provided':
         options.cert = ask('Chemin du certificat fullchain.pem')
         options.key = ask('Chemin de la clé privée .pem')
@@ -664,9 +700,9 @@ def configure_proxy(options):
         try:
             ips = {x[4][0] for x in socket.getaddrinfo(domain, 80, family=socket.AF_INET)}
         except socket.gaierror:
-            fail(f'DNS indisponible pour {domain}; demander un DNS A valide avant Certbot')
+            fail(f'DNS indisponible pour {domain} ; vérifier l’enregistrement A ou le CNAME vers une IPv4 avant Certbot')
         if not ips:
-            fail('Pas d’enregistrement IPv4 A résolu')
+            fail('Le domaine ne résout vers aucune IPv4 (A direct ou via CNAME)')
     if options.tls == 'provided':
         cert = Path(options.cert).resolve()
         key = Path(options.key).resolve()
