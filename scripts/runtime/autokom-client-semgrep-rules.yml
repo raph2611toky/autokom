@@ -1,0 +1,21 @@
+rules:
+  - id: autokom.javascript-eval
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Éviter eval() avec du code provenant de l'application."
+    pattern: eval(...)
+  - id: autokom.javascript-function-constructor
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Éviter la génération dynamique de fonctions."
+    pattern: new Function(...)
+  - id: autokom.python-unsafe-eval
+    languages: [python]
+    severity: ERROR
+    message: "Éviter eval() dans le code serveur."
+    pattern: eval(...)
+  - id: autokom.python-shell-true
+    languages: [python]
+    severity: ERROR
+    message: "Éviter les appels subprocess avec shell=True."
+    pattern: subprocess.$F(..., shell=True, ...)

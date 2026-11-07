@@ -23,6 +23,22 @@
   changed_when: false
   check_mode: false
 
+- name: Préparer le répertoire des règles DevSecOps publiques approuvées
+  ansible.builtin.file:
+    path: /usr/local/share/autokom-security
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Installer les règles Semgrep approuvées pour l'agent isolé
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/runtime/autokom-client-semgrep-rules.yml"
+    dest: /usr/local/share/autokom-security/client-semgrep-rules.yml
+    owner: root
+    group: root
+    mode: '0644'
+
 - name: Préparer le compte de build client sans privilège Docker
   ansible.builtin.user:
     name: autokom-builder

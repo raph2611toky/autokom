@@ -44,7 +44,10 @@ class CloudflarePrivateConfigTests(unittest.TestCase):
         self.assertEqual(config['zone'], ZONE)
         self.assertEqual(config['token'], TOKEN)
         self.assertEqual(config['suffix'], 'auto.ikom.mg')
-        self.assertEqual(broker.handle('domain.config.check', {}), {'ready': True})
+        public=broker.handle('domain.config.check', {})
+        self.assertIs(public['ready'],True)
+        self.assertEqual(public['ingress_ipv4'],'56.228.86.160')
+        self.assertNotIn('token',public)
 
     def test_no_credential_disclosure_from_check(self):
         self.write()

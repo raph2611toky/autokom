@@ -403,6 +403,32 @@ except (OSError,ValueError,KeyError,TypeError):
     except (BuildkitError, OSError, KeyError) as exc:
         raise SetupError('BuildKit rootless non opérationnel : ' + str(exc)) from exc
     print('  ✓ BuildKit rootless accessible par Jenkins : socket, worker et RUN validés.')
+    # DevSecOps stages must actually be executable as the isolated builder.
+    # No customer code is scanned in doctor and no privilege is broadened.
+    import shutil
+    checks=[]
+    for tool in ('semgrep','trivy'):
+        binary=shutil.which(tool)
+        if not binary:
+            checks.append(tool+' absent')
+            continue
+        try:
+            probe=subprocess.run(['runuser','-u','autokom-builder','--',binary,'--version'],
+                                 capture_output=True,timeout=12)
+            if probe.returncode: checks.append(tool+' non exécutable par le builder')
+        except (OSError,subprocess.TimeoutExpired):
+            checks.append(tool+' inaccessible')
+    rules=Path('/usr/local/share/autokom-security/client-semgrep-rules.yml')
+    if not rules.is_file():
+        checks.append('règles Semgrep absentes')
+    else:
+        probe=subprocess.run(['runuser','-u','autokom-builder','--','test','-r',str(rules)],
+                             capture_output=True,timeout=8)
+        if probe.returncode: checks.append('règles Semgrep illisibles')
+    if checks:
+        print('  ! DevSecOps indisponible : '+', '.join(checks)+'. Corriger les scanners avant de choisir ce mode.')
+    else:
+        print('  ✓ DevSecOps : Semgrep, Trivy et règles approuvées accessibles au builder isolé.')
     # Verify the automatic repair mechanism, not only the Docker/Jenkins path.
     # No secrets, network mutation or manual trigger during this check.
     for unit in ('autokom-domain-reconciler.timer', 'autokom-domain-reconciler.path'):

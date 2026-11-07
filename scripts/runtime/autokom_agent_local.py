@@ -52,8 +52,10 @@ def manifest():
             doc=json.loads(response.read(125000))
     except Exception:
         fail('Manifeste non disponible; vérifier les secrets du runner.')
-    if doc.get('run_id')!=rid or not SHA.fullmatch(doc.get('commit_sha','')) or not REPO.fullmatch(doc.get('repository','')):
-        fail('Manifeste invalide.')
+    if (doc.get('run_id')!=rid or not SHA.fullmatch(doc.get('commit_sha',''))
+            or not REPO.fullmatch(doc.get('repository',''))
+            or doc.get('mode') not in ('DEVOPS','DEVSECOPS')):
+        fail('Manifeste invalide ou mode de pipeline non reconnu.')
     return doc
 
 
@@ -120,16 +122,30 @@ def source(doc):
 
 
 def scan(doc,kind):
-    if doc.get('mode')!='DEVSECOPS':
-        stage(kind,'SKIPPED');return
+    mode=doc.get('mode')
+    if mode=='DEVOPS':
+        stage(kind,'SKIPPED');print('AUTOKOM_TECH:Mode DevOps : scanner non requis.',flush=True);return
+    if mode!='DEVSECOPS' or kind not in ('sast','sca'):
+        fail('Mode DevSecOps ou type de scanner invalide.')
     path=source(doc);stage(kind,'RUNNING')
-    if kind=='sast':
-        rules=os.getenv('AUTOKOM_SEMGREP_RULES','/etc/autokom/semgrep-rules.yml')
-        if not Path(rules).is_file():fail('Règles Semgrep approuvées absentes.')
-        execute(['semgrep','scan','--metrics','off','--config',rules,'--error',str(path)])
-    else:
-        execute(['trivy','fs','--scanners','vuln,secret','--severity','HIGH,CRITICAL',
-                 '--exit-code','1','--no-progress',str(path)])
+    tool='semgrep' if kind=='sast' else 'trivy'
+    try:
+        if not shutil.which(tool):
+            fail('DevSecOps indisponible : scanner '+tool+' absent du builder isolé.')
+        if kind=='sast':
+            rules=os.getenv('AUTOKOM_SEMGREP_RULES',
+                '/usr/local/share/autokom-security/client-semgrep-rules.yml')
+            if not Path(rules).is_file() or not os.access(rules,os.R_OK):
+                fail('DevSecOps indisponible : règles Semgrep approuvées illisibles.')
+            print('AUTOKOM_TECH:DevSecOps : analyse SAST Semgrep en cours.',flush=True)
+            execute(['semgrep','scan','--metrics','off','--config',rules,'--error',str(path)])
+        else:
+            print('AUTOKOM_TECH:DevSecOps : analyse SCA et secrets Trivy en cours.',flush=True)
+            execute(['trivy','fs','--scanners','vuln,secret','--severity','HIGH,CRITICAL',
+                     '--exit-code','1','--no-progress',str(path)])
+    except SystemExit:
+        stage(kind,'FAILED')
+        raise
     stage(kind,'SUCCESS')
 
 

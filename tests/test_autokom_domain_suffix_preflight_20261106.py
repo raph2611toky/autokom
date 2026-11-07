@@ -56,8 +56,10 @@ class DomainSuffixPreflightTests(unittest.TestCase):
 
     def test_hostname_must_be_strict_child_of_allowed_suffix(self):
         self.write_runtime()
-        self.assertEqual(broker.handle('domain.config.check',{
-            'managed_suffix':'auto.ikom.mg','managed_hosts':[EXPECTED]}),{'ready':True})
+        checked=broker.handle('domain.config.check',{
+            'managed_suffix':'auto.ikom.mg','managed_hosts':[EXPECTED]})
+        self.assertTrue(checked['ready'])
+        self.assertEqual(checked['managed_suffix'],'auto.ikom.mg')
         with self.assertRaisesRegex(broker.BrokerError, 'AUTOKOM_DOMAIN_SUFFIX_MISMATCH'):
             broker.handle('domain.config.check',{
                 'managed_suffix':'auto.ikom.mg','managed_hosts':['portfolio.auto.ikom.mg.attacker.net']})
@@ -83,7 +85,8 @@ class DomainSuffixPreflightTests(unittest.TestCase):
     def test_no_secret_is_returned_by_preflight(self):
         self.write_runtime()
         result=broker.handle('domain.config.check',{'managed_hosts':[EXPECTED]})
-        self.assertEqual(result,{'ready':True})
+        self.assertTrue(result['ready'])
+        self.assertEqual(result['ingress_ipv4'],'56.228.86.160')
         self.assertNotIn('unit-test-fake',repr(result))
 
     def test_worker_checks_real_hosts_before_dispatch(self):

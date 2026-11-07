@@ -518,7 +518,8 @@ def _domain_config_check(params):
         email = _runtime_dns_env().get('AUTOKOM_ACME_EMAIL', '')
         if not isinstance(email, str) or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email):
             raise BrokerError('AUTOKOM_ACME_EMAIL_MISSING: Adresse de contact TLS absente.')
-    return {'ready': True}
+    return {'ready': True, 'ingress_ipv4': config['address'],
+            'managed_suffix': suffix, 'dns_zone': config['zone_name']}
 
 
 def _cloudflare_settings():

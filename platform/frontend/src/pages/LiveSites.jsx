@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, ArrowRight, CheckCircle2, ExternalLink, GitBranch, Globe2, LoaderCircle, Plus, Rocket, Search, ShieldCheck } from 'lucide-react'
+import { ArrowLeft, ArrowRight, CheckCircle2, Download, ExternalLink, GitBranch, Globe2, Info, LoaderCircle, Plus, Rocket, Search, ShieldCheck } from 'lucide-react'
 import { projectsApi } from '../services/projectsApi.js'
 import { errorText, getRemoteProjectDetail, listRemoteProjectRecords } from '../services/projectWorkflow.js'
 import { publicSiteUrl, siteStateLabel } from '../services/sitePresentation.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
+import { downloadDnsGuide } from '../services/domainGuide.js'
 
 /** Domains are backed by real Django and broker state: no demo or guessed public URLs. */
 export default function LiveSites({ navigate, projectId = null }) {
@@ -12,6 +13,8 @@ export default function LiveSites({ navigate, projectId = null }) {
   const [domains, setDomains] = useState([])
   const [query, setQuery] = useState('')
   const [hostname, setHostname] = useState('')
+  const [domainType, setDomainType] = useState('CUSTOM')
+  const [dnsSetup, setDnsSetup] = useState(null)
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -22,6 +25,7 @@ export default function LiveSites({ navigate, projectId = null }) {
     if (!actual) return
     const result = await projectsApi.domains(actual.project.id, actual.environment.id)
     setDomains(result?.domains || [])
+    setDnsSetup(result?.dns_setup || null)
     // Re-fetch authoritative URL: only backend can declare a domain publicly active.
     const updated = await projectsApi.detail(actual.project.id)
     setDetail(old => old ? { ...old, project: updated.project } : old)
@@ -33,7 +37,7 @@ export default function LiveSites({ navigate, projectId = null }) {
     const request = projectId ? getRemoteProjectDetail(projectId) : listRemoteProjectRecords()
     request.then(result => {
       if (!alive) return
-      if (projectId) { setDetail(result); setDomains(result.domains || []) }
+      if (projectId) { setDetail(result); setDomains(result.domains || []); setDnsSetup(result.dnsSetup || null) }
       else setProjects(result)
     }).catch(err => { if (alive) setError(errorText(err)) })
       .finally(() => { if (alive) setLoading(false) })
@@ -47,6 +51,7 @@ export default function LiveSites({ navigate, projectId = null }) {
       projectsApi.domains(detail.project.id,detail.environment.id).then(response => {
         if (!alive) return
         setDomains(response?.domains || [])
+        setDnsSetup(response?.dns_setup || null)
         return projectsApi.detail(detail.project.id).then(data => {
           if (alive && data?.project) setDetail(old => old ? {...old,project:data.project} : old)
         })
@@ -74,9 +79,14 @@ export default function LiveSites({ navigate, projectId = null }) {
     const host = hostname.trim().toLowerCase().replace(/\.$/, '')
     if (!host) return
     await perform(async () => {
-      await projectsApi.createDomain(detail.project.id, detail.environment.id, host)
+      await projectsApi.createDomain(detail.project.id, detail.environment.id, host, domainType)
       setHostname('')
     }, 'Domaine réservé. AUTOKOM prépare automatiquement DNS et HTTPS pour les sous-domaines gérés.')
+  }
+
+  function guide(domain) {
+    try { downloadDnsGuide(domain, dnsSetup); setError('') }
+    catch (err) { setError(errorText(err)) }
   }
 
   if (projectId) return <>
@@ -94,9 +104,12 @@ export default function LiveSites({ navigate, projectId = null }) {
           const url = publicSiteUrl(domain)
           return <article className="ak-domain-entry" key={domain.id}>
             <div className="ak-domain-entry-head"><div><strong>{domain.hostname}</strong> {domain.is_primary && <span className="ak-project-state">Principal</span>}<p className="ak-section-subtitle">DNS : {domain.status} · HTTPS : {domain.https ? 'Actif' : 'Activation automatique en cours'}</p>{domain.activation_error_code && <p className="ak-domain-diagnostic">Diagnostic : {domain.activation_error_code}. Nouvelle tentative automatique programmée.</p>}</div>
-              {url && <a href={url} className="button-outline" target="_blank" rel="noopener noreferrer"><ExternalLink size={15}/> Ouvrir</a>}
+              <div className="ak-domain-entry-actions">
+                <button type="button" className="button-outline" disabled={!dnsSetup?.ingress_ipv4} onClick={() => guide(domain)} title="Guide avec l'adresse IP publique actuelle"><Download size={15}/> Guide DNS</button>
+                {url && <a href={url} className="button-outline" target="_blank" rel="noopener noreferrer"><ExternalLink size={15}/> Ouvrir</a>}
+              </div>
             </div>
-            {!domain.https && domain.verification?.type === 'TXT' && <div className="ak-domain-proof"><strong>Preuve DNS requise :</strong> TXT {domain.verification.hostname} = {domain.verification.value}<p>Configurez également l'enregistrement A vers l’IP publique de votre ingress AUTOKOM.</p></div>}
+            {!domain.https && domain.verification?.type === 'TXT' && <div className="ak-domain-proof"><strong>Preuve DNS requise :</strong> TXT {domain.verification.hostname} = {domain.verification.value}<p>Enregistrement A : {domain.hostname} → {dnsSetup?.ingress_ipv4 || 'IP publique indisponible'}. Le proxy DNS doit rester désactivé.</p></div>}
             <div className="ak-domain-entry-actions">
               {!domain.https && <button type="button" className="button-outline" disabled={busy} onClick={() => perform(() => projectsApi.verifyDomain(detail.project.id, detail.environment.id, domain.id), 'Vérification DNS/HTTPS demandée.')}><ShieldCheck size={15}/> Activer HTTPS</button>}
               {domain.https && !domain.is_primary && <button type="button" className="button-outline" disabled={busy} onClick={() => perform(() => projectsApi.primaryDomain(detail.project.id, detail.environment.id, domain.id), 'Adresse principale modifiée.')}><CheckCircle2 size={15}/> Définir comme principal</button>}
@@ -108,7 +121,29 @@ export default function LiveSites({ navigate, projectId = null }) {
         })}
         <h3>Ajouter ou changer d’adresse</h3>
         <p className="ak-section-subtitle">Ajoutez d’abord le nouveau domaine. Une fois HTTPS actif, définissez-le comme principal : l’ancienne adresse reste opérationnelle jusqu’à sa désactivation.</p>
-        <form onSubmit={addDomain} className="ak-domain-manager-form"><input value={hostname} onChange={event => setHostname(event.target.value)} maxLength={253} required placeholder="exemple.auto.ikom.mg ou monsite.mg" aria-label="Nouveau domaine"/><button type="submit" className="button-primary" disabled={busy || !hostname.trim()}>{busy ? <LoaderCircle size={15} className="ak-spin"/> : <Plus size={15}/>} Ajouter le domaine</button></form>
+        <div className="ak-domain-instructions">
+          <strong>Informations DNS</strong>
+          <p>Adresse IPv4 publique d'AUTOKOM : <code>{dnsSetup?.ingress_ipv4 || 'Indisponible'}</code> · Suffixe géré : {dnsSetup?.managed_suffix || 'indisponible'}.</p>
+          <p>Type A : pointe le nom vers l'IP du serveur. Type TXT : prouve que le domaine externe vous appartient. CNAME n'est pas utilisé pour cette validation.</p>
+        </div>
+        <form onSubmit={addDomain} className="ak-domain-manager-form ak-domain-form-details">
+          <label className="ak-domain-field">Type d'adresse
+            <select value={domainType} onChange={event => setDomainType(event.target.value)} aria-label="Type du domaine">
+              <option value="CUSTOM">Domaine personnel (DNS externe)</option>
+              <option value="SUBDOMAIN">Sous-domaine AUTOKOM (géré automatiquement)</option>
+            </select>
+          </label>
+          <div className="ak-domain-field"><label htmlFor="ak-domain-host">Nom de domaine complet</label>
+            <details className="ak-domain-info"><summary><Info size={15}/> Comment configurer le domaine ?</summary>
+              {domainType === 'CUSTOM' ? <p>Après ajout, créez chez votre fournisseur DNS un A vers l'IP affichée et le TXT de propriété indiqué dans la fiche. Ensuite AUTOKOM activera HTTPS.</p>
+                : <p>Choisissez un nom sous {dnsSetup?.managed_suffix || 'le suffixe AUTOKOM'}. AUTOKOM gère lui-même son enregistrement A, sa validation et HTTPS.</p>}
+            </details>
+            <input id="ak-domain-host" value={hostname} onChange={event => setHostname(event.target.value)} maxLength={253} required placeholder={domainType === 'SUBDOMAIN' ? `exemple.${dnsSetup?.managed_suffix || 'auto.ikom.mg'}` : 'www.monsite.mg ou monsite.mg'} />
+          </div>
+          <div className="ak-domain-form-actions"><button type="submit" className="button-primary" disabled={busy || !hostname.trim()}>{busy ? <LoaderCircle size={15} className="ak-spin"/> : <Plus size={15}/>} Ajouter le domaine</button>
+            <button type="button" className="button-outline" disabled={!dnsSetup?.ingress_ipv4 || !hostname.trim()} onClick={() => guide({hostname:hostname.trim().toLowerCase(),domain_type:domainType})}><Download size={15}/> Télécharger le guide DNS</button>
+          </div>
+        </form>
       </section>
     </>}
   </>

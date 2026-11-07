@@ -104,7 +104,7 @@ export async function getRemoteProjectDetail(id) {
     deploymentsApi.list(project.id, env.id, 1, 10),
     projectsApi.domains(project.id, env.id),
   ])
-  return { project, environment: env, configurations: configsResponse?.configurations || [], runs: runsResponse?.runs || [], domains: domainsResponse?.domains || [], runCount: runsResponse?.count ?? (runsResponse?.runs || []).length }
+  return { project, environment: env, configurations: configsResponse?.configurations || [], runs: runsResponse?.runs || [], domains: domainsResponse?.domains || [], dnsSetup: domainsResponse?.dns_setup || null, runCount: runsResponse?.count ?? (runsResponse?.runs || []).length }
 }
 
 /** Création d'un projet puis mise à jour de son unique configuration initiale.

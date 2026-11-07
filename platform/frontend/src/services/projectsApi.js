@@ -33,7 +33,11 @@ export const projectsApi = Object.freeze({
   finalizeConfiguration: (projectId, envId, configId) => api.post(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/configurations/${uuid(configId)}/finalize/`, {}),
   offers: (projectId, envId) => api.get(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/configurations/offers/`),
   domains: (projectId, envId) => api.get(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/`),
-  createDomain: (projectId, envId, hostname) => api.post(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/create/`, {hostname}),
+  createDomain: (projectId, envId, hostname, domainType) => {
+    if (!['SUBDOMAIN', 'CUSTOM'].includes(domainType)) throw new TypeError('Type de domaine invalide.')
+    return api.post(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/create/`,
+      {hostname, domain_type:domainType})
+  },
   verifyDomain: (projectId, envId, domainId) => api.post(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/${uuid(domainId)}/verify/`, {}),
   primaryDomain: (projectId, envId, domainId) => api.post(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/${uuid(domainId)}/primary/`, {}),
   deactivateDomain: (projectId, envId, domainId) => api.post(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/${uuid(domainId)}/deactivate/`, {}),

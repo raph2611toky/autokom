@@ -5,6 +5,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from apps.accounts.user.permissions import IsClientUser
 from apps.projects.common import get_environment
 from apps.deployments.domains.models import Domain
+from apps.deployments.runs.autokom_socket import request_control, AutokomControlUnavailable
 from apps.deployments.domains.serializers import DomainCreateSerializer
 from apps.deployments.domains.services import claim_domain,domain_summary,verify_and_activate,choose_primary_domain,deactivate_domain
 from apps.deployments.domains.swagger.domain_list import schema as list_schema
@@ -25,7 +26,17 @@ class DomainListAPIView(APIView):
         try:
             _,env=get_environment(request.user,project_id,environment_id)
             results=[domain_summary(d,include_challenge=True) for d in Domain.objects.filter(environment=env).order_by('created_at')[:100]]
-            return api_success({'domains':results},'Domaines liés à cet environnement.')
+            # DNS records are public, credentials never cross the Unix broker socket.
+            # Missing runtime setup must not prevent a user viewing existing domains.
+            setup = None
+            try:
+                config = request_control('domain.config.check', {}, timeout=10)
+                if config.get('ready') is True:
+                    setup = {key:config[key] for key in ('ingress_ipv4','managed_suffix','dns_zone')
+                             if isinstance(config.get(key),str) and config[key]}
+            except AutokomControlUnavailable:
+                pass
+            return api_success({'domains':results,'dns_setup':setup},'Domaines liés à cet environnement.')
         except Exception as exc:
             return handle_error(exc,'domain_list')
 
