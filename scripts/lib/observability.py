@@ -824,15 +824,37 @@ def issue_observability_certificate(domain, args):
     if not args.email and not getattr(args, '_cert_email_warning_emitted', False):
         out('!', 'Certbot sans e-mail : aucune notification ACME d’expiration ou de révocation')
         args._cert_email_warning_emitted = True
-    check_acme_http01_local(domain)
+    from observability_dns01 import (configured_zone_credentials, ensure_certbot_credentials,
+                                     ensure_dns_plugin, certbot_dns01_args, DNS01Error)
+    try:
+        cloudflare = configured_zone_credentials(domain)
+    except DNS01Error as exc:
+        raise SetupError(str(exc)) from exc
+    if cloudflare is not None:
+        # DNS-01 is independent of Nginx, the HTTP-01 webroot and cloud VPC
+        # ingress. It is preferred when AUTOKOM already has a scoped CF token.
+        # Certbot creates/removes only the ephemeral challenge TXT records.
+        try:
+            ensure_dns_plugin(run)
+            credentials = ensure_certbot_credentials(cloudflare[1])
+            challenge_args = certbot_dns01_args(domain, credentials)
+        except DNS01Error as exc:
+            raise SetupError(str(exc)) from exc
+        out('›', f'{domain} : validation DNS-01 Cloudflare (pas de dépendance HTTP/80)')
+        method = 'DNS-01 Cloudflare'
+    else:
+        ensure_acme_webroot()
+        check_acme_http01_local(domain)
+        challenge_args = ['--webroot', '-w', str(ACME_WEBROOT), '-d', domain]
+        method = 'HTTP-01 Nginx'
     from observability_acme import acme_log_offset, acme_failure_detail
     log_offset = acme_log_offset()
     try:
-        run(['certbot', 'certonly', '--webroot', '-w', str(ACME_WEBROOT), '--non-interactive',
-             '--agree-tos', '--no-eff-email', *email_args, '-d', domain], timeout=300)
+        run(['certbot', 'certonly', '--non-interactive', '--agree-tos', '--no-eff-email',
+             '--cert-name', domain, *email_args, *challenge_args], timeout=420)
     except SetupError as exc:
         detail = acme_failure_detail(domain, since=log_offset)
-        raise SetupError(f'Échec HTTPS {domain} : {detail}. '
+        raise SetupError(f'Échec HTTPS {domain} ({method}) : {detail}. '
                          'Certificat, comptes et configuration existants conservés.') from exc
     if not valid_cert(domain):
         raise SetupError(f'{domain} : Certbot terminé sans certificat valide à '
@@ -878,7 +900,6 @@ def configure_nginx(domain, port, kind, args):
             out('+', f'{domain} : renouveler le certificat du HTTPS AUTOKOM sans remplacer le proxy')
             return
         out('›', f'{domain} : HTTPS AUTOKOM reconnu ; réparation TLS sans écraser Nginx')
-        ensure_acme_webroot()
         issue_observability_certificate(domain, args)
         run(['nginx', '-t'])
         run(['systemctl', 'reload', 'nginx'])
@@ -953,8 +974,8 @@ def configure_nginx(domain, port, kind, args):
         raise SetupError('Format d’e-mail Let’s Encrypt invalide')
     link = NGINX_ENABLED / managed.name
     try:
-        # Readable, dedicated webroot. Existing foreign paths are never changed.
-        ensure_acme_webroot()
+        # ACME webroot is prepared only if HTTP-01 is selected. For domains
+        # covered by Cloudflare, DNS-01 avoids Nginx route collisions entirely.
         # Stage gated HTTP-only site: never expose Grafana credentials on HTTP.
         # Upgrade the exact old AUTOKOM 503 placeholder in-place after failure.
         if not owned_pending:
