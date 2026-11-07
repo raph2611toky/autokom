@@ -216,6 +216,22 @@ def package_installed(name):
                           capture_output=True, text=True).stdout.strip() == 'install ok installed'
 
 
+def apt_package_available(name):
+    """Return whether APT exposes a standalone package (not a command name).
+
+    Ubuntu 24.04 ships /usr/bin/promtool in `prometheus`; newer releases
+    may split `promtool` into a separate package. Consult the local signed
+    APT index after updating it, never guess from a distro version string.
+    """
+    try:
+        proc = subprocess.run(['apt-cache', 'show', '--no-all-versions', name],
+                              capture_output=True, text=True, timeout=20,
+                              check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SetupError(f'Impossible de consulter le catalogue APT pour {name}') from exc
+    return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
 def prompt_choice(title, labels, default=1, hint='', noninteractive=False):
     if noninteractive:
         return default
@@ -794,9 +810,22 @@ def ensure_prometheus(args, *, auth_user=None, auth_password=None):
     # Prestage drop-in BEFORE apt starts the service, to prevent 0.0.0.0 bind.
     changed_override = owned_write(PROM_DROPIN, unit_override_prometheus())
     run(['systemctl', 'daemon-reload'])
-    if not exists:
+    # `promtool` is included by the Prometheus package on Ubuntu 24.04,
+    # but is an independent package on some newer Ubuntu releases.
+    # Never ask apt to install a package not present in its own index.
+    promtool_present = bool(shutil.which('promtool'))
+    if not exists or not promtool_present:
         run(['apt-get', 'update', '-qq'], timeout=240)
-        run(['apt-get', 'install', '-y', '--no-install-recommends', 'prometheus', 'promtool'], timeout=420)
+        packages = ['prometheus'] if not exists else []
+        if not promtool_present and apt_package_available('promtool'):
+            packages.append('promtool')
+        if packages:
+            out('›', 'APT : installation ' + ', '.join(packages))
+            run(['apt-get', 'install', '-y', '--no-install-recommends', *packages], timeout=420)
+    if not shutil.which('promtool'):
+        raise SetupError('Prometheus installé, mais promtool introuvable dans PATH. '
+                         'Contrôler `dpkg -L prometheus` et `apt-cache policy promtool` '
+                         'avant de reprendre ; aucune validation de configuration ignorée.')
     ensure_prometheus_storage()
     auth_path = None
     if auth_user and auth_password:

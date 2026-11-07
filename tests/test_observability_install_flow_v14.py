@@ -53,10 +53,12 @@ class ServiceReadiness(unittest.TestCase):
              patch.object(o, 'wait_service_ready', side_effect=ready) as wait, \
              patch.object(o, 'PROM_CONFIG', MagicMock(is_file=MagicMock(return_value=False))), \
              patch.object(o, 'active', return_value=False), \
+             patch.object(o.shutil, 'which', side_effect=['', '/usr/bin/promtool']), \
+             patch.object(o, 'apt_package_available', return_value=False), \
              patch.object(o, 'autokom_banner'), \
              patch.object(o, 'out'):
             o.ensure_prometheus(args)
-        self.assertIn(('apt-get', 'install', '-y', '--no-install-recommends', 'prometheus', 'promtool'), events)
+        self.assertIn(('apt-get', 'install', '-y', '--no-install-recommends', 'prometheus'), events)
         self.assertLess(events.index(('systemctl', 'restart', 'prometheus')), events.index('ready'))
         storage.assert_called_once()
         wait.assert_called_once()
