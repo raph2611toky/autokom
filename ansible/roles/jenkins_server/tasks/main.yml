@@ -55,14 +55,30 @@
     - "'jenkins' not in ansible_facts.packages"
     - not ansible_check_mode
 
-- name: Refuse replacing an unexpected Jenkins override
-  ansible.builtin.assert:
-    that:
-      - not autokom_jenkins_existing_override.stat.exists | default(false)
-    fail_msg: "Override Jenkins already exists: inspect /etc/systemd/system/jenkins.service.d/20-autokom-loopback.conf"
+- name: Read prior AUTOKOM Jenkins override (safe reruns only)
+  ansible.builtin.slurp:
+    src: /etc/systemd/system/jenkins.service.d/20-autokom-loopback.conf
+  register: autokom_jenkins_override_content
   when:
     - "'jenkins' not in ansible_facts.packages"
     - not ansible_check_mode
+    - autokom_jenkins_existing_override.stat.exists | default(false)
+
+- name: Refuse replacing a foreign Jenkins override, allow AUTOKOM reruns
+  vars:
+    autokom_jenkins_expected_override: |
+      # Managed by AUTOKOM: phase-2
+      [Service]
+      Environment="JENKINS_LISTEN_ADDRESS=127.0.0.1"
+  ansible.builtin.assert:
+    that:
+      - not (autokom_jenkins_existing_override.stat.islnk | default(false))
+      - (autokom_jenkins_override_content.content | b64decode) == autokom_jenkins_expected_override
+    fail_msg: "A non-AUTOKOM Jenkins override exists; preserve it and inspect /etc/systemd/system/jenkins.service.d/20-autokom-loopback.conf"
+  when:
+    - "'jenkins' not in ansible_facts.packages"
+    - not ansible_check_mode
+    - autokom_jenkins_existing_override.stat.exists | default(false)
 
 - name: Bind new Jenkins installation to loopback before package setup
   ansible.builtin.copy:
@@ -86,13 +102,38 @@
     - "'jenkins' not in ansible_facts.packages"
     - not ansible_check_mode
 
-- name: Install Jenkins LTS
-  ansible.builtin.apt:
-    name: jenkins
-    state: present
+# Jenkins' official APT repository may redirect its .deb to an unavailable mirror.
+# Always attempt normal APT first (signed repository). On network mirror failure,
+# download the SAME candidate version from selected HTTPS mirrors and verify its
+# SHA-256 + byte length against APT's signed Packages metadata before installing.
+- name: Install Jenkins LTS with verified mirror fallback
   when:
     - "'jenkins' not in ansible_facts.packages"
     - not ansible_check_mode
+  block:
+    - name: Install Jenkins LTS from signed APT repository
+      ansible.builtin.apt:
+        name: jenkins
+        state: present
+        force_apt_get: true
+      register: autokom_jenkins_apt_install
+      retries: 2
+      delay: 5
+      until: autokom_jenkins_apt_install is succeeded
+  rescue:
+    - name: Download matching Jenkins LTS package from alternative HTTPS mirrors
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - "{{ role_path }}/files/autokom_jenkins_deb_fallback.py"
+      register: autokom_jenkins_download
+      changed_when: true
+
+    - name: Install SHA-256-verified Jenkins LTS package with APT
+      ansible.builtin.apt:
+        deb: "{{ autokom_jenkins_download.stdout | trim }}"
+        state: present
+        force_apt_get: true
 
 - name: Preview Jenkins package installation
   ansible.builtin.debug:
