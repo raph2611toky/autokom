@@ -119,18 +119,26 @@ class Snapshot:
 
 
 def domains_ok(cfg):
-    """Verify only configured domains; never create ACME certificates in discovery."""
-    if not (cfg.prometheus_domain or cfg.grafana_domain):
-        return True
+    """Check managed domain names from state, not only the optional INI.
+
+    DNS resolves and a certificate file exists are insufficient: the actual
+    Nginx HTTP redirect and local TLS/SNI response must be correct.
+    """
     try:
         from observability import existing_vhosts, vhost_target_ok, valid_cert
-        return all(
-            vhost_target_ok(existing_vhosts(domain), port) and valid_cert(domain)
-            for domain, port in ((cfg.prometheus_domain, cfg.prometheus_port),
-                                 (cfg.grafana_domain, cfg.grafana_port))
+        from autokom_ingress_health import (catchall_ready, public_vhost_healthy,
+                                            managed_domains)
+        domains = managed_domains(cfg)
+        if not any(domains.values()):
+            return True
+        return catchall_ready() and all(
+            vhost_target_ok(existing_vhosts(domain), port) and valid_cert(domain) and
+            public_vhost_healthy(domain, kind)
+            for domain, port, kind in ((domains['prometheus'], cfg.prometheus_port, 'prometheus'),
+                                       (domains['grafana'], cfg.grafana_port, 'grafana'))
             if domain
         )
-    except (ImportError, OSError, ValueError):
+    except (ImportError, OSError, ValueError, RuntimeError):
         return False
 
 
@@ -672,6 +680,7 @@ Une phase Jenkins interrompue reste à terminer, même si le paquet est install�
         tp=subcommand(alias, help='Catalogue, configuration et exploitation des outils DevSecOps',
                       epilog='Exemples : autokom tools list --all | autokom services --all | autokom tools show loki')
         ops=tp.add_subparsers(dest='tool_cmd')
+        ops.add_parser('status', help='Résumé en lecture seule des services AUTOKOM')
         ls=ops.add_parser('list', help='Lister les outils présents (ou --all)')
         ls.add_argument('--all', action='store_true', help='Inclure les outils absents, dont les moteurs de logs')
         sh=ops.add_parser('show', help='Chemins, environnement et documentation d’un outil')
@@ -698,10 +707,13 @@ Une phase Jenkins interrompue reste à terminer, même si le paquet est install�
                               formatter_class=argparse.RawDescriptionHelpFormatter,
                               description=f'Fichiers et configuration de {tool.name}',
                               epilog='Exemples : autokom tools '+tool.name+' files ; autokom tools '+tool.name+' cat ALIAS'+plugin_help)
-            fp.add_argument('file_action',choices=('files','cat','head','tail','nano','nano-end','env','auth','plugins'),nargs='?',
+            fp.add_argument('file_action',choices=('files','cat','head','tail','nano','nano-end','env','auth','plugins','status','logs'),nargs='?',
                             help='Action. Pour les plugins Jenkins/Grafana : « plugins » (menu séparé)')
             fp.add_argument('file_target',nargs='?',default='')
             fp.add_argument('file_extra',nargs='?',default='')
+            fp.add_argument('--lines',type=int,default=80,help='Nombre de lignes du journal (1 à 1000)')
+            fp.add_argument('-f','--follow',action='store_true',help='Suivre le journal en temps réel')
+            fp.add_argument('--since',default=None,help='Période journalctl / Docker, ex. « 1 hour ago »')
     subcommand('dns', help='BIND9, Cloudflare et DNS')
     subcommand('runtime', help='Runtime Docker/Jenkins/socket et environnement')
     subcommand('app', help='Service Django AUTOKOM : setup, deploy, backend env, status, logs')

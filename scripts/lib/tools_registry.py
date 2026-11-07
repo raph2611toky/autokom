@@ -283,6 +283,8 @@ def show(name):
     refs.append(('Variables · noms','autokom services show '+name+' -e'))
     refs.append(('Variables · valeurs', 'sudo autokom services show '+name+' -E'))
     refs.append(('Configurer', 'sudo autokom services configure '+name))
+    refs.append(('Statut et proxy',f'autokom tools {name} status'))
+    refs.append(('Journal système',f'autokom tools {name} logs --lines 80'))
     refs.append(('Fichiers et alias',f'autokom tools {name} files'))
     refs.append(('Lire un fichier',f'autokom tools {name} cat ALIAS'))
     refs.append(('Éditer un fichier',f'sudo autokom tools {name} nano ALIAS'))
@@ -514,9 +516,20 @@ def dispatch(args):
     if not verb:
         print('  Utiliser autokom tools -h pour découvrir les commandes.');return 0
     if verb in TOOLS:
+        if args.file_action in ('status','logs'):
+            from autokom_tools_diagnostics import status, service_logs, DiagnosticsError
+            try:
+                if args.file_action == 'status':
+                    return status(verb)
+                return service_logs(verb, lines=args.lines, follow=args.follow, since=args.since)
+            except DiagnosticsError as exc:
+                raise ToolError(str(exc)) from exc
         from tool_files import dispatch_tool_files
         dispatch_tool_files(verb,args.file_action,args.file_target,args.file_extra)
         return 0
+    if verb == 'status':
+        from autokom_tools_diagnostics import overview
+        return overview()
     if verb=='list':list_tools(all_tools=args.all);return 0
     if verb=='show':
         if args.all:

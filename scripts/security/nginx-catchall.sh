@@ -21,6 +21,14 @@ if ! command -v nginx >/dev/null 2>&1; then
 fi
 nginx -t
 
+# A newer AUTOKOM installer uses a versioned catch-all path. Preserve it.
+if [[ -L /etc/nginx/sites-enabled/00-autokom-catchall.conf ]] && \
+   grep -Eq 'return[[:space:]]+404;' /etc/nginx/sites-enabled/00-autokom-catchall.conf && \
+   grep -Eq 'ssl_reject_handshake[[:space:]]+on;' /etc/nginx/sites-enabled/00-autokom-catchall.conf; then
+  echo '[OK] Catch-all AUTOKOM récent déjà actif ; aucune modification.'
+  exit 0
+fi
+
 # Cas du serveur existant: NE RIEN MODIFIER si le catch-all est deja actif.
 if [[ -e "$ENABLED" ]] && grep -Eq 'return[[:space:]]+444;' "$ENABLED" && \
      grep -Eq 'ssl_reject_handshake[[:space:]]+on;' "$ENABLED"; then

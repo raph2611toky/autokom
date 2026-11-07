@@ -1840,6 +1840,16 @@ def main(argv=None):
     from observability_docker import ensure_cadvisor
     ensure_cadvisor(sys.modules[__name__], args)
     ensure_alertmanager(sys.modules[__name__], args)
+    # Reconcile only a recognizable, unchanged Ubuntu welcome default; never
+    # steal ports or replace a custom default. ACME DNS-01 does not prove
+    # Nginx's HTTP/HTTPS host routing.
+    if args.prometheus_domain or args.grafana_domain:
+        from autokom_ingress_health import reconcile_catchall, IngressError
+        try:
+            outcome = reconcile_catchall()
+        except IngressError as exc:
+            raise SetupError('Routage Nginx par défaut : ' + str(exc)) from exc
+        out('✓', 'Nginx : '+outcome)
     # Final functional check: Prometheus must actually scrape the Jenkins job.
     seen = False
     with Activity('Collecte Jenkins → Prometheus (cible UP)', delay=0.4):
@@ -1862,8 +1872,19 @@ def main(argv=None):
         raise SetupError('Scrape Jenkins non confirmé UP dans Prometheus : vérifier /targets, credentials et le plugin')
     else:
         out('✓', 'Prometheus collecte les métriques Jenkins (cible UP)')
+    # Real host-routed SNI/certificate test and HTTP -> HTTPS redirect. Never
+    # declare a full installation successful merely because services are active
+    # and Certbot returned 0. This is local ingress, not a remote GCP VPC test.
+    if args.prometheus_domain or args.grafana_domain:
+        from autokom_ingress_health import verify_observability, IngressError
+        try:
+            verify_observability([('prometheus', args.prometheus_domain),
+                                  ('grafana', args.grafana_domain)])
+        except IngressError as exc:
+            raise SetupError('Vérification finale du reverse proxy : '+str(exc)) from exc
+        out('✓', 'Nginx : HTTPS/SNI local et redirections HTTP validés (VPC externe non vérifié)')
     save_state()
-    out('✓', 'AUTOKOM observabilité configurée : exporter, Prometheus, Grafana, Nginx et TLS vérifiés')
+    out('✓', 'AUTOKOM observabilité configurée : services locaux, Nginx et TLS vérifiés')
     if not args.grafana_domain:
         out('›', f'Accès Grafana privé : ssh -L {cfg().grafana_port}:127.0.0.1:{cfg().grafana_port} ubuntu@SERVEUR')
     if not args.prometheus_domain:
