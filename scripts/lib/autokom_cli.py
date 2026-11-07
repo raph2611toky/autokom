@@ -866,7 +866,7 @@ def main(argv=None):
                  'observability': 'observability.sh', 'logs':'logs.sh'}
         flags = ('--interactive',) if a.service not in ('services','logs') else ()
         call_module('scripts/install/' + names[a.service], '--apply',
-                    *(['--reconfigure'] if a.service == 'services' else []), *flags)
+                    *(['--reconfigure'] if a.service in ('services', 'plugins') else []), *flags)
         return 0
     return perform(a, cfg)
 

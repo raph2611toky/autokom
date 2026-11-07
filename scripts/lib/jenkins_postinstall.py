@@ -27,7 +27,8 @@ from menu import pick, ask
 from tool_banner import section, Activity
 from observability_config import load as load_observability_settings
 from jenkins_firstboot import (bootstrap as bootstrap_first_admin, auth_file_if_available,
-                               stage_matrix_restriction, matrix_restriction_pending)
+                               stage_matrix_restriction, matrix_restriction_pending,
+                               selected_admin, save_admin_choice, admin_username)
 
 ROOT = Path(__file__).resolve().parents[2]
 JENKINS_HOME = Path('/var/lib/jenkins')
@@ -35,6 +36,7 @@ JENKINS_PORT = load_observability_settings().jenkins_port
 JENKINS_URL = f'http://127.0.0.1:{JENKINS_PORT}/'
 CLI_JAR = Path('/opt/autokom/tools/jenkins-cli.jar')
 SENSITIVE = Path('/etc/autokom/secrets')
+PLUGIN_SELECTION = Path('/var/lib/autokom/install/jenkins-plugins-selection.json')
 PROFILES = ROOT / 'config/jenkins'
 ANSI = (sys.stdout.isatty() and 'NO_COLOR' not in os.environ
         and os.environ.get('TERM', '') not in ('', 'dumb'))
@@ -99,6 +101,10 @@ def jenkins_state():
     initial = JENKINS_HOME / 'secrets/initialAdminPassword'
     if marker.is_file():
         return 'secure' if jenkins_xml_secure() else 'unsafe'
+    # A verified AUTOKOM first-boot can be ready before the wizard marker is
+    # persisted. Never treat an unknown controller as secure on this basis.
+    if auth_file_if_available() and jenkins_xml_secure():
+        return 'secure'
     # Existing instances using a custom provisioning mechanism may be secure
     # without the standard wizard marker. Do not assume they need a reset.
     if not initial.is_file():
@@ -502,6 +508,38 @@ def harden(auth_file, apply, controller_zero=False, disable_agents=False):
     output('✓', 'Contrôles Jenkins appliqués (compte et autorisations existants inchangés)')
 
 
+def choose_initial_administrator():
+    """Administrator chooses the credentials, AUTOKOM applies them automatically.
+
+    Reuse a protected prior selection without asking again after failures.
+    This is not an API-token prompt and never reaches a browser.
+    """
+    recorded = selected_admin()
+    if recorded is not None:
+        output('✓', 'Premier administrateur Jenkins : ' + recorded['username'] + ' (choix enregistré, conservé)')
+        return recorded
+    _short_step('PREMIER ADMINISTRATEUR JENKINS')
+    output('›', 'Renseigner le compte dans le terminal ; AUTOKOM réalisera toute la configuration.')
+    output('›', 'Mot de passe masqué, sauvegardé sous root:0600 ; aucune valeur secrète dans les logs.')
+    for attempt in range(3):
+        username = ask('Identifiant Jenkins', hint='3 à 40 caractères ; ne pas utiliser le compte temporaire admin').strip()
+        full_name = ask('Nom complet du responsable Jenkins').strip()
+        email = ask('E-mail de l’administrateur Jenkins').strip()
+        try:
+            password = read_masked('Mot de passe Jenkins (16 caractères min.)')
+            confirmation = read_masked('Confirmer le mot de passe Jenkins')
+            if password != confirmation:
+                raise ValueError('La confirmation du mot de passe ne correspond pas')
+            result = save_admin_choice(username, full_name, email, password)
+            password = confirmation = None
+            output('✓', 'Administrateur initial ' + result['username'] + ' enregistré ; aucune saisie Web nécessaire')
+            return result
+        except ValueError as error:
+            password = confirmation = None
+            output('⚠', str(error))
+    raise RuntimeError('Identifiants Jenkins non validés après trois tentatives ; aucune modification de compte')
+
+
 def configure(args):
     if os.geteuid() != 0:
         raise RuntimeError('Exécuter en root/sudo')
@@ -516,9 +554,13 @@ def configure(args):
         raise RuntimeError('Sécurité Jenkins absente ou incohérente : aucune modification automatique autorisée')
     first_admin_created = (state == 'wizard' and apply)
     if state == 'wizard':
+        if apply and args.interactive:
+            choose_initial_administrator()
+        elif apply and selected_admin() is None:
+            raise RuntimeError('Premier administrateur Jenkins non défini : utiliser le terminal AUTOKOM interactif')
         if not apply:
-            output('+', 'Premier administrateur AUTOKOM : création automatique après validation du redémarrage')
-            output('›', 'Mot de passe généré, root:0600 ; aucun assistant Web ni token API manuel.')
+            output('+', 'Premier administrateur : nom, identifiant, e-mail et mot de passe à saisir dans AUTOKOM')
+            output('›', 'Le compte et le token API seront ensuite configurés automatiquement, sans assistant Web.')
             return
         if not args.confirm_restart:
             raise RuntimeError('Autorisation de redémarrage Jenkins requise pour le premier administrateur')
@@ -529,7 +571,7 @@ def configure(args):
         state = jenkins_state()
         if state != 'secure':
             raise RuntimeError('Jenkins ne confirme pas la sécurité après création du premier administrateur')
-        output('✓', 'Compte initial : autokom-admin · mot de passe privé : /etc/autokom/secrets/jenkins-first-admin.password')
+        output('✓', 'Compte initial : ' + admin_username() + ' · mot de passe privé : /etc/autokom/secrets/jenkins-first-admin.password')
         output('✓', 'Jeton de configuration AUTOKOM généré et protégé ; aucun assistant Web nécessaire')
     if not args.auth_file and state == 'secure':
         args.auth_file = auth_file_if_available()
@@ -611,6 +653,7 @@ def parse(argv=None):
     modes.add_argument('--apply', dest='mode', action='store_const', const='apply')
     p.add_argument('--profile', choices=['minimal', 'baseline', 'devsecops'], default='devsecops')
     p.add_argument('--interactive', action='store_true', help='Menus avec flèches et chiffres 1–9')
+    p.add_argument('--reconfigure', action='store_true', help='Redemander explicitement les choix de plugins Jenkins')
     p.add_argument('--auth-file', default='', help='Option automatisation : fichier root 0600 avec username:API_TOKEN')
     p.add_argument('--public-url', default='', help='URL HTTPS Jenkins pour la création du token, si Nginx non détectable')
     p.add_argument('--wizard-timeout', type=int, default=900, help='Délai maximal de l’initialisation automatique Jenkins (défaut 900 s)')
@@ -641,7 +684,67 @@ def choose_optional_multibranch(args):
     return args
 
 
+def _load_plugin_selection():
+    if not PLUGIN_SELECTION.exists() and not PLUGIN_SELECTION.is_symlink():
+        return None
+    secure_file(PLUGIN_SELECTION)
+    try:
+        selection = json.loads(PLUGIN_SELECTION.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('Choix Jenkins sauvegardés illisibles, ne pas les écraser') from exc
+    if not isinstance(selection, dict) or selection.get('schema') != 1:
+        raise RuntimeError('Choix Jenkins sauvegardés de version inconnue')
+    if selection.get('profile') not in ('minimal','baseline','devsecops'):
+        raise RuntimeError('Profil Jenkins sauvegardé non reconnu')
+    for field in ('multibranch_scan','harden','controller_zero','disable_inbound_agents'):
+        if not isinstance(selection.get(field), bool):
+            raise RuntimeError('Choix Jenkins sauvegardés invalides : ' + field)
+    return selection
+
+
+def _save_plugin_selection(args):
+    """Root-only, no token/password, restart consent is always per invocation."""
+    record={'schema':1, 'profile':args.profile, 'multibranch_scan':bool(args.multibranch_scan),
+            'harden':bool(args.harden), 'controller_zero':bool(args.controller_zero),
+            'disable_inbound_agents':bool(args.disable_inbound_agents)}
+    directory=PLUGIN_SELECTION.parent
+    if directory.is_symlink():
+        raise RuntimeError('Répertoire de sélection Jenkins symbolique interdit')
+    directory.mkdir(parents=True,exist_ok=True,mode=0o700)
+    if directory.stat().st_uid != 0 or directory.stat().st_mode & 0o077:
+        raise RuntimeError('Répertoire d’installation AUTOKOM non privé')
+    if PLUGIN_SELECTION.exists() or PLUGIN_SELECTION.is_symlink():
+        secure_file(PLUGIN_SELECTION)
+    temp=directory/('.jenkins-selection-' + secrets.token_hex(10))
+    fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
+    try:
+        with os.fdopen(fd,'w',encoding='utf-8') as writer:
+            json.dump(record,writer,sort_keys=True)
+            writer.write('\n')
+            writer.flush(); os.fsync(writer.fileno())
+        os.replace(temp,PLUGIN_SELECTION)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _restore_plugin_selection(args):
+    saved = _load_plugin_selection()
+    if not saved:
+        return False
+    explicit_webhook = bool(args.multibranch_scan)
+    for key in ('profile','multibranch_scan','harden','controller_zero','disable_inbound_agents'):
+        setattr(args,key,saved[key])
+    if explicit_webhook:
+        args.multibranch_scan = True
+    args.confirm_restart = args.mode == 'apply'  # only for this explicit CLI run
+    output('✓','Profil Jenkins sauvegardé : ' + args.profile + ' (choix réutilisés)')
+    output('›','Pour les modifier : sudo autokom configure plugins')
+    return True
+
+
 def interactive_configure(args):
+    if not args.reconfigure and _restore_plugin_selection(args):
+        return args
     choice = pick('Configuration Jenkins',
                   ['Recommandée : plugins DevSecOps + sécurité, préserver comptes et agents',
                    'Personnaliser les composants'],
@@ -653,7 +756,10 @@ def interactive_configure(args):
         args.controller_zero = False
         args.disable_inbound_agents = False
         args.confirm_restart = args.mode == 'apply'  # Consentement donné par la sélection de ce profil.
-        return choose_optional_multibranch(args)
+        choose_optional_multibranch(args)
+        if args.mode == 'apply':
+            _save_plugin_selection(args)
+        return args
     i = pick('Jenkins — profil de plugins',
              ['DevSecOps complet', 'Base suggérée AUTOKOM', 'Aucun nouveau plugin'],
              hint='Les plugins déjà installés ne sont ni effacés ni rétrogradés.')
@@ -688,6 +794,8 @@ def interactive_configure(args):
         if i == 2:
             raise RuntimeError('Opération annulée avant modification')
         args.confirm_restart = True
+    if args.mode == 'apply':
+        _save_plugin_selection(args)
     return args
 
 

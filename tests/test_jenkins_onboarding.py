@@ -11,6 +11,14 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 class JenkinsOnboardingTests(unittest.TestCase):
+    def setUp(self):
+        # Jenkins CLI option tests must not read or write production selection.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        override = mock.patch.object(m, 'PLUGIN_SELECTION', Path(directory.name) / 'selection.json')
+        override.start()
+        self.addCleanup(override.stop)
+
     def test_state_secure_with_official_marker(self):
         with tempfile.TemporaryDirectory() as d:
             home=Path(d); (home/'jenkins.install.UpgradeWizard.state').write_text('2.500')

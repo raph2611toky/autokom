@@ -31,6 +31,9 @@ class BootstrapTests(unittest.TestCase):
             mock.patch.object(b, 'JENKINS_HOME', self.home),
             mock.patch.object(b, 'SECRETS', self.secrets),
             mock.patch.object(b, 'PASSWORD', self.secrets / 'jenkins-first-admin.password'),
+            mock.patch.object(b, 'PROFILE', self.secrets / 'jenkins-first-admin.profile.json'),
+            mock.patch.object(b, 'OLD_PASSWORD', self.secrets / 'jenkins-first-admin.password.previous-auto'),
+            mock.patch.object(b, 'ADMIN_MAIL_PROFILE', self.home / '.autokom-firstboot/admin.profile'),
             mock.patch.object(b, 'AUTH', self.secrets / 'jenkins-admin.auth'),
             mock.patch.object(b, 'STAGING', self.home / '.autokom-firstboot'),
             mock.patch.object(b, 'SEED', self.home / '.autokom-firstboot/admin.seed'),
@@ -99,16 +102,19 @@ class BootstrapTests(unittest.TestCase):
 
     def test_bootstrap_carries_generated_token_to_private_root_directory(self):
         token_value = 'a' * 35
+        b.save_admin_choice('admin-ikom', 'Administrateur IKOM', 'admin@ikom.mg', 'Secret!SuperLong@1234')
         def restarted(argv, **kwargs):
             self.assertEqual(argv, ['systemctl', 'restart', 'jenkins'])
             (self.home / 'jenkins.install.UpgradeWizard.state').write_text('2.580')
-            b.TOKEN.write_text('autokom-admin:' + token_value + '\n')
+            b.TOKEN.write_text('admin-ikom:' + token_value + '\n')
             b.TOKEN.chmod(0o600)
             return SimpleNamespace(returncode=0)
-        with mock.patch.object(b.subprocess, 'run', side_effect=restarted):
+        with mock.patch.object(b.subprocess, 'run', side_effect=restarted), \
+             mock.patch.object(b, '_configured_secure', return_value=True), \
+             mock.patch.object(b, '_probe_token', return_value=True):
             path = b.bootstrap(approved=True, timeout=5)
         self.assertEqual(path, str(b.AUTH))
-        self.assertEqual(b.AUTH.read_text(), 'autokom-admin:' + token_value + '\n')
+        self.assertEqual(b.AUTH.read_text(), 'admin-ikom:' + token_value + '\n')
         self.assertEqual(b.AUTH.stat().st_mode & 0o777, 0o600)
         self.assertFalse(b.TOKEN.exists())
         self.assertFalse(b.SEED.exists())
@@ -182,7 +188,7 @@ class BootstrapTests(unittest.TestCase):
         for phrase in ('isSetupComplete()', 'User.getAll()',
                        'FullControlOnceLoggedInAuthorizationStrategy',
                        'matrix-auth', 'GlobalMatrixAuthorizationStrategy',
-                       "strategy.add(Jenkins.ADMINISTER, 'autokom-admin')",
+                       "strategy.add(Jenkins.ADMINISTER, adminUser)",
                        "strategy.add(jenkins.metrics.api.Metrics.VIEW, 'autokom-metrics')"):
             self.assertIn(phrase, txt)
 
@@ -226,9 +232,12 @@ class WorkflowTests(unittest.TestCase):
              mock.patch.object(p, 'trusted_web_url', return_value='https://jenkins.ikom.mg/'), \
              mock.patch.object(p, 'bootstrap_first_admin', return_value='/private/jenkins-admin.auth') as boot, \
              mock.patch.object(p, 'first_run_guidance') as manual, \
-             mock.patch.object(p, 'auth_file_if_available', return_value=''):
+             mock.patch.object(p, 'auth_file_if_available', return_value=''), \
+             mock.patch.object(p, 'choose_initial_administrator') as input_choice:
+
             p.configure(args)
             boot.assert_called_once()
+            input_choice.assert_called_once()
             manual.assert_not_called()
             self.assertEqual(args.auth_file, '/private/jenkins-admin.auth')
 

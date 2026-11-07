@@ -26,7 +26,9 @@ if (!otherUsers.isEmpty()) {
     throw new IllegalStateException('AUTOKOM_FIRSTBOOT: existing Jenkins users; refusing to replace identities')
 }
 final def pair = secret.readLines('UTF-8')
-if (pair.size() != 2 || pair[0] != 'autokom-admin' || pair[1].length() < 24) {
+if (pair.size() != 4 || !(pair[0] ==~ /[A-Za-z][A-Za-z0-9_.-]{2,39}/) ||
+    pair[0] in ['admin', 'autokom-metrics'] || pair[1].length() < 16 ||
+    pair[2].length() < 1 || pair[2].length() > 100 || !(pair[3] ==~ /[^\s@]+@[^\s@]+\.[^\s@]+/)) {
     throw new IllegalStateException('AUTOKOM_FIRSTBOOT: invalid bootstrap secret')
 }
 if (User.getById(pair[0], false) != null) {
@@ -35,6 +37,8 @@ if (User.getById(pair[0], false) != null) {
 
 final def realm = (HudsonPrivateSecurityRealm) j.securityRealm
 final def person = realm.createAccount(pair[0], pair[1])
+person.setFullName(pair[2])
+person.save()
 final def strategy = new FullControlOnceLoggedInAuthorizationStrategy()
 strategy.setAllowAnonymousRead(false)
 j.setAuthorizationStrategy(strategy)
@@ -49,6 +53,8 @@ if (!auth.createNewFile()) {
 Files.setPosixFilePermissions(auth.toPath(), PosixFilePermissions.fromString('rw-------'))
 auth.setText(pair[0] + ':' + api.plainValue + '\n', 'UTF-8')
 
+// Email is stored in a root-private profile; applied after the Mailer plugin
+// becomes available. Do not import optional plugin classes before installation.
 // The temporary stock 'admin' must not retain the initial unlock password.
 final def temporary = User.getById('admin', false)
 if (temporary != null) temporary.delete()

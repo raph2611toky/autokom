@@ -17,6 +17,7 @@ final def pending = new File(home, 'matrix.pending')
 final def done = new File(home, 'matrix.done')
 final def metricsSeed = new File(home, 'metrics.seed')
 final def metricsAuth = new File(home, 'metrics.auth.pending')
+final def adminProfile = new File(home, 'admin.profile')
 if (!pending.isFile() || done.exists()) return
 if (!j.installState.isSetupComplete()) throw new IllegalStateException('AUTOKOM_MATRIX: setup not complete')
 if (!(j.securityRealm instanceof HudsonPrivateSecurityRealm) || j.securityRealm.allowsSignup()) {
@@ -25,15 +26,34 @@ if (!(j.securityRealm instanceof HudsonPrivateSecurityRealm) || j.securityRealm.
 if (!(j.authorizationStrategy instanceof FullControlOnceLoggedInAuthorizationStrategy)) {
     throw new IllegalStateException('AUTOKOM_MATRIX: authorization strategy already changed; preserved')
 }
+final def adminUser = pending.text.trim()
+if (!(adminUser ==~ /[A-Za-z][A-Za-z0-9_.-]{2,39}/) || adminUser in ['admin', 'autokom-metrics']) {
+    throw new IllegalStateException('AUTOKOM_MATRIX: invalid administrator identity')
+}
 final def ids = User.getAll().collect { it.id }
-if (ids.size() != 1 || ids[0] != 'autokom-admin') {
+if (ids.size() != 1 || ids[0] != adminUser) {
     throw new IllegalStateException('AUTOKOM_MATRIX: unexpected users; refusing authorization changes')
 }
 if (j.pluginManager.getPlugin('matrix-auth')?.active != true) {
     throw new IllegalStateException('AUTOKOM_MATRIX: matrix-auth not active')
 }
 final def strategy = new GlobalMatrixAuthorizationStrategy()
-strategy.add(Jenkins.ADMINISTER, 'autokom-admin')
+strategy.add(Jenkins.ADMINISTER, adminUser)
+// Apply the email chosen by the operator once Mailer is available.
+if (adminProfile.isFile()) {
+    final def data = adminProfile.readLines('UTF-8')
+    if (data.size() != 2 || data[0] != adminUser || !(data[1] ==~ /[^\s@]+@[^\s@]+\.[^\s@]+/)) {
+        throw new IllegalStateException('AUTOKOM_MATRIX: invalid saved administrator email')
+    }
+    if (j.pluginManager.getPlugin('mailer')?.active != true) {
+        throw new IllegalStateException('AUTOKOM_MATRIX: Mailer plugin must be active')
+    }
+    final def person = User.getById(adminUser, false)
+    final def propClass = j.pluginManager.uberClassLoader.loadClass('hudson.tasks.Mailer$UserProperty')
+    person.addProperty((hudson.model.UserProperty) propClass.getDeclaredConstructor(String.class).newInstance(data[1]))
+    person.save()
+}
+
 if (metricsSeed.isFile()) {
     if (j.pluginManager.getPlugin('metrics')?.active != true || metricsAuth.exists()) {
         throw new IllegalStateException('AUTOKOM_MATRIX: Metrics plugin absent or pending token collision')
