@@ -868,6 +868,10 @@ def main():
     if init.exists():
         say('Jenkins : initialisation disponible via sudo cat /var/lib/jenkins/secrets/initialAdminPassword')
         say('Mot de passe non affiché dans les logs et aucun compte existant modifié.')
+    # Ne valider la phase qu'apres Jenkins, base SQL et proxy/TLS. Aucune
+    # activation prematuree lorsque APT, Docker, Nginx ou Certbot echouent.
+    completed = Path('/var/lib/autokom/install/services.complete')
+    atomic_write(completed, 'AUTOKOM services phase complete\n', 0o644)
     say('Module terminé ; contrôler TLS, listeners et services.', '✓')
 
 

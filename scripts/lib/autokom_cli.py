@@ -108,6 +108,8 @@ class Snapshot:
     metrics_up: bool
     datasource_ok: bool
     ufw_active: bool
+    docker_ready: bool = True
+    services_pending: bool = False
     domains_ready: bool = True
     node_ready: bool = True
     alertmanager_ready: bool = True
@@ -131,8 +133,34 @@ def domains_ok(cfg):
         return False
 
 
+def services_setup_pending(*,
+                           completed=Path('/var/lib/autokom/install/services.complete'),
+                           override=Path('/etc/systemd/system/jenkins.service.d/20-autokom-loopback.conf'),
+                           location=Path('/var/lib/jenkins/init.groovy.d/90-autokom-location.groovy')):
+    """Recognize a partially installed AUTOKOM Jenkins host without changing it.
+
+    A previous phase-2 run can install the Jenkins package and its loopback
+    drop-in before failing (e.g. missing Docker). Such a host must not be
+    reported 'configured' solely because Jenkins is active. We only infer
+    pending on a recognizable AUTOKOM drop-in, and never on foreign installs.
+    A completed run creates a marker after MySQL, Nginx and Certbot succeed.
+    """
+    try:
+        if completed.is_file() or override.is_symlink() or not override.is_file():
+            return False
+        if '# Managed by AUTOKOM: phase-2' not in override.read_text(encoding='utf-8'):
+            return False
+        # With a configured URL the old installation is presumed healthy;
+        # do not force an interactive wizard on established production hosts.
+        return not location.is_file()
+    except (OSError, UnicodeError):
+        return False
+
+
 def snapshot(cfg):
-    foundation_ok = all(shutil.which(item) for item in REQUIRED_COMMANDS) and works(['nginx', '-t'])
+    docker_ready = bool(shutil.which('docker')) and works(['docker', 'info', '--format', '{{.ServerVersion}}'])
+    foundation_ok = (all(shutil.which(item) for item in REQUIRED_COMMANDS)
+                     and works(['nginx', '-t']) and docker_ready)
     pkg = command(['dpkg-query', '-W', '-f=${Status}', 'jenkins'])
     active_jenkins = works(['systemctl', 'is-active', '--quiet', 'jenkins'])
     installed = bool((pkg and pkg.returncode == 0 and pkg.stdout.strip() == 'install ok installed') or active_jenkins)
@@ -169,6 +197,8 @@ def snapshot(cfg):
         datasource_ok=datasource_ok,
         dashboards_ready=dashboards_ready,
         ufw_active=bool(ufw and 'Status: active' in ufw.stdout),
+        docker_ready=docker_ready,
+        services_pending=services_setup_pending() if installed else False,
         domains_ready=domains_ok(cfg),
         node_ready=(works(['systemctl','is-active','--quiet','prometheus-node-exporter']) and
                     private_listener(bindings(9100)) and http_code('http://127.0.0.1:9100/metrics') == 200),
@@ -182,7 +212,9 @@ def actions(state: Snapshot):
     """Plan purement fonctionnel : logique facile à tester, pas d'E/S."""
     return {
         'foundation': not state.foundation_ok,
-        'services': not state.jenkins_installed or not state.jenkins_active or not state.jenkins_private,
+        'services': (not state.jenkins_installed or not state.jenkins_active or
+                     not state.jenkins_private or not getattr(state, 'docker_ready', True) or
+                     getattr(state, 'services_pending', False)),
         'plugins': not state.jenkins_installed or not state.jenkins_active or bool(state.jenkins_plugins_missing),
         'observability': (not state.prometheus_active or not state.grafana_active or
                           not state.metrics_up or not state.datasource_ok or not state.domains_ready or
@@ -322,7 +354,8 @@ def apply_stage(stage, state, cfg, *, logs_backend='both', logs_runtime='docker'
         call_module('scripts/bootstrap/ansible.sh')
         call_module('scripts/install/foundation.sh', '--apply')
     elif stage == 'services':
-        if not state.jenkins_installed:
+        if (not state.jenkins_installed or not getattr(state, 'docker_ready', True) or
+                getattr(state, 'services_pending', False)):
             # Le choix d'une BDD, du domaine et de l'accès Docker reste interactif
             # uniquement lors d'une première installation Jenkins.
             call_module('scripts/install/services.sh', '--apply')
@@ -576,7 +609,7 @@ def make_parser():
     i = subcommand('install', help='Détecte et traite automatiquement les composants manquants',
                    formatter_class=argparse.RawDescriptionHelpFormatter,
                    epilog='''Modules installables séparément (MODULE ou --only) :
-  foundation | core          Base Ubuntu, Ansible, Docker et outils système
+  foundation | core          Base Ubuntu, Docker Engine, Buildx, Compose, outils
   services                   Jenkins et services essentiels
   plugins                    Extensions Jenkins et sécurité
   pipeline | cicd            Jenkins + plugins pour la chaîne CI/CD
@@ -596,8 +629,8 @@ Exemples :
   autokom logs runtime                  # mode actif
   sudo autokom logs runtime systemd --apply  # migration contrôlée
 
-Sans --only, le parcours historique (foundation/services/plugins/observability)
-est conservé. Les logs sont installés séparément pour éviter une charge imprévue.''')
+Sans --only : fondation (Docker d'abord) → Jenkins/BDD → plugins → observabilité.
+Une phase Jenkins interrompue reste à terminer, même si le paquet est installé. Les logs sont installés séparément pour éviter une charge imprévue.''')
     i.add_argument('module', nargs='?', choices=STAGES+OPTIONAL_STAGES+tuple(INSTALL_ALIASES),
                    help='Module facultatif : ex. `autokom install logs`')
     i.add_argument('--check', action='store_true', help='Afficher le plan sans rien modifier')

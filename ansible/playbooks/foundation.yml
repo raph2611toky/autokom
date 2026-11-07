@@ -14,3 +14,4 @@
   roles:
     - role: base_cli
     - role: security_cli
+    - role: docker_engine

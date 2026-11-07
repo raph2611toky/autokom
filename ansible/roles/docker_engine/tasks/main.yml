@@ -1,0 +1,105 @@
+---
+# La fondation AUTOKOM prepare Docker AVANT Jenkins, sans remplacer les
+# installations Docker existantes ni toucher aux images, volumes, reseaux.
+- name: Detecter le client Docker deja installe (lecture seule)
+  ansible.builtin.shell: command -v docker >/dev/null 2>&1
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  register: autokom_docker_cli
+
+- name: Inventorier les paquets Docker et containerd existants
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Refuser de remplacer des paquets Docker ou containerd etrangers
+  ansible.builtin.assert:
+    that:
+      - "(ansible_facts.packages.keys() | list | intersect(['docker.io', 'containerd', 'runc', 'podman-docker', 'docker-compose', 'docker-compose-v2', 'docker-buildx'])) | length == 0"
+    fail_msg: >-
+      Des paquets conteneurs existent sans client Docker fonctionnel.
+      AUTOKOM preserve l'installation existante ; verifier les paquets
+      Docker/containerd avant d'autoriser une conversion de distribution.
+  when:
+    - autokom_docker_cli.rc != 0
+    - not ansible_check_mode
+
+- name: Previsualiser l'installation de Docker Engine
+  ansible.builtin.debug:
+    msg: >-
+      Installer Docker Engine, CLI, containerd.io, Buildx et Compose
+      depuis le depot APT officiel Docker signe, AVANT Jenkins.
+  when:
+    - autokom_docker_cli.rc != 0
+    - ansible_check_mode
+
+- name: Provisionner Docker officiel si le client est absent
+  when:
+    - autokom_docker_cli.rc != 0
+    - not ansible_check_mode
+  block:
+    - name: Creer le repertoire des cles APT
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Installer la cle publique du depot Docker officiel (HTTPS)
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/autokom-docker.asc
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Activer le depot officiel Docker avec signed-by
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/autokom-docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_facts['distribution_release'] }} stable"
+        filename: autokom-docker
+        state: present
+        update_cache: true
+
+    - name: Installer Docker Engine et les plugins Buildx / Compose
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        install_recommends: false
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Activer Docker apres son installation initiale
+      ansible.builtin.systemd_service:
+        name: docker
+        enabled: true
+        state: started
+
+- name: Verifier que le daemon Docker repond en root
+  ansible.builtin.command:
+    argv: [docker, info]
+  register: autokom_docker_info
+  changed_when: false
+  when:
+    - not ansible_check_mode
+
+- name: Verifier la presence du plugin Buildx
+  ansible.builtin.command:
+    argv: [docker, buildx, version]
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - autokom_docker_cli.rc != 0
+
+- name: Verifier la presence du plugin Compose
+  ansible.builtin.command:
+    argv: [docker, compose, version]
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - autokom_docker_cli.rc != 0
