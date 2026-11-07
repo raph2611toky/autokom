@@ -7,6 +7,9 @@ passwords are read from a TTY and stored only in a root-controlled file.
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import stat
+import tempfile
 import os
 import re
 import socket
@@ -38,13 +41,95 @@ def validate_smtp(host, port, login, sender, recipient):
     return host, port, login, sender, recipient
 
 
+def _read_saved_smtp(o):
+    """Use only a root-owned, regular 0600 file created by AUTOKOM."""
+    path = o.SMTP_PENDING
+    if not path.exists() and not path.is_symlink():
+        return None
+    st = path.lstat()
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or stat.S_IMODE(st.st_mode) != 0o600:
+        raise o.SetupError('Secret SMTP de reprise non privé : exiger root:0600, sans lien symbolique')
+    try:
+        if st.st_size > 8192:
+            raise ValueError('size')
+        obj = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(obj, dict) or obj.get('schema') != 1:
+            raise ValueError('schema')
+        meta = validate_smtp(obj['host'], obj['port'], obj['login'], obj['sender'], obj['recipient'])
+        password = obj['password']
+        if not isinstance(password, str) or not password or len(password) > 1024 or any(c in password for c in '\r\n'):
+            raise ValueError('password')
+        return (*meta, password)
+    except (ValueError, TypeError, KeyError, OSError) as exc:
+        raise o.SetupError('Secret SMTP de reprise illisible, refus de l’utiliser') from exc
+
+
+def _save_smtp(o, smtp):
+    """Stage the explicit SMTP choice *before* any Certbot call.
+
+    The file is a root-only installation secret; it is never included in the
+    JSON wizard selection, command arguments, stdout or the Git repository.
+    """
+    from autokom_install_permissions import private_install_directory
+    try:
+        private_install_directory(o.SMTP_PENDING.parent)
+    except RuntimeError as exc:
+        raise o.SetupError(str(exc)) from exc
+    host, port, login, sender, recipient, password = smtp
+    validate_smtp(host, port, login, sender, recipient)
+    if not isinstance(password, str) or not password or len(password) > 1024 or any(c in password for c in '\r\n'):
+        raise o.SetupError('Secret SMTP invalide (longueur ou retour à la ligne)')
+    record = {'schema': 1, 'host': host, 'port': port, 'login': login,
+              'sender': sender, 'recipient': recipient, 'password': password}
+    # Avoid .bak copies of an older SMTP password.  Never follow a link,
+    # open a foreign file, or widen permissions during a credential rotation.
+    path = o.SMTP_PENDING
+    if path.exists() or path.is_symlink():
+        st = path.lstat()
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or
+                stat.S_IMODE(st.st_mode) != 0o600):
+            raise o.SetupError('Secret SMTP existant non privé : refus de remplacement')
+    fd, name = tempfile.mkstemp(prefix='.autokom-smtp-', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(json.dumps(record) + '\n')
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+    o.out('✓', 'Paramètres SMTP sauvegardés sous root:0600 pour les reprises')
+
+
 def collect_options(o, args):
-    """Prompt Node Exporter, then Alertmanager; no interaction in --check."""
+    """Preserve selected extras and private SMTP secret across ACME retries."""
     args.setup_node = False
     args.setup_cadvisor = False
     args.setup_alertmanager = False
+    args._extras_decided = False
+    args._smtp_enabled = False
     args.smtp = None
-    if getattr(args,'mode','check') != 'apply' or getattr(args,'non_interactive',False):
+    pending = getattr(args, '_selection', {}) if not getattr(args, 'reconfigure', False) else {}
+    if getattr(args, 'mode', 'check') != 'apply':
+        return
+
+    if pending.get('extras_decided'):
+        args.setup_node = pending.get('setup_node', False)
+        args.setup_cadvisor = pending.get('setup_cadvisor', False)
+        args.setup_alertmanager = pending.get('setup_alertmanager', False)
+        args._smtp_enabled = pending.get('smtp_enabled', False)
+        args._extras_decided = True
+        if args._smtp_enabled and args.setup_alertmanager and not ALERT_CONFIG.is_file():
+            args.smtp = _read_saved_smtp(o)
+            if not args.smtp:
+                raise o.SetupError('SMTP choisi mais secret de reprise absent : '
+                                   'sudo autokom configure observability pour le saisir à nouveau')
+        o.out('✓', 'Choix Node Exporter, cAdvisor et Alertmanager réutilisés sans ressaisie')
+        if args.smtp:
+            o.out('✓', 'Identifiants SMTP privés réutilisés (valeurs masquées)')
+        return
+
+    if getattr(args, 'non_interactive', False):
         return
     o.section('Node Exporter · métriques hôte', 'CPU · mémoire · disques · système')
     if o.package_installed('prometheus-node-exporter'):
@@ -57,27 +142,30 @@ def collect_options(o, args):
     if o.package_installed('prometheus-alertmanager'):
         o.out('›', 'Alertmanager présent : préserver toute configuration tierce')
     args.setup_alertmanager = o.yesno('Configurer Alertmanager et les règles AUTOKOM ?', True)
-    if args.setup_alertmanager and not ALERT_CONFIG.is_file():
-        if o.yesno('Configurer les notifications par e-mail SMTP ?', True):
+    if args.setup_alertmanager and (not ALERT_CONFIG.is_file() or getattr(args, 'reconfigure', False)):
+        args._smtp_enabled = o.yesno('Configurer les notifications par e-mail SMTP ?', True)
+        if args._smtp_enabled:
             for _ in range(3):
-                host=o.prompt_text('email_host (SMTP)')
-                port_raw=o.prompt_text('Port SMTP TLS/STARTTLS', default='587')
-                login=o.prompt_text('email_login')
-                sender=o.prompt_text('from_email (expéditeur)')
-                recipient=o.prompt_text('email_to (destinataire)')
+                host = o.prompt_text('email_host (SMTP)')
+                port_raw = o.prompt_text('Port SMTP TLS/STARTTLS', default='587')
+                login = o.prompt_text('email_login')
+                sender = o.prompt_text('from_email (expéditeur)')
+                recipient = o.prompt_text('email_to (destinataire)')
                 try:
-                    smtp=validate_smtp(host,int(port_raw),login,sender,recipient)
+                    smtp = validate_smtp(host, int(port_raw), login, sender, recipient)
                     break
                 except (ValueError, TypeError) as exc:
                     o.out('!', str(exc))
             else:
                 raise o.SetupError('Paramètres SMTP invalides après trois saisies')
-            password=o.secret('SMTP — mot de passe (saisie masquée)', args.non_interactive)
-            args.smtp = (*smtp,password)
+            password = o.secret('SMTP — mot de passe (saisie masquée)', args.non_interactive)
+            args.smtp = (*smtp, password)
+            _save_smtp(o, args.smtp)
         else:
-            o.out('›', 'Alertmanager sans e-mail : alertes consultables localement, notifications non activées')
+            o.out('›', 'Alertmanager sans e-mail : alertes consultables localement')
     elif args.setup_alertmanager and ALERT_CONFIG.is_file():
         o.out('✓', 'Configuration Alertmanager existante : aucune demande SMTP')
+    args._extras_decided = True
 
 
 def local_http_ok(port, path='/metrics'):

@@ -49,6 +49,7 @@ PROM_HTPASSWD = Path('/etc/nginx/.autokom-prometheus.htpasswd')
 ACME_WEBROOT = Path('/var/www/autokom-acme')
 CONFIG_STATE = Path('/etc/autokom/state/observability.json')
 CONFIG_PENDING = Path('/var/lib/autokom/install/observability-selection.json')
+SMTP_PENDING = Path('/var/lib/autokom/install/observability-smtp-private.json')
 TIMEOUT = 20
 
 # Validated once at startup; functions also accept Settings in unit tests.
@@ -88,7 +89,10 @@ def previous_selection():
         if not isinstance(record, dict) or record.get('schema') != 1:
             raise ValueError('schema')
         allowed = ('prometheus_domain', 'grafana_domain', 'email', 'grafana_user')
-        if any(not isinstance(record.get(key, ''), str) for key in allowed):
+        flags = ('email_decided', 'extras_decided', 'setup_node', 'setup_cadvisor',
+                 'setup_alertmanager', 'smtp_enabled')
+        if any(not isinstance(record.get(key, ''), str) for key in allowed) or any(
+                key in record and type(record[key]) is not bool for key in flags):
             raise ValueError('format')
         validate_domain(record.get('prometheus_domain', ''))
         validate_domain(record.get('grafana_domain', ''))
@@ -111,6 +115,12 @@ def save_selection(args):
         'grafana_domain': args.grafana_domain or '',
         'email': args.email or '',
         'grafana_user': args.grafana_user or '',
+        'email_decided': bool(getattr(args, '_cert_email_decided', False)),
+        'extras_decided': bool(getattr(args, '_extras_decided', False)),
+        'setup_node': bool(getattr(args, 'setup_node', False)),
+        'setup_cadvisor': bool(getattr(args, 'setup_cadvisor', False)),
+        'setup_alertmanager': bool(getattr(args, 'setup_alertmanager', False)),
+        'smtp_enabled': bool(getattr(args, '_smtp_enabled', False)),
     }
     owned_write(CONFIG_PENDING, json.dumps(record, sort_keys=True, indent=2) + '\n', mode=0o600)
     out('✓', 'Choix Prometheus/Grafana enregistrés (sans mot de passe) pour la reprise')
@@ -722,6 +732,38 @@ def ensure_prom_basic_auth(username, passwd):
     return changed
 
 
+def issue_observability_certificate(domain, args):
+    """Reuse or obtain an ACME certificate, never touch other virtual hosts.
+
+    Recover only via the locally verified AUTOKOM ACME webroot.  Per-attempt
+    diagnostics avoid reporting obsolete errors from previous attempts.
+    """
+    if valid_cert(domain):
+        out('✓', f'{domain} : certificat TLS existant réutilisé')
+        return
+    if args.email and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', args.email):
+        raise SetupError('Format d’e-mail Let’s Encrypt invalide')
+    email_args = (['--email', args.email] if args.email else
+                  ['--register-unsafely-without-email'])
+    if not args.email and not getattr(args, '_cert_email_warning_emitted', False):
+        out('!', 'Certbot sans e-mail : aucune notification ACME d’expiration ou de révocation')
+        args._cert_email_warning_emitted = True
+    check_acme_http01_local(domain)
+    from observability_acme import acme_log_offset, acme_failure_detail
+    log_offset = acme_log_offset()
+    try:
+        run(['certbot', 'certonly', '--webroot', '-w', str(ACME_WEBROOT), '--non-interactive',
+             '--agree-tos', '--no-eff-email', *email_args, '-d', domain], timeout=300)
+    except SetupError as exc:
+        detail = acme_failure_detail(domain, since=log_offset)
+        raise SetupError(f'Échec HTTPS {domain} : {detail}. '
+                         'Certificat, comptes et configuration existants conservés.') from exc
+    if not valid_cert(domain):
+        raise SetupError(f'{domain} : Certbot terminé sans certificat valide à '
+                         f'/etc/letsencrypt/live/{domain}/fullchain.pem ; '
+                         'vérifier les noms des certificats avec sudo certbot certificates')
+
+
 def configure_nginx(domain, port, kind, args):
     if not domain:
         out('✓', f'{kind} reste local ; aucun domaine ni virtual host créé')
@@ -738,10 +780,30 @@ def configure_nginx(domain, port, kind, args):
     owned_pending = (len(existing) == 1 and managed.is_file() and
                      not managed.is_symlink() and enabled_link.is_symlink() and
                      enabled_link.resolve() == managed.resolve() and
-                     managed.read_text(encoding='utf-8') in (gated_content, old_gated) and
-                     'TLS PENDING' in existing[0])
+                     managed.read_text(encoding='utf-8') in (gated_content, old_gated))
     if owned_pending:
         out('›', f'{domain} : reprise du virtual host AUTOKOM TLS PENDING (pas de réinitialisation)')
+    # A previous AUTOKOM release may already have published its exact HTTPS
+    # template while the certificate later expired or became invalid.  Only
+    # recover an exact match: never adopt a third-party server block or rewrite
+    # an edited config.  The existing HTTPS proxy remains untouched if ACME
+    # fails, so a retry cannot silently replace administrator customization.
+    full_content = vhost_content(domain, port, prometheus=(kind == 'prometheus'), gated=False)
+    owned_https = (1 <= len(existing) <= 2 and managed.is_file() and
+                   not managed.is_symlink() and enabled_link.is_symlink() and
+                   enabled_link.resolve() == managed.resolve() and
+                   managed.read_text(encoding='utf-8') == full_content)
+    if owned_https and not valid_cert(domain):
+        if args.mode == 'check':
+            out('+', f'{domain} : renouveler le certificat du HTTPS AUTOKOM sans remplacer le proxy')
+            return
+        out('›', f'{domain} : HTTPS AUTOKOM reconnu ; réparation TLS sans écraser Nginx')
+        ensure_acme_webroot()
+        issue_observability_certificate(domain, args)
+        run(['nginx', '-t'])
+        run(['systemctl', 'reload', 'nginx'])
+        out('✓', f'{domain} : certificat et reverse proxy HTTPS restaurés')
+        return
     if existing and not owned_pending:
         if not vhost_target_ok(existing, port):
             # Only update an AUTOKOM-owned vhost; never rewrite another service.
@@ -822,34 +884,10 @@ def configure_nginx(domain, port, kind, args):
             owned_write(managed, gated_content)
         run(['nginx', '-t'])
         run(['systemctl', 'reload', 'nginx'])
-        # Certbot only obtains a certificate and temporarily configures nginx
-        # for HTTP-01. AUTOKOM owns the final HTTPS reverse proxy configuration.
-        # Réutiliser un certificat déjà valide plutôt que de le réémettre.
-        if valid_cert(domain):
-            out('✓', f'{domain} : certificat TLS existant réutilisé')
-        else:
-            email_args = (['--email', args.email] if args.email else
-                          ['--register-unsafely-without-email'])
-            if not args.email and not getattr(args, '_cert_email_warning_emitted', False):
-                out('!', 'Certbot sans e-mail : aucune notification ACME d’expiration ou de révocation')
-                args._cert_email_warning_emitted = True
-            # Test the matching HTTP vhost before consuming an ACME attempt.
-            check_acme_http01_local(domain)
-            from observability_acme import acme_log_offset, acme_failure_detail
-            log_offset = acme_log_offset()
-            try:
-                run(['certbot', 'certonly', '--webroot', '-w', str(ACME_WEBROOT), '--non-interactive',
-                     '--agree-tos', '--no-eff-email', *email_args, '-d', domain], timeout=300)
-            except SetupError as exc:
-                detail = acme_failure_detail(domain, since=log_offset)
-                raise SetupError(f'Échec HTTPS {domain} : {detail}. '
-                                 'Le certificat et les identifiants existants sont conservés. '
-                                 'Diagnostic : sudo grep -Ei "detail:|Challenge failed|Invalid response|'
-                                 'Timeout during connect|DNS problem|CAA|rateLimited" '
-                                 '/var/log/letsencrypt/letsencrypt.log | tail -20') from exc
+        # HTTP-01 is served by the exact AUTOKOM webroot on both the
+        # initial installation and all subsequent TLS recovery attempts.
+        issue_observability_certificate(domain, args)
 
-        if not valid_cert(domain):
-            raise SetupError(f'Certificat de {domain} non confirmé')
         owned_write(managed, vhost_content(domain, port,
                                           prometheus=(kind == 'prometheus'), gated=False))
         run(['nginx', '-t'])
@@ -1492,7 +1530,10 @@ def interactive_options(args):
             args.grafana_user = username
             args.grafana_new_password = password_twice('Grafana', args.non_interactive)
         else:
-            args.grafana_rotate = yesno('Modifier le mot de passe Grafana existant ?', False)
+            args.grafana_rotate = (yesno('Modifier le mot de passe Grafana existant ?', False)
+                                   if getattr(args, 'reconfigure', False) else False)
+            if not getattr(args, 'reconfigure', False):
+                out('✓', 'Grafana : administrateur existant conservé (aucune ressaisie)')
             if args.grafana_rotate:
                 args.grafana_rotate_user = prompt_text('Utilisateur Grafana actuel', default='admin')
                 args.grafana_old_password = secret('Mot de passe Grafana actuel')
@@ -1646,6 +1687,12 @@ def main(argv=None):
     args.setup_node = False
     args.setup_alertmanager = False
     args.smtp = None
+    args._selection = pending
+    # A stored empty ACME email is an intentional choice; never ask for it
+    # again unless the administrator explicitly enters reconfiguration mode.
+    args._cert_email_decided = bool(
+        args.mode == 'apply' and not args.reconfigure and pending and
+        pending.get('email_decided', 'email' in pending))
     args.prometheus_domain = validate_domain(args.prometheus_domain)
     args.grafana_domain = validate_domain(args.grafana_domain)
     if args.prometheus_domain and args.prometheus_domain == args.grafana_domain:
@@ -1664,9 +1711,11 @@ def main(argv=None):
                                           grafana_domain=args.grafana_domain, email=args.email))
     out('›', f'Ports actifs ciblés : Jenkins {cfg().jenkins_port} · Prometheus {cfg().prometheus_port} · Grafana {cfg().grafana_port}')
     preflight(args)
+    # Persist validated, non-secret wizard answers before external DNS/ACME
+    # probes: their failure must never force the operator to repeat the form.
+    save_selection(args)
     preflight_domains(args)
     preflight_credentials(args)
-    save_selection(args)
     if args.mode == 'check':
         check_only(args)
         return 0

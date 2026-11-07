@@ -163,7 +163,10 @@ class GroupedInteractiveForms(unittest.TestCase):
                 self.assertIsNone(o.grafana_credentials(False,args))
                 api.assert_not_called()
         self.assertEqual(args.grafana_rotate,False)
-        self.assertEqual(len(events),3)
+        # Reprise idempotente : les deux choix de domaine seulement, aucune
+        # question de rotation de mot de passe Grafana existant.
+        self.assertEqual(len(events),2)
+        self.assertNotIn('Modifier le mot de passe Grafana existant ?', events)
         pw.assert_not_called()
 
     def test_grafana_fresh_uses_collected_password_no_repeat(self):
