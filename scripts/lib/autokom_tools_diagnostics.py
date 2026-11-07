@@ -115,6 +115,19 @@ def status(name):
     healthy=state in ('active', 'outil CLI')
     print('  › Service : '+state)
     if name == 'nginx':
+        from autokom_nginx_runtime import listeners, summary, NginxRuntimeError
+        try:
+            ports = listeners()
+            print('  › Écoutes TCP : ' + summary(ports))
+            if not ports.get(443):
+                healthy = False
+                print('  ✗ Aucun listener HTTPS/443 ; vérifier conflit ou démarrage du master')
+            elif any(x.name != 'nginx' for x in ports[443]):
+                healthy = False
+                print('  ! TCP/443 occupé par un processus non Nginx ; aucun arrêt automatique')
+        except NginxRuntimeError as exc:
+            healthy = False
+            print('  ! Inspection des ports indisponible : ' + str(exc))
         p=proc(['nginx','-t'])
         syntax_ok=bool(p and p.returncode==0)
         healthy &= syntax_ok
@@ -145,6 +158,16 @@ def status(name):
         except (OSError,ValueError,RuntimeError) as exc:
             print('  ! Diagnostic HTTPS : '+type(exc).__name__)
     if name in ('nginx','prometheus','grafana'):
+        if name != 'nginx':
+            from autokom_nginx_runtime import listeners, summary, NginxRuntimeError
+            try:
+                ports = listeners()
+                print('  › Propriétaires des ports du proxy : ' + summary(ports))
+                if not ports.get(443) or any(x.name != 'nginx' for x in ports[443]):
+                    healthy = False
+            except NginxRuntimeError as exc:
+                healthy = False
+                print('  ! Impossible de vérifier le propriétaire de TCP/443 : ' + str(exc))
         ufw=proc(['ufw','status'])
         if ufw and ufw.returncode==0:
             lines=ufw.stdout.splitlines()

@@ -1876,12 +1876,14 @@ def main(argv=None):
     # declare a full installation successful merely because services are active
     # and Certbot returned 0. This is local ingress, not a remote GCP VPC test.
     if args.prometheus_domain or args.grafana_domain:
-        from autokom_ingress_health import verify_observability, IngressError
+        from autokom_nginx_runtime import ensure_validated_ingress, NginxRuntimeError
         try:
-            verify_observability([('prometheus', args.prometheus_domain),
-                                  ('grafana', args.grafana_domain)])
-        except IngressError as exc:
-            raise SetupError('Vérification finale du reverse proxy : '+str(exc)) from exc
+            outcome = ensure_validated_ingress([('prometheus', args.prometheus_domain),
+                                                ('grafana', args.grafana_domain)])
+        except NginxRuntimeError as exc:
+            raise SetupError('Vérification finale du reverse proxy : ' + str(exc)) from exc
+        if outcome != 'conforme':
+            out('✓', 'Nginx : récupération contrôlée, puis nouvelle vérification HTTPS : '+outcome)
         out('✓', 'Nginx : HTTPS/SNI local et redirections HTTP validés (VPC externe non vérifié)')
     save_state()
     out('✓', 'AUTOKOM observabilité configurée : services locaux, Nginx et TLS vérifiés')
