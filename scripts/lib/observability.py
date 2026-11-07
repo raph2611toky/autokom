@@ -611,6 +611,20 @@ def ensure_acme_webroot():
     root = ACME_WEBROOT
     if not root.is_absolute():
         raise SetupError('Répertoire ACME non absolu')
+    # Nginx can return 404 (rather than 403) when it cannot traverse an
+    # ancestor directory. Validate the *whole* path, not only /var/www.
+    # Do not chmod/chown existing parent directories; those are not owned by
+    # this module and may have intentional policy restrictions.
+    for parent in reversed(root.parents):
+        if parent.is_symlink():
+            raise SetupError(f'Parent ACME symbolique interdit : {parent}')
+        try:
+            mode = parent.stat().st_mode
+        except OSError as exc:
+            raise SetupError(f'Parent ACME inaccessible : {parent}') from exc
+        if not stat.S_ISDIR(mode) or not (stat.S_IMODE(mode) & 0o001):
+            raise SetupError(f'Parent ACME non traversable par Nginx : {parent} ; '
+                             'ne pas changer ses droits sans validation')
     parents = [root.parent, root, root / '.well-known',
                root / '.well-known' / 'acme-challenge']
     for path in parents:
@@ -626,11 +640,53 @@ def ensure_acme_webroot():
     return root
 
 
-def check_acme_http01_local(domain):
-    """Test actual matching Nginx vhost/route before placing ACME order.
+def _acme_ingress_local_ipv4():
+    """Source IPv4 of the default outbound route, usually GCP ens4 / AWS eth0.
 
-    Check Nginx through 127.0.0.1:80 with the requested Host header. This
-    proves local routing, not public accessibility through GCP firewall/CDN.
+    Google/AWS NAT delivers public TCP/80 to this private NIC, *not* to lo.
+    `ip route get` is purely a local routing-table lookup; no network request.
+    Fail closed to localhost when unavailable, rather than guessing a Docker IP.
+    """
+    try:
+        result = subprocess.run(['ip', '-j', '-4', 'route', 'get', '1.1.1.1'],
+                                capture_output=True, text=True, timeout=3)
+        if result.returncode:
+            return None
+        routes = json.loads(result.stdout)
+        if not isinstance(routes, list) or not routes:
+            return None
+        route = routes[0]
+        device = route.get('dev', '')
+        if not isinstance(device, str) or (device.startswith(('docker', 'br-', 'veth', 'wg', 'tun'))):
+            return None
+        ip = route.get('prefsrc') or route.get('src')
+        parsed = ipaddress.ip_address(ip)
+        if parsed.version != 4 or parsed.is_loopback or parsed.is_link_local or parsed.is_unspecified:
+            return None
+        return str(parsed)
+    except (OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
+        return None
+
+
+def _acme_probe(ip, domain, uri, marker):
+    """Check a real Host-routed token on an exact local listening address."""
+    connection = http.client.HTTPConnection(ip, 80, timeout=6)
+    try:
+        connection.request('GET', uri, headers={'Host': domain})
+        response = connection.getresponse()
+        body = response.read(256).decode('utf-8', 'replace')
+        return response.status, body == marker
+    finally:
+        connection.close()
+
+
+def check_acme_http01_local(domain):
+    """Probe the exact ACME file via the NIC receiving inbound GCP/AWS NAT.
+
+    The older preflight checked only 127.0.0.1. On Nginx hosts with an
+    address-specific `listen 127.0.0.1:80`, that can select a *different*
+    virtual-server group from the one servicing requests arriving on ens4.
+    A real Host header, a unique token and the routed NIC are both necessary.
     """
     root = ACME_WEBROOT / '.well-known' / 'acme-challenge'
     name = 'autokom-check-' + secrets.token_hex(12)
@@ -641,28 +697,36 @@ def check_acme_http01_local(domain):
         with os.fdopen(fd, 'w', encoding='ascii') as handle:
             os.fchmod(handle.fileno(), 0o644)
             handle.write(marker)
-        connection = http.client.HTTPConnection('127.0.0.1', 80, timeout=6)
-        try:
-            connection.request('GET', '/.well-known/acme-challenge/' + name,
-                               headers={'Host': domain})
-            response = connection.getresponse()
-            body = response.read(256).decode('utf-8', 'replace')
-        finally:
-            connection.close()
-        if response.status != 200 or body != marker:
-            raise SetupError(f'Préflight HTTP-01 {domain} : Nginx renvoie '
-                             f'HTTP {response.status} ou un contenu inattendu. '
-                             'Vérifier server_name, site actif et chemin ACME ; '
-                             'aucune nouvelle demande Let’s Encrypt envoyée.')
-        out('✓', f'{domain} : défi HTTP-01 servi en local par le bon virtual host (HTTP 200)')
-    except (OSError, http.client.HTTPException) as exc:
-        raise SetupError(f'Préflight HTTP-01 {domain} impossible : '
-                         'Nginx sur 127.0.0.1:80 inaccessible ou réponse invalide') from exc
+        path = '/.well-known/acme-challenge/' + name
+        routed = _acme_ingress_local_ipv4()
+        # Require the routed NIC when known: on GCP the public address is NATed
+        # to this private NIC. Loopback is merely an additional diagnostic.
+        addresses = [routed, '127.0.0.1'] if routed else ['127.0.0.1']
+        results = []
+        for address in dict.fromkeys(ip for ip in addresses if ip):
+            try:
+                status, content_ok = _acme_probe(address, domain, path, marker)
+                results.append((address, str(status), content_ok))
+            except (OSError, http.client.HTTPException):
+                results.append((address, 'connexion impossible', False))
+        decisive = results[0]
+        if decisive[1] != '200' or not decisive[2]:
+            report = '; '.join(f'{ip}: HTTP {code}' + (' (contenu incorrect)' if code == '200' and not valid else '')
+                               for ip, code, valid in results)
+            reason = ('Nginx ne sert pas le fichier ACME sur l’interface d’entrée. '
+                      'Vérifier les listen 80/127.0.0.1, les server_name actifs '
+                      '(sudo nginx -T), puis le webroot et les permissions de lecture '
+                      'dans /var/www/autokom-acme ; examiner le journal d’erreur Nginx. '
+                      'Aucune demande Let’s Encrypt envoyée.')
+            raise SetupError(f'Préflight HTTP-01 {domain} : {report}. {reason}')
+        out('✓', f'{domain} : défi HTTP-01 vérifié sur {decisive[0]}:80 (HTTP 200)')
+        if routed and len(results) > 1 and results[1][1] != '200':
+            out('›', 'Loopback Nginx différent de l’interface publique ; validation sur l’interface routée confirmée')
     finally:
         dest.unlink(missing_ok=True)
 
 
-def vhost_content(domain, port, *, prometheus=False, gated=True):
+def vhost_content(domain, port, *, prometheus=False, gated=True, hardened_proxy=True):
     """Start HTTP gated, then publish HTTPS only after certonly succeeds."""
     if gated:
         return (f'# AUTOKOM MANAGED {domain} : {port} — TLS PENDING\n'
@@ -699,6 +763,11 @@ def vhost_content(domain, port, *, prometheus=False, gated=True):
             '        proxy_set_header X-Forwarded-Proto $scheme;\n'
             '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n'
             '        proxy_set_header Connection "";\n'
+            + ('        proxy_set_header X-Forwarded-Host $host;\n'
+               '        proxy_set_header X-Forwarded-Port $server_port;\n'
+               '        proxy_connect_timeout 10s;\n'
+               '        proxy_read_timeout 120s;\n'
+               '        proxy_send_timeout 120s;\n' if hardened_proxy else '') +
             '    }\n'
             + (f'    location /api/live/ {{\n'
                f'        proxy_pass http://{upstream_name};\n'
@@ -707,6 +776,13 @@ def vhost_content(domain, port, *, prometheus=False, gated=True):
                '        proxy_set_header X-Forwarded-Proto $scheme;\n'
                '        proxy_set_header Upgrade $http_upgrade;\n'
                '        proxy_set_header Connection "upgrade";\n'
+               + ('        proxy_set_header X-Real-IP $remote_addr;\n'
+                  '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n'
+                  '        proxy_set_header X-Forwarded-Host $host;\n'
+                  '        proxy_set_header X-Forwarded-Port $server_port;\n'
+                  '        proxy_read_timeout 3600s;\n'
+                  '        proxy_send_timeout 3600s;\n'
+                  '        proxy_buffering off;\n' if hardened_proxy else '') +
                '    }\n' if not prometheus else '')
             + '}\n')
 
@@ -789,10 +865,14 @@ def configure_nginx(domain, port, kind, args):
     # an edited config.  The existing HTTPS proxy remains untouched if ACME
     # fails, so a retry cannot silently replace administrator customization.
     full_content = vhost_content(domain, port, prometheus=(kind == 'prometheus'), gated=False)
+    # Older AUTOKOM HTTPS sites remain owned and recoverable after a cert
+    # expires. Do not automatically rewrite their validated proxy layout.
+    legacy_https = vhost_content(domain, port, prometheus=(kind == 'prometheus'),
+                                 gated=False, hardened_proxy=False)
     owned_https = (1 <= len(existing) <= 2 and managed.is_file() and
                    not managed.is_symlink() and enabled_link.is_symlink() and
                    enabled_link.resolve() == managed.resolve() and
-                   managed.read_text(encoding='utf-8') == full_content)
+                   managed.read_text(encoding='utf-8') in (full_content, legacy_https))
     if owned_https and not valid_cert(domain):
         if args.mode == 'check':
             out('+', f'{domain} : renouveler le certificat du HTTPS AUTOKOM sans remplacer le proxy')
