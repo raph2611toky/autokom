@@ -58,6 +58,12 @@ def valid_hostname(value):
         raise BrokerError('Nom DNS public invalide.')
     return value
 
+def _system_component(argv):
+    """Safe, bounded classification; never include user-controlled arguments."""
+    name = Path(argv[0]).name if argv else ''
+    return name if name in ('nginx', 'certbot', 'dig', 'systemctl', 'docker') else 'runtime'
+
+
 def run(argv, *, timeout=30, input=None, max_output=16000, pass_fds=()):
     if not isinstance(argv, list) or any(not isinstance(v,str) for v in argv):
         raise BrokerError('Arguments système non autorisés.')
@@ -65,10 +71,15 @@ def run(argv, *, timeout=30, input=None, max_output=16000, pass_fds=()):
         p = subprocess.run(argv, input=input, capture_output=True, text=True, timeout=timeout, check=False, pass_fds=pass_fds,
                            env={'PATH':'/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C.UTF-8'})
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise BrokerError('Action système indisponible ou expirée.') from exc
+        logger.warning('AUTOKOM_SYSTEM_FAILURE component=%s reason=execution_unavailable',
+                       _system_component(argv))
+        raise BrokerError('AUTOKOM_SYSTEM_UNAVAILABLE: Action système indisponible ou expirée.') from exc
     if p.returncode:
-        # Never forward stdout/stderr verbatim: Docker and Jenkins can print secrets.
-        raise BrokerError('L’opération système a échoué. Consulter journalctl du broker AUTOKOM.')
+        # Never log argv, stdout, stderr: commands can contain client secrets.
+        component = _system_component(argv)
+        logger.warning('AUTOKOM_SYSTEM_FAILURE component=%s exit_status=%d',
+                       component, p.returncode)
+        raise BrokerError('AUTOKOM_'+component.upper()+'_COMMAND_FAILED: Échec de commande contrôlée.')
     return p.stdout[:max_output]
 
 def jenkins_config():
@@ -634,7 +645,7 @@ def _proxy_apply(host,environment):
                     if re.search(r'(?m)^\s*server_name\s+[^;]*\b'+re.escape(host)+r'\b',content):
                         raise BrokerError('Ce domaine est déjà défini dans un vhost Nginx existant.')
     name='autokom-customer-'+host+'.conf'
-    owner=STATE/'domain-owner-'+host+'.txt'
+    owner=STATE/('domain-owner-'+host+'.txt')
     if owner.is_file() and owner.read_text(encoding='utf-8').strip()!=environment:
         raise BrokerError('Domaine déjà attribué à un autre environnement.')
     path=PROXY/name; symlink=ENABLED/name
@@ -649,8 +660,12 @@ def _proxy_apply(host,environment):
         if not symlink.exists():symlink.symlink_to(path)
         run(['nginx','-t'])
         run(['systemctl','reload','nginx'])
+    phase = 'nginx_http'
     try:
+        logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started', phase)
         publish(_nginx_config(host,state['port'],tls=False))
+        phase = 'acme_certificate'
+        logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started', phase)
         # Certbot --keep-until-expiring reuses a currently valid certificate.
         if True:
             email=_runtime_dns_env().get('AUTOKOM_ACME_EMAIL','')
@@ -660,10 +675,18 @@ def _proxy_apply(host,environment):
                      '-d',host,'--agree-tos','--keep-until-expiring','--non-interactive','--email',email],timeout=130)
             except BrokerError as exc:
                 raise BrokerError('AUTOKOM_ACME_FAILED: Certificat HTTPS non délivré ; vérifier DNS public et TCP/80.') from exc
+        phase = 'nginx_https'
+        logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started', phase)
         publish(_nginx_config(host,state['port'],tls=True))
+        phase = 'ownership_commit'
         owner.write_text(environment,encoding='utf-8')
         os.chmod(owner,0o600)
-    except Exception:
+        logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=success', phase)
+    except Exception as exc:
+        # Keep the operator's event log useful but do not expose command output,
+        # paths, environment values or third-party API responses.
+        logger.warning('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=failed category=%s',
+                       phase, type(exc).__name__)
         if old is not None:path.write_text(old,encoding='utf-8')
         else:path.unlink(missing_ok=True);symlink.unlink(missing_ok=True)
         subprocess.run(['nginx','-t'],capture_output=True,timeout=10)
@@ -876,8 +899,18 @@ class Handler(socketserver.StreamRequestHandler):
             # Only the exception CATEGORY reaches the operator journal. No OAuth, env or args.
             safe = isinstance(exc,(BrokerError,ingress.IngressError))
             match = re.match(r'^(AUTOKOM_[A-Z0-9_]{3,80}):',str(exc)) if safe else None
-            code = exc.code if isinstance(exc,ingress.IngressError) else (match.group(1) if match else 'AUTOKOM_BROKER_REFUSED')
-            logger.warning('Broker request denied: %s code=%s', type(exc).__name__,code)
+            code = exc.code if isinstance(exc,ingress.IngressError) else (match.group(1) if match else ('AUTOKOM_BROKER_REFUSED' if safe else 'AUTOKOM_BROKER_INTERNAL_ERROR'))
+            # Source function/line from this trusted module, NEVER exception text
+            # or a traceback containing customer-controlled values.
+            source = 'unknown'
+            if not safe:
+                tb = exc.__traceback__
+                while tb is not None:
+                    if tb.tb_frame.f_code.co_filename == __file__:
+                        source = '%s:%d' % (tb.tb_frame.f_code.co_name, tb.tb_lineno)
+                    tb = tb.tb_next
+            logger.warning('Broker request denied: %s code=%s origin=%s',
+                           type(exc).__name__,code,source)
             # No exception traceback, request content or secret values in response.
             response={'ok':False,'error':str(exc) if safe else 'Erreur interne du service AUTOKOM.', 'code':code}
         self.wfile.write((json.dumps(response,ensure_ascii=False)+'\n').encode())

@@ -248,20 +248,28 @@ def poll_one(client, run_id):
         if status == 'SUCCEEDED':
             from apps.deployments.runs.autokom_socket import request_control
             try:
+                add_log(run, 'AUTOKOM_TECH:release:Publication contrôlée démarrée (Docker, DNS et HTTPS).', level='TECH')
                 _release_docker_and_proxy(run)
+                add_log(run, 'AUTOKOM_TECH:release:Runtime et domaine vérifiés ; validation de la version active.', level='TECH')
                 # The broker may still roll back at this point. Do NOT publish
                 # the release as ACTIVE in MySQL before this commit succeeds.
                 request_control('runtime.commit', {
                     'run_id': str(run.pk),
                     'environment_id': str(run.environment_id),
                 }, timeout=25)
+                add_log(run, 'AUTOKOM_TECH:release:Publication et validation du runtime terminées.', level='TECH')
             except Exception as exc:
+                code=getattr(exc, 'safe_code', None)
+                safe_code = code if isinstance(code,str) and re.fullmatch(r'AUTOKOM_[A-Z0-9_]{3,80}',code) else 'AUTOKOM_PUBLISH_FAILED'
+                add_log(run, 'AUTOKOM_TECH:release:Échec lors de la publication ; code='+safe_code, level='TECH')
                 try:
                     request_control('runtime.rollback', {
                         'run_id': str(run.pk),
                         'environment_id': str(run.environment_id),
                     }, timeout=35)
+                    add_log(run, 'AUTOKOM_TECH:release:Retour arrière demandé et accepté par le broker.', level='TECH')
                 except Exception:
+                    add_log(run, 'AUTOKOM_TECH:release:Retour arrière non confirmé ; réconciliation requise.', level='TECH')
                     logger.warning('Réconciliation Docker manuelle requise pour %s', run.pk)
                 logger.warning('Publication AUTOKOM refusée pour %s (%s)',
                                run.pk, type(exc).__name__)
@@ -313,6 +321,7 @@ def _release_docker_and_proxy(run):
     if resource.get('replicas') != 1:
         raise ValueError('Haute disponibilité interdite avant activation GCP.')
     PipelineStageRun.objects.filter(deployment=run,stage_key='release').update(status='RUNNING',started_at=timezone.now())
+    add_log(run, 'AUTOKOM_TECH:release:Docker · import image, lancement du conteneur et contrôle HTTP interne.', level='TECH')
     result=request_control('runtime.deploy',{
         'run_id':str(run.pk),'environment_id':str(run.environment_id),
         'cpu_millicores':int(resource['cpu_millicores']),
@@ -320,6 +329,7 @@ def _release_docker_and_proxy(run):
         'internal_port':int(cfg['port']),'healthcheck':cfg['healthcheck'],
         'replicas':1,'variables':manifest['variables'],
     },timeout=280)
+    add_log(run, 'AUTOKOM_TECH:release:Docker · conteneur et contrôle HTTP interne validés.', level='TECH')
     PipelineStageRun.objects.filter(deployment=run,stage_key='release').update(status='SUCCESS',finished_at=timezone.now())
     PipelineStageRun.objects.filter(deployment=run,stage_key='health').update(status='RUNNING',started_at=timezone.now())
     # Managed subdomains are activated automatically after the first healthy Docker build.
@@ -328,7 +338,9 @@ def _release_docker_and_proxy(run):
     if not Domain.objects.filter(environment=run.environment, domain_type=Domain.Type.SUBDOMAIN).exists():
         from apps.projects.project.services import reserve_domain
         reserve_domain(run.environment.project, run.environment)
+    add_log(run, 'AUTOKOM_TECH:health:Domaine public · vérification DNS, configuration Nginx et certificat HTTPS.', level='TECH')
     activate_managed_domains_for_release(run.environment)
+    add_log(run, 'AUTOKOM_TECH:health:Domaine public · DNS et HTTPS activés.', level='TECH')
     domains=Domain.objects.filter(environment=run.environment,domain_type=Domain.Type.CUSTOM,verified_at__isnull=False,status__in=[Domain.Status.VERIFYING,Domain.Status.ACTIVE])
     for domain in domains:
         request_control('domain.activate',{
