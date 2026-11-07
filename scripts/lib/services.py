@@ -1101,12 +1101,24 @@ def main():
     say('Mode : ' + ('Simulation' if args.mode == 'check' else 'Installation'))
     preflight(args)
     # Guard BEFORE package/systemd changes; check mode is read-only.
-    secure_firewall(
-        args.db, apply=(args.mode == 'apply'), activate=args.enable_ufw,
-        ssh_cidr=args.ssh_cidr, ssh_port=args.ssh_port,
-        confirmation=args.confirm_firewall,
-        say=lambda message: say(message, '›'),
-    )
+    # Respect the administrator's selected *public* reverse proxy. UFW rules
+    # scoped to WireGuard are not sufficient for an Internet-facing domain.
+    public_web_ports = ((80, 443) if args.domain and args.tls in
+                        ('certbot', 'provided', 'existing') else
+                        (80,) if args.domain and args.tls == 'none' else ())
+    installation_event('firewall:host', 'checking')
+    try:
+        secure_firewall(
+            args.db, apply=(args.mode == 'apply'), activate=args.enable_ufw,
+            ssh_cidr=args.ssh_cidr, ssh_port=args.ssh_port,
+            confirmation=args.confirm_firewall, public_web_ports=public_web_ports,
+            say=lambda message: say(message, '›'),
+        )
+    except Exception:
+        installation_event('firewall:host', 'failed')
+        raise
+    installation_event('firewall:host', 'succeeded' if args.mode == 'apply' else 'checked',
+                       detail='ports=' + ','.join(map(str, public_web_ports)))
     if first_install(args.mode, jenkins_package_installed()):
         autokom_banner('jenkins', initial_install=True)
     ansible_install(args)

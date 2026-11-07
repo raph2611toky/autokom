@@ -101,12 +101,17 @@ def rule_command(verdict, iface, port):
 
 
 def secure_firewall(db, apply=False, activate=False, ssh_cidr='', ssh_port=22,
-                    confirmation=False, say=print, executor=execute):
+                    confirmation=False, say=print, executor=execute,
+                    public_web_ports=()):
     """Enforce narrow host rules, leave all Docker-managed forwarding untouched.
 
     UFW inactive: refuse apply unless explicitly activated with SSH guard.
-    AWS SG/GCP policies must be assessed separately.
+    External AWS/GCP network firewalls must be assessed separately.
     """
+    # Never accept arbitrary public ports: admin and SQL listeners stay private.
+    allowed_web = tuple(sorted(set(public_web_ports)))
+    if any(type(port) is not int or port not in (80, 443) for port in allowed_web):
+        raise ValueError('Les seuls ports WAN publics gérés sont TCP/80 et TCP/443')
     interface = wan_interface(executor)
     bridges = docker_bridges(executor)
     exposed = docker_published(executor)
@@ -116,9 +121,13 @@ def secure_firewall(db, apply=False, activate=False, ssh_cidr='', ssh_port=22,
     if exposed:
         for name, addr, port in exposed:
             say(f'ALERTE Docker : {name} publie {addr}:{port} (UFW ne suffit pas)')
+    if allowed_web:
+        say('Site public sélectionné : TCP/' + ', TCP/'.join(str(p) for p in allowed_web)
+            + f' requis sur {interface} (indépendamment de wg0)')
     if not apply:
         say('Simulation uniquement : aucune règle réseau modifiée')
-        return {'wan': interface, 'bridges': bridges, 'active': active, 'published': exposed}
+        return {'wan': interface, 'bridges': bridges, 'active': active,
+                'published': exposed, 'public_web_ports': allowed_web}
 
     if exposed:
         raise RuntimeError('Port Docker publié sur une interface externe : binder à 127.0.0.1 ou utiliser Nginx avant --apply')
@@ -141,16 +150,34 @@ def secure_firewall(db, apply=False, activate=False, ssh_cidr='', ssh_port=22,
                 raise RuntimeError('Le CIDR/port SSH choisi ne couvre pas la session SSH actuelle : activation refusée')
         # Add the SSH rule *before* enabling: remote access must not be lost.
         executor(['ufw', 'allow', 'from', str(net), 'to', 'any', 'port', str(ssh_port), 'proto', 'tcp'])
-        executor(['ufw', 'allow', '80/tcp'])
-        executor(['ufw', 'allow', '443/tcp'])
+        # On first enable, open only the requested public reverse proxy ports.
+        for port in allowed_web:
+            executor(['ufw', 'allow', 'in', 'on', interface, 'to', 'any',
+                      'port', str(port), 'proto', 'tcp'])
         executor(['ufw', 'default', 'deny', 'incoming'])
         executor(['ufw', 'default', 'allow', 'outgoing'])
         executor(['ufw', '--force', 'enable'])
         if not ufw_active(executor):
             raise RuntimeError('UFW non actif après activation')
-        say('UFW activé avec SSH restreint et HTTP/HTTPS autorisés')
+        say('UFW activé avec SSH restreint et ports web sélectionnés')
 
     added = ufw_added(executor)
+    # The selected public site needs ingress on the WAN NIC: an allow rule on
+    # wg0 only does NOT open 80/443 to the Internet. Do not shadow an explicit
+    # existing WAN deny without separate administrator intervention.
+    for port in allowed_web:
+        if has_rule(added, 'deny', interface, port):
+            raise RuntimeError(
+                f'UFW : TCP/{port} explicitement bloqué sur {interface} ; '
+                'modifier cette interdiction sous contrôle administrateur'
+            )
+    for port in allowed_web:
+        if not has_rule(added, 'allow', interface, port):
+            executor(rule_command('allow', interface, port))
+            say(f'WAN {interface}: TCP/{port} autorisé pour le reverse proxy public')
+            added = ufw_added(executor)
+            if not has_rule(added, 'allow', interface, port):
+                raise RuntimeError(f'Autorisation HTTP/HTTPS non vérifiable sur {interface}: TCP/{port}')
     # Inserted denies precede any pre-existing broad ALLOW rule, on the WAN only.
     for port in PRIVATE_TCP_PORTS:
         if not has_rule(added, 'deny', interface, port):
@@ -168,5 +195,6 @@ def secure_firewall(db, apply=False, activate=False, ssh_cidr='', ssh_port=22,
                 added = ufw_added(executor)
                 if not has_rule(added, 'allow', bridge, port):
                     raise RuntimeError(f'Autorisation Docker non vérifiable ({bridge}:{port})')
-    say('Règles UFW pour services internes vérifiées. Vérifier aussi AWS Security Groups.')
-    return {'wan': interface, 'bridges': bridges, 'active': True, 'published': []}
+    say('Règles UFW vérifiées. Le pare-feu VPC AWS/GCP est indépendant de UFW.')
+    return {'wan': interface, 'bridges': bridges, 'active': True,
+            'published': [], 'public_web_ports': allowed_web}
