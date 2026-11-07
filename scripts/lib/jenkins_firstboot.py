@@ -104,7 +104,7 @@ def _password():
     _private_root_directory()
     if PASSWORD.exists() or PASSWORD.is_symlink():
         _secure_file(PASSWORD)
-        password = PASSWORD.read_text(encoding='utf-8').strip()
+        password = PASSWORD.read_text(encoding='utf-8').removesuffix('\n')
         if not 16 <= len(password) <= 256 or any(ch in password for ch in '\r\n\x00'):
             raise RuntimeError('AUTOKOM Jenkins: format du mot de passe initial invalide')
         return password
@@ -140,6 +140,21 @@ def validate_admin_identity(username, full_name, email):
         raise ValueError('E-mail administrateur Jenkins invalide')
 
 
+
+def validate_admin_password(password):
+    """Validate the literal getpass value; pressing Enter is never part of it."""
+    if not isinstance(password, str):
+        raise ValueError('Mot de passe Jenkins : valeur non valide')
+    if not password:
+        raise ValueError('Mot de passe Jenkins vide : saisir au moins 16 caractères avant Entrée')
+    if len(password) < 16:
+        raise ValueError('Mot de passe Jenkins trop court : au moins 16 caractères sont requis')
+    if len(password) > 256:
+        raise ValueError('Mot de passe Jenkins trop long : maximum 256 caractères')
+    if any(ch in password for ch in '\r\n\x00'):
+        raise ValueError('Mot de passe Jenkins : caractères de contrôle interdits')
+    return password
+
 def save_admin_choice(username, full_name, email, password):
     """One explicit admin choice; preserve a legacy AUTO-generated seed safely.
 
@@ -150,8 +165,7 @@ def save_admin_choice(username, full_name, email, password):
     validate_admin_identity(username, full_name, email)
     if username == USER and (PASSWORD.exists() or OLD_PASSWORD.exists()):
         raise ValueError('Identifiant déjà utilisé par AUTOKOM lors de la tentative précédente : choisir un autre administrateur')
-    if not isinstance(password, str) or not 16 <= len(password) <= 256 or any(ch in password for ch in '\r\n\x00'):
-        raise ValueError('Mot de passe Jenkins invalide : entre 16 et 256 caractères, sans retour à la ligne')
+    validate_admin_password(password)
     if selected_admin() is not None:
         raise RuntimeError('Identité Jenkins déjà sauvegardée ; aucun remplacement implicite')
     if AUTH.exists() or AUTH.is_symlink() or TOKEN.exists() or TOKEN.is_symlink():

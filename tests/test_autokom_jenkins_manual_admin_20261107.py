@@ -54,7 +54,7 @@ class AdminChoices(unittest.TestCase):
 
     def test_reuse_without_second_question(self):
         b.save_admin_choice('chef-ikom','Responsable SecOps IKOM','secops@ikom.mg','M0tDePasse!Serveur#123')
-        with mock.patch.object(p,'selected_admin',return_value=b.selected_admin()), mock.patch.object(p,'ask') as ask, mock.patch.object(p,'read_masked') as masked:
+        with mock.patch.object(p,'selected_admin',return_value=b.selected_admin()), mock.patch.object(p,'ask') as ask, mock.patch.object(p,'read_initial_admin_password') as masked:
             self.assertEqual(p.choose_initial_administrator()['username'],'chef-ikom')
             ask.assert_not_called();masked.assert_not_called()
 
@@ -62,7 +62,7 @@ class AdminChoices(unittest.TestCase):
         selections=['chef-ikom','Responsable SecOps IKOM','secops@ikom.mg']
         with mock.patch.object(p,'selected_admin', side_effect=[None]), \
              mock.patch.object(p,'ask',side_effect=selections), \
-             mock.patch.object(p,'read_masked',side_effect=['M0tDePasse!Serveur#123']*2), \
+             mock.patch.object(p,'read_initial_admin_password',side_effect=['M0tDePasse!Serveur#123']*2), \
              mock.patch.object(p,'save_admin_choice',return_value={'username':'chef-ikom'}) as save:
             p.choose_initial_administrator()
             save.assert_called_once_with(*selections,'M0tDePasse!Serveur#123')

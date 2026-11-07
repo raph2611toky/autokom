@@ -29,7 +29,8 @@ from observability_config import load as load_observability_settings
 from autokom_install_permissions import private_install_directory
 from jenkins_firstboot import (bootstrap as bootstrap_first_admin, auth_file_if_available,
                                stage_matrix_restriction, matrix_restriction_pending,
-                               selected_admin, save_admin_choice, admin_username, interrupted_managed_bootstrap)
+                               selected_admin, save_admin_choice, admin_username, interrupted_managed_bootstrap,
+                               validate_admin_identity, validate_admin_password)
 
 ROOT = Path(__file__).resolve().parents[2]
 JENKINS_HOME = Path('/var/lib/jenkins')
@@ -514,11 +515,28 @@ def harden(auth_file, apply, controller_zero=False, disable_agents=False):
     output('✓', 'Contrôles Jenkins appliqués (compte et autorisations existants inchangés)')
 
 
-def choose_initial_administrator():
-    """Administrator chooses the credentials, AUTOKOM applies them automatically.
+def read_initial_admin_password(label):
+    """Read the literal password from the terminal; Enter terminates input.
 
-    Reuse a protected prior selection without asking again after failures.
-    This is not an API-token prompt and never reaches a browser.
+    Unlike a generic token prompt, no .strip() is performed: it must never
+    silently alter the operator's selected Jenkins password.
+    """
+    try:
+        fd = os.open('/dev/tty', os.O_RDWR | os.O_NOCTTY)
+        os.close(fd)
+    except OSError as exc:
+        raise RuntimeError('Terminal interactif requis pour le mot de passe Jenkins') from exc
+    try:
+        return getpass.getpass('  ' + label + ': ')
+    except (EOFError, OSError) as exc:
+        raise RuntimeError('Saisie du mot de passe Jenkins interrompue ou terminal indisponible') from exc
+
+
+def choose_initial_administrator():
+    """Ask identity once, then retry only the masked password if needed.
+
+    Pressing Enter after the password does not insert CR/LF into the secret.
+    Existing Jenkins identities are never reset or overwritten.
     """
     recorded = selected_admin()
     if recorded is not None:
@@ -526,24 +544,37 @@ def choose_initial_administrator():
         return recorded
     _short_step('PREMIER ADMINISTRATEUR JENKINS')
     output('›', 'Renseigner le compte dans le terminal ; AUTOKOM réalisera toute la configuration.')
-    output('›', 'Mot de passe masqué, sauvegardé sous root:0600 ; aucune valeur secrète dans les logs.')
+    output('›', 'Mot de passe invisible pendant la saisie ; Entrée valide, sans faire partie du mot de passe.')
+    output('›', 'Minimum 16 caractères ; aucun secret ni mot de passe partiel ne sera affiché.')
     for attempt in range(3):
         username = ask('Identifiant Jenkins', hint='3 à 40 caractères ; ne pas utiliser le compte temporaire admin').strip()
         full_name = ask('Nom complet du responsable Jenkins').strip()
         email = ask('E-mail de l’administrateur Jenkins').strip()
         try:
-            password = read_masked('Mot de passe Jenkins (16 caractères min.)')
-            confirmation = read_masked('Confirmer le mot de passe Jenkins')
+            validate_admin_identity(username, full_name, email)
+            break
+        except ValueError as error:
+            output('⚠', str(error))
+    else:
+        raise RuntimeError('Identité administrateur Jenkins non valide après trois tentatives')
+
+    for attempt in range(5):
+        password = confirmation = None
+        try:
+            password = read_initial_admin_password('Mot de passe Jenkins (16 caractères min.)')
+            validate_admin_password(password)
+            confirmation = read_initial_admin_password('Confirmer le mot de passe Jenkins')
             if password != confirmation:
-                raise ValueError('La confirmation du mot de passe ne correspond pas')
+                raise ValueError('Les deux mots de passe ne correspondent pas ; saisir de nouveau le mot de passe')
             result = save_admin_choice(username, full_name, email, password)
-            password = confirmation = None
             output('✓', 'Administrateur initial ' + result['username'] + ' enregistré ; aucune saisie Web nécessaire')
             return result
         except ValueError as error:
-            password = confirmation = None
             output('⚠', str(error))
-    raise RuntimeError('Identifiants Jenkins non validés après trois tentatives ; aucune modification de compte')
+            output('›', 'Identifiant, nom complet et e-mail conservés ; seule la saisie du mot de passe est à reprendre.')
+        finally:
+            password = confirmation = None
+    raise RuntimeError('Mot de passe Jenkins non validé après cinq tentatives ; aucun compte modifié')
 
 
 def configure(args):
