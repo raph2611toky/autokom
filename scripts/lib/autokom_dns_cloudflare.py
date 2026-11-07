@@ -116,6 +116,47 @@ class Cloudflare:
                     return item
         return self.request('POST', f'/zones/{self.zone_id}/dns_records', data=payload)['result']
 
+    def ensure_jenkins_a(self, zone, hostname, ipv4):
+        """Reconcile only the admin-selected Jenkins host with the VM public IPv4.
+
+        Never change zone apex, unrelated records, CNAME, AAAA or NS entries.
+        Existing records' proxy mode/TTL are preserved. No delete operation.
+        """
+        zone = validate_name(zone).lower().rstrip('.')
+        hostname = validate_name(hostname).lower().rstrip('.')
+        ipv4 = validate_ip(ipv4, 4)
+        if hostname == zone or not hostname.endswith('.' + zone):
+            raise DNSError('Cloudflare Jenkins : hôte extérieur à la zone, ou domaine racine interdit.')
+        if hostname.split('.')[0] in ('ns1', 'ns2', 'infra', 'origin'):
+            raise DNSError('Cloudflare Jenkins : nom de service DNS réservé, refus de modification.')
+        # Cloudflare validates that the record belongs to its zone ID. Avoid
+        # calling GET /zones/{id}, which requires an extra Zone Read grant:
+        # DNS Read + DNS Write scoped to this zone are sufficient.
+        records = [rec for rec in self.records(record_name=hostname)
+                   if str(rec.get('name', '')).lower().rstrip('.') == hostname]
+        aliases = [rec for rec in records if rec.get('type') in ('CNAME', 'AAAA', 'NS')]
+        if aliases:
+            raise DNSError('Cloudflare Jenkins : CNAME, AAAA ou NS préexistant, conservé ; ne peut pas ajouter A.')
+        addresses = [rec for rec in records if rec.get('type') == 'A']
+        if len(addresses) > 1:
+            raise DNSError('Cloudflare Jenkins : plusieurs A existants, modification automatique refusée.')
+        if addresses:
+            current = addresses[0]
+            if current.get('content') == ipv4:
+                return 'unchanged'
+            record_id = str(current.get('id') or '')
+            if not re.fullmatch(r'[a-fA-F0-9]{32}', record_id):
+                raise DNSError('Cloudflare Jenkins : identifiant du A existant invalide.')
+            # Patch content only; no change in TTL, proxy mode or record metadata.
+            self.request('PATCH', f'/zones/{self.zone_id}/dns_records/{record_id}',
+                         data={'content': ipv4})
+            return 'updated'
+        self.request('POST', f'/zones/{self.zone_id}/dns_records', data={
+            'type': 'A', 'name': hostname, 'content': ipv4,
+            'ttl': 120, 'proxied': False,
+        })
+        return 'created'
+
     def delete(self, record_id):
         if not record_id.isalnum() or len(record_id) > 64:
             raise DNSError('Identifiant d’enregistrement Cloudflare invalide.')

@@ -17,6 +17,7 @@ import sys
 import stat
 import time
 from datetime import datetime, timezone
+import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from menu import pick, ask
@@ -714,6 +715,28 @@ def oracle_config(options):
 
 
 
+def managed_jenkins_previous_url(current_url, initializer):
+    """Authorize migration only from a location previously managed by AUTOKOM."""
+    initializer = Path(initializer)
+    if initializer.is_symlink() or not initializer.is_file():
+        return None
+    content = initializer.read_text(errors='replace')
+    if MANAGED not in content:
+        return None
+    matches = re.findall(r"location\.setUrl\('(https?://[a-z0-9.-]+/)'\)", content)
+    if len(matches) != 1 or matches[0].rstrip('/') != current_url.rstrip('/'):
+        return None
+    from urllib.parse import urlsplit
+    prior = urlsplit(matches[0])
+    if prior.scheme not in ('http', 'https') or not prior.hostname or prior.path != '/':
+        return None
+    try:
+        valid_domain(prior.hostname)
+    except ValueError:
+        return None
+    return matches[0]
+
+
 def configure_jenkins_url(options):
     """Set location for new/uninitialized Jenkins; preserve custom existing settings."""
     if not options.domain:
@@ -721,6 +744,7 @@ def configure_jenkins_url(options):
     destination = Path('/var/lib/jenkins/init.groovy.d/90-autokom-location.groovy')
     url = ('https://' if options.tls != 'none' else 'http://') + options.domain + '/'
     xml = Path('/var/lib/jenkins/jenkins.model.JenkinsLocationConfiguration.xml')
+    previous_autokom_url = None
     if xml.is_file():
         import xml.etree.ElementTree as ET
         try:
@@ -732,15 +756,19 @@ def configure_jenkins_url(options):
             say(f'Jenkins : URL publique déjà conforme ({url})', '✓')
             return
         if current and current not in ('http://localhost:8080/', 'http://127.0.0.1:8080/'):
-            say(f'Jenkins : URL existante {current} != demandée {url}, préservée (à vérifier)', '!')
-            return
+            previous_autokom_url = managed_jenkins_previous_url(current, destination)
+            if previous_autokom_url is None:
+                say(f'Jenkins : URL existante {current} != demandée {url}, préservée (à vérifier)', '!')
+                return
+            say(f'Jenkins : ancienne URL AUTOKOM {current} → {url} (nouveau choix enregistré)', '›')
+    previous_condition = (f" || current == '{previous_autokom_url}'" if previous_autokom_url else '')
     groovy = f"""// {MANAGED}
 import jenkins.model.JenkinsLocationConfiguration
 
 def location = JenkinsLocationConfiguration.get()
 def current = location.getUrl()
 if (current == null || current.trim() == '' ||
-    current == 'http://localhost:8080/' || current == 'http://127.0.0.1:8080/') {{
+    current == 'http://localhost:8080/' || current == 'http://127.0.0.1:8080/'{previous_condition}) {{
     location.setUrl('{url}')
     location.save()
 }}
@@ -807,6 +835,104 @@ def configure_jenkins_listen(options):
         fail('Jenkins inactif : vérifier journalctl -u jenkins')
     say('Jenkins : service actif, port 8080 non exposé publiquement', '✓')
 
+def gcp_public_ipv4():
+    """Detect the VM's real inbound NAT IPv4; never infer it from outgoing curl."""
+    url = ('http://metadata.google.internal/computeMetadata/v1/instance/'
+           'network-interfaces/0/access-configs/0/external-ip')
+    req = urllib.request.Request(url, headers={'Metadata-Flavor': 'Google'})
+    # Do not pass cloud metadata through any configured HTTP proxy.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(req, timeout=2) as response:
+            if response.headers.get('Metadata-Flavor') != 'Google':
+                raise ValueError('Réponse du serveur de métadonnées non authentifiée')
+            candidate = response.read(64).decode('ascii').strip()
+            ip = ipaddress.IPv4Address(candidate)
+            if not ip.is_global:
+                raise ValueError('IPv4 externe non publique')
+            return str(ip)
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise RuntimeError('GCP : impossible de vérifier l’IPv4 publique de cette instance ; DNS non modifié.') from exc
+
+
+def sync_cloudflare_jenkins_domain(domain):
+    """Idempotent sync for selected Jenkins domain only; preserve unrelated DNS.
+
+    Existing setups without a Cloudflare zone file retain the original external
+    DNS workflow. Invalid /etc/autokom/secrets/cloudflare-dns.env is *not* ignored.
+    """
+    from autokom_dns_cloudflare import CONFIG, Cloudflare
+    from autokom_dns_core import DNSError
+    if CONFIG.is_symlink():
+        fail('Cloudflare Jenkins : lien symbolique interdit pour la configuration.')
+    if not CONFIG.exists():
+        say('Cloudflare Jenkins : non configuré ; DNS externe conservé.', '›')
+        return None
+    if not CONFIG.is_file():
+        fail('Cloudflare Jenkins : fichier de configuration non sûr.')
+    status = CONFIG.stat()
+    if status.st_uid != 0 or status.st_mode & 0o077:
+        fail('Cloudflare Jenkins : cloudflare-dns.env doit être root:0600.')
+    from autokom_env_manager import read_env
+    try:
+        conf = read_env(CONFIG)
+        zone = (conf.get('CLOUDFLARE_ZONE_NAME') or '').lower().strip().strip('.')
+        if not zone:
+            raise DNSError('CLOUDFLARE_ZONE_NAME absent dans cloudflare-dns.env.')
+        if domain != zone and not domain.endswith('.' + zone):
+            say(f'{domain} : hors zone Cloudflare {zone} ; DNS externe conservé.', '›')
+            return None
+        ip = gcp_public_ipv4()
+        say(f'Cloudflare : IPv4 publique GCP détectée : {ip}')
+        installation_event('cloudflare:jenkins', 'running')
+        outcome = Cloudflare(conf).ensure_jenkins_a(zone, domain, ip)
+        installation_event('cloudflare:jenkins', 'succeeded', detail=outcome)
+        say(f'Cloudflare : A {domain} → {ip} ({outcome})', '✓')
+        return ip
+    except (DNSError, ValueError, RuntimeError) as exc:
+        installation_event('cloudflare:jenkins', 'failed', detail=type(exc).__name__)
+        fail(f'Cloudflare Jenkins : {exc}')
+
+
+def wait_for_public_dns(domain, expected_ipv4, *, attempts=12, delay=5):
+    """Require both public recursors to resolve to the new VM, not stale AWS."""
+    if not expected_ipv4:
+        return
+    installation_event('dns:jenkins', 'running')
+    for iteration in range(attempts):
+        resolved = []
+        for resolver in ('1.1.1.1', '8.8.8.8'):
+            try:
+                p = subprocess.run(['dig', '@'+resolver, '+time=2', '+tries=1',
+                                    '+short', 'A', domain], capture_output=True,
+                                   text=True, timeout=5, check=False)
+                addresses = [item.strip() for item in p.stdout.splitlines()
+                             if re.fullmatch(r'(?:\d{1,3}\.){3}\d{1,3}', item.strip())]
+                addresses = [a for a in addresses if _is_ipv4(a)]
+                resolved.append(addresses if p.returncode == 0 else [])
+            except (OSError, subprocess.TimeoutExpired):
+                resolved.append([])
+        if all(values == [expected_ipv4] for values in resolved):
+            installation_event('dns:jenkins', 'succeeded')
+            say(f'DNS Jenkins : 1.1.1.1 et 8.8.8.8 convergés vers {expected_ipv4}', '✓')
+            return
+        if iteration == 0 or iteration % 3 == 2:
+            say('DNS Jenkins : propagation en cours ; Certbot ne sera pas lancé prématurément.')
+        if iteration < attempts - 1:
+            with Activity('Propagation DNS Jenkins', delay=0.2):
+                time.sleep(delay)
+    installation_event('dns:jenkins', 'pending')
+    fail(f'DNS Jenkins : propagation incomplète pour {domain}, nouvelle tentative à la reprise. '
+         'Aucun certificat demandé.')
+
+
+def _is_ipv4(value):
+    try:
+        return ipaddress.IPv4Address(value).is_global
+    except ValueError:
+        return False
+
+
 def configure_proxy(options):
     if not options.domain:
         say('Jenkins sans domaine : accès localhost / tunnel SSH', '›')
@@ -821,12 +947,17 @@ def configure_proxy(options):
     if available.exists() or enabled.exists() or enabled.is_symlink():
         fail(f'Fichier Nginx déjà présent pour {domain} : modification refusée')
     if options.tls == 'certbot':
+        target_ip = sync_cloudflare_jenkins_domain(domain)
+        wait_for_public_dns(domain, target_ip)
         try:
             ips = {x[4][0] for x in socket.getaddrinfo(domain, 80, family=socket.AF_INET)}
         except socket.gaierror:
             fail(f'DNS indisponible pour {domain} ; vérifier l’enregistrement A ou le CNAME vers une IPv4 avant Certbot')
         if not ips:
             fail('Le domaine ne résout vers aucune IPv4 (A direct ou via CNAME)')
+        if target_ip and ips != {target_ip}:
+            fail(f'DNS local Jenkins non convergé vers {target_ip} : {domain}. '
+                 'Aucun appel Certbot ; reprendre après propagation.')
     if options.tls == 'provided':
         cert = Path(options.cert).resolve()
         key = Path(options.key).resolve()
@@ -990,7 +1121,9 @@ def main():
         if any(re.search(r'(?:0\.0\.0\.0|\*|\[::\]):8080\s', line) for line in listen.splitlines()):
             require_restart_approval('jenkins', args)
             args.confirm_restart = True
-    configure_jenkins_url(args)
+    # Harden/verify the loopback listener first. Switch Jenkins's own public
+    # URL only AFTER the selected proxy and certificate are operational;
+    # a DNS/ACME failure must not strand Jenkins on an inaccessible new URL.
     configure_jenkins_listen(args)
     if args.db == 'postgresql':
         postgres_config(args)
@@ -999,6 +1132,9 @@ def main():
     elif args.db == 'oracle':
         oracle_config(args)
     configure_proxy(args)
+    configure_jenkins_url(args)
+    if os.environ.get('AUTOKOM_JENKINS_URL_CHANGED') == '1':
+        configure_jenkins_listen(args)
     init = Path('/var/lib/jenkins/secrets/initialAdminPassword')
     if init.exists():
         say('Jenkins : initialisation disponible via sudo cat /var/lib/jenkins/secrets/initialAdminPassword')
