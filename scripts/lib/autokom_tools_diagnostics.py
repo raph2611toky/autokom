@@ -174,6 +174,8 @@ def status(name):
             relevant=[line.strip() for line in lines if re.search(r'\b(?:80|443)/tcp\b',line)]
             print('  › UFW : '+(lines[0].strip() if lines else 'inconnu'))
             for item in relevant[:6]: print('    '+item)
+            if name in ('nginx','prometheus','grafana'):
+                print('  › UFW : DENY Anywhere avec « on INTERFACE » filtre cette interface, pas le loopback lo')
         print('  ! Pare-feu VPC GCP / accessibilité depuis Internet : NON VÉRIFIÉS depuis la VM')
         print('  › Tester depuis Kali : curl -4sSI --connect-timeout 5 https://'+
               ('prometheus.ikom.mg' if name=='prometheus' else 'grafana.ikom.mg' if name=='grafana' else 'jenkins.ikom.mg'))

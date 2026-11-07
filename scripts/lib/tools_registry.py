@@ -285,6 +285,8 @@ def show(name):
     refs.append(('Configurer', 'sudo autokom services configure '+name))
     refs.append(('Statut et proxy',f'autokom tools {name} status'))
     refs.append(('Journal système',f'autokom tools {name} logs --lines 80'))
+    if name=='nginx':
+        refs.append(('Réparer conflit 443','sudo autokom tools nginx repair --check | --apply'))
     refs.append(('Fichiers et alias',f'autokom tools {name} files'))
     refs.append(('Lire un fichier',f'autokom tools {name} cat ALIAS'))
     refs.append(('Éditer un fichier',f'sudo autokom tools {name} nano ALIAS'))

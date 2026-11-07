@@ -2,6 +2,7 @@
 """AUTOKOM phase 2: Jenkins and database service orchestration.
 Run from scripts/install/services.sh; no third-party Python libraries.
 """
+from autokom_nginx_bind_policy import https_listens
 import argparse
 import ipaddress
 import grp
@@ -967,7 +968,7 @@ def configure_proxy(options):
         pub_key = run(['openssl','pkey','-in',str(key),'-pubout']).stdout
         if pub_cert.strip() != pub_key.strip():
             fail('La clé privée ne correspond pas au certificat')
-        tls_blocks = f'''    listen 443 ssl;\n    ssl_certificate {cert};\n    ssl_certificate_key {key};\n'''
+        tls_blocks = https_listens() + f'''    ssl_certificate {cert};\n    ssl_certificate_key {key};\n'''
     else:
         tls_blocks = '    listen 80;\n'
     if options.tls == 'provided':

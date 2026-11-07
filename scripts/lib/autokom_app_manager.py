@@ -6,6 +6,8 @@ Django application process. Does not install arbitrary client applications.
 """
 from __future__ import annotations
 
+from autokom_nginx_bind_policy import tls_detected
+
 import argparse
 from contextlib import contextmanager
 from datetime import datetime
@@ -483,7 +485,7 @@ def write_nginx(domain, email, *, issue_tls, runtime, port=PORT):
         current = target.read_text(encoding='utf-8')
         if 'server_name ' + domain + ';' not in current:
             raise AppError('Le domaine du vhost AUTOKOM existant est différent : reconfiguration manuelle nécessaire.')
-        if 'ssl_certificate ' in current or 'listen 443 ssl' in current:
+        if 'ssl_certificate ' in current or tls_detected(current):
             # Certbot already modified this file; don't overwrite its TLS configuration.
             call(['nginx', '-t'])
             print('  Configuration Nginx/HTTPS existante conservée.')

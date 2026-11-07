@@ -7,6 +7,8 @@ no firewall changes, and --check has no side effects. Root required for apply.
 """
 from __future__ import annotations
 
+from autokom_nginx_bind_policy import https_listens, tls_detected
+
 import argparse
 import base64
 import configparser
@@ -749,8 +751,8 @@ def vhost_content(domain, port, *, prometheus=False, gated=True, hardened_proxy=
             '    location / { return 301 https://$host$request_uri; }\n'
             '}\n'
             'server {\n'
-            '    listen 443 ssl;\n'
-            f'    server_name {domain};\n'
+            + https_listens()
+            + f'    server_name {domain};\n'
             f'    ssl_certificate /etc/letsencrypt/live/{domain}/fullchain.pem;\n'
             f'    ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;\n'
             '    ssl_protocols TLSv1.2 TLSv1.3;\n'
@@ -1294,7 +1296,7 @@ def jenkins_vhost_patch(text, domain):
         domain_names = re.findall(r'(?m)^\s*server_name\s+([^;]+);', block)
         if not any(domain in names.lower().split() for names in domain_names):
             continue
-        if not re.search(r'(?m)^\s*listen\s+(?:\[::\]:)?443\b[^;]*\bssl\b', block):
+        if not tls_detected(block):
             continue
         if re.search(r'location\s+\^~\s+' + metric_path + r'\s*\{', block):
             if re.search(r'(?s)location\s+\^~\s+' + metric_path + r'\s*\{[^}]*\b(?:deny\s+all|return\s+403)\s*;', block):

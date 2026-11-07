@@ -3,6 +3,7 @@
 
 Never logs the full `nginx -T` output (it may include credentials).
 """
+from autokom_nginx_bind_policy import tls_detected
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -73,7 +74,7 @@ def nginx_sites(config: str, check_cert=None) -> dict[str, Site]:
             targets = re.findall(r'\bproxy_pass\s+https?://([^/;\s]+)', server)
             this_proxy = any(t in ('127.0.0.1:8080', 'localhost:8080', '[::1]:8080')
                              or upstreams.get(t, False) for t in targets)
-            https_listen = bool(re.search(r'(?m)^\s*listen\s+(?:\[::\]:)?443\b[^;]*\bssl\b', server))
+            https_listen = tls_detected(server)
             certificate = re.search(r'(?m)^\s*ssl_certificate\s+([^;]+);', server)
             if https_listen:
                 https_proxy_ok |= this_proxy

@@ -92,7 +92,7 @@ def guarded_recover_nginx(*, socket_scan=listeners, command=_checked):
     if current.get(443):
         raise NginxRuntimeError('TCP/443 déjà occupé : ' + summary(current) +
                                 '. AUTOKOM ne stoppe pas le processus propriétaire. '
-                                'Exécuter sudo ss -ltnp et sudo systemctl status nginx.')
+                                'Analyser les écoutes avec sudo autokom tools nginx repair --check.')
     foreign_http = [item for item in current.get(80, []) if item.name != 'nginx']
     if foreign_http:
         raise NginxRuntimeError('TCP/80 occupé par un service autre que Nginx : ' +

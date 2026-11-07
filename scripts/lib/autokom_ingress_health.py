@@ -11,6 +11,7 @@ nginx validation/reload failure. No automatic cloud firewall changes.
 """
 from __future__ import annotations
 
+from autokom_nginx_bind_policy import https_listens
 from pathlib import Path
 import os
 import re
@@ -48,6 +49,12 @@ server {
 
 class IngressError(RuntimeError):
     pass
+
+
+def expected_catchall():
+    """Reflect a verified, explicit TCP/443 per-address policy."""
+    return CATCHALL.replace('    listen 443 ssl default_server;\n',
+                            https_listens(flags='ssl default_server'))
 
 
 def _run(args, *, timeout=12):
@@ -107,7 +114,7 @@ def catchall_ready(*, enabled: Path | None = None, available: Path | None = None
             return False
         if (enabled.is_symlink() and enabled.resolve(strict=True) == available and
                 available.is_file() and not available.is_symlink() and
-                available.read_text(encoding='utf-8') == CATCHALL):
+                available.read_text(encoding='utf-8') == expected_catchall()):
             return True
         # Historical AUTOKOM security module used a 444 catch-all. It is
         # secure and must not be replaced merely to change the error code.
@@ -165,7 +172,7 @@ def reconcile_catchall(*, check=False, enabled_dir=None, available_dir=None):
     try:
         # Exclusive creation ensures a concurrent operator cannot be overwritten.
         with target.open('x', encoding='utf-8') as output:
-            output.write(CATCHALL)
+            output.write(expected_catchall())
         created_target = True
         os.chmod(target, 0o644)
         if stock_link is not None:

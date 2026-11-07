@@ -7,6 +7,8 @@ Jenkins URL/path, container mount paths or an arbitrary executable.
 """
 from __future__ import annotations
 
+from autokom_nginx_bind_policy import https_listens, tls_detected
+
 import fcntl
 import ipaddress
 import json
@@ -618,7 +620,7 @@ def _nginx_config(host,port,tls=False):
         return (f'server {{\n    listen 80;\n    server_name {safe_host};\n'
             '    location /.well-known/acme-challenge/ { root /var/lib/autokom/acme; }\n'
             '    location / { return 308 https://$host$request_uri; }\n}\n'
-            f'server {{\n    listen 443 ssl;\n    server_name {safe_host};\n'
+            f'server {{\n' + https_listens() + f'    server_name {safe_host};\n'
             f'    ssl_certificate {cert}/fullchain.pem;\n'
             f'    ssl_certificate_key {cert}/privkey.pem;\n'
             '    ssl_protocols TLSv1.2 TLSv1.3;\n'
@@ -717,7 +719,7 @@ def _domain_inspect(params):
         return {'active':False}
     expected_upstream='proxy_pass http://127.0.0.1:'+str(state['port'])+';'
     active=('server_name '+host+';' in contents and
-            'listen 443 ssl;' in contents and expected_upstream in contents and
+            tls_detected(contents) and expected_upstream in contents and
             '/etc/letsencrypt/live/'+host+'/fullchain.pem' in contents and
             (Path('/etc/letsencrypt/live')/host/'fullchain.pem').is_file())
     if active:

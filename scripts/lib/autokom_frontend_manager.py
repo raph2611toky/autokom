@@ -7,6 +7,8 @@ Ne touche ni aux vhosts backend, ni à BIND9, Cloudflare, Jenkins ou Docker.
 """
 from __future__ import annotations
 
+from autokom_nginx_bind_policy import tls_detected
+
 import argparse
 import fcntl
 from contextlib import contextmanager
@@ -598,7 +600,7 @@ def setup(args):
         raise FrontendError('Avec --nginx-mode existing, les certificats restent gérés par le vhost existant.')
     if args.nginx_mode == 'managed' and args.tls_mode == 'existing':
         if not VHOST.is_file() or ('ssl_certificate' not in VHOST.read_text(encoding='utf-8') and
-                                   'listen 443 ssl' not in VHOST.read_text(encoding='utf-8')):
+                                   not tls_detected(VHOST.read_text(encoding='utf-8'))):
             raise FrontendError('TLS existing nécessite un vhost AUTOKOM HTTPS déjà actif.')
     previous = read_state() if STATE.is_file() else None
     if previous and previous.get('active') and (previous.get('domain') != front or
@@ -612,7 +614,7 @@ def setup(args):
         existing_vhost_conflicts(front)
         if VHOST.exists() and MARKER not in VHOST.read_text(encoding='utf-8'):
             raise FrontendError('Vhost existant non géré par AUTOKOM : refus de modification.')
-        if VHOST.exists() and 'listen 443 ssl' in VHOST.read_text(encoding='utf-8'):
+        if VHOST.exists() and tls_detected(VHOST.read_text(encoding='utf-8')):
             current = VHOST.read_text(encoding='utf-8')
             if (f'server_name {front};' not in current or
                 '/opt/autokom/frontend/current' not in current or
@@ -664,7 +666,7 @@ def setup(args):
         link = Path('/etc/nginx/sites-enabled') / VHOST.name
         original = VHOST.read_text(encoding='utf-8') if VHOST.exists() else None
         # Ne jamais supprimer la configuration HTTPS créée par Certbot.
-        if original is None or ('listen 443 ssl' not in original and 'ssl_certificate' not in original):
+        if original is None or (not tls_detected(original) and 'ssl_certificate' not in original):
             new_vhost = nginx_config(front, back, backend_port())
         else:
             # Vhost HTTPS déjà émis par Certbot : préserver certificats et redirects.

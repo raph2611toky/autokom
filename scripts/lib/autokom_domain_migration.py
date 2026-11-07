@@ -6,6 +6,8 @@ NGINX upstream is allowed only if it resolves unambiguously to one loopback
 server. Complex multi-location, static, wildcard and remote upstreams need review.
 """
 from __future__ import annotations
+
+from autokom_nginx_bind_policy import https_listens
 import argparse
 import ipaddress
 import json
@@ -245,7 +247,7 @@ def _managed_conf(host,port,ssl=False):
     return (f'# AUTOKOM MIGRATION · {host}\nserver {{\n    listen 80;\n    server_name {host};\n'
             '    location /.well-known/acme-challenge/ { root /var/lib/autokom/acme; }\n'
             '    location / { return 308 https://$host$request_uri; }\n}\n'
-            f'server {{\n    listen 443 ssl;\n    server_name {host};\n'
+            f'server {{\n' + https_listens() + f'    server_name {host};\n'
             f'    ssl_certificate {cert}/fullchain.pem;\n    ssl_certificate_key {cert}/privkey.pem;\n'
             '    ssl_protocols TLSv1.2 TLSv1.3;\n'
             '    client_max_body_size 16m;\n'+main+'}\n')

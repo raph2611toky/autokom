@@ -7,6 +7,8 @@ be authoritative on a configured Cloudflare zone. Root-only env survives in
 """
 from __future__ import annotations
 
+from autokom_nginx_bind_policy import https_listens
+
 import argparse
 from dataclasses import dataclass, replace
 import ipaddress
@@ -157,7 +159,7 @@ server {{
     certificate = str(CERTS / p.target)
     return (base + '    location / { return 308 https://$host$request_uri; }\n}\n'
             +f'''server {{
-    listen 443 ssl;
+{https_listens().rstrip()}
     server_name {p.target};
     ssl_certificate {certificate}/fullchain.pem;
     ssl_certificate_key {certificate}/privkey.pem;

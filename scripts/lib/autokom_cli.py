@@ -771,6 +771,7 @@ def main(argv=None):
             (cmd=='app' and len(arguments)>1 and arguments[1] in ('setup','deploy') and '--check' not in arguments) or
             (cmd=='install' and '--check' not in arguments) or
             (cmd=='logs' and ('--apply' in arguments or (len(arguments)>1 and arguments[1]=='use'))) or
+            (cmd in ('tools','services') and arguments[1:3]==['nginx','repair'] and '--apply' in arguments) or
             (cmd in ('tools','services') and len(arguments)>2 and
               (arguments[2] in ('configure','restart','stop','change','nano','nano-end','env','auth') or (arguments[2]=='show' and '-E' in arguments))))
         if mutating and configured() and '-h' not in arguments and '--help' not in arguments:
@@ -794,6 +795,18 @@ def main(argv=None):
             return app_main(arguments[1:])
         except AppError as exc:
             raise CLIError(str(exc)) from exc
+    # Transactional HTTPS address partition: explicit action, not a silent
+    # side effect of tools status or the recurring install loop.
+    if len(arguments)>=3 and arguments[0] in ('tools','services') and arguments[1:3]==['nginx','repair']:
+        specific=argparse.ArgumentParser(prog='autokom '+arguments[0]+' nginx repair',
+            description='Séparer Nginx HTTPS (IP WAN privée + loopback) du service VPN sur 443')
+        opts=specific.add_mutually_exclusive_group(required=True)
+        opts.add_argument('--check',action='store_true',help='Simulation en lecture seule')
+        opts.add_argument('--apply',action='store_true',help='Appliquer avec sauvegarde et rollback')
+        parsed=specific.parse_args(arguments[3:])
+        call_module('scripts/repair/repair_nginx_443_bind.py',
+                    '--apply' if parsed.apply else '--check')
+        return 0
     # Delegate BEFORE argparse's generic tools/files grammar; all nested -h
     # actions belong to their dedicated parser. Preserve legacy file actions.
     if len(arguments)>=3 and arguments[0] in ('tools','services') and arguments[1] in ('jenkins','grafana') and arguments[2] in ('plugins','pluggins'):
