@@ -21,12 +21,14 @@ import sys
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from menu import pick, ask
 from tool_banner import section, Activity
 from observability_config import load as load_observability_settings
 from autokom_install_permissions import private_install_directory
+from jenkins_plugin_recovery import install_missing
 from jenkins_firstboot import (bootstrap as bootstrap_first_admin, auth_file_if_available,
                                stage_matrix_restriction, matrix_restriction_pending,
                                selected_admin, save_admin_choice, admin_username, interrupted_managed_bootstrap,
@@ -403,9 +405,30 @@ def plugin_ids(profile, include_multibranch_scan=False):
 
 
 def local_plugin_ids(path=JENKINS_HOME / 'plugins'):
+    """Inventory archives without trusting incomplete or corrupted .jpi files.
+
+    The previous installer could leave an unusable archive after an aborted
+    download. Never treat existence alone as a successful plugin installation,
+    and never overwrite an unexpected file automatically.
+    """
     if not path.exists():
         return set()
-    return {p.stem for p in path.iterdir() if p.is_file() and p.suffix in ('.jpi', '.hpi') and not (p.with_name(p.name + '.disabled')).exists()}
+    found = set()
+    for p in path.iterdir():
+        if p.suffix not in ('.jpi', '.hpi'):
+            continue
+        if p.is_symlink() or not p.is_file():
+            raise RuntimeError(f'Archive Jenkins suspecte : {p.name} ; aucun remplacement automatique')
+        try:
+            with zipfile.ZipFile(p) as archive:
+                manifest = archive.read('META-INF/MANIFEST.MF').decode('utf-8', 'replace')
+        except (OSError, zipfile.BadZipFile, KeyError, UnicodeError) as error:
+            raise RuntimeError(f'Archive Jenkins invalide : {p.name} ; diagnostic nécessaire avant reprise') from error
+        if not re.search(r'(?m)^Plugin-Version:\s*[^\s]+', manifest):
+            raise RuntimeError(f'Manifeste Jenkins incomplet : {p.name} ; diagnostic nécessaire')
+        if not (p.with_name(p.name + '.disabled')).exists():
+            found.add(p.stem)
+    return found
 
 
 def active_users():
@@ -620,6 +643,10 @@ def configure(args):
         output('›', 'Après installation : accès administrateur limité par Matrix Authorization')
     present = local_plugin_ids()
     missing = [p for p in plugins if p.split(':',1)[0] not in present]
+    # On a new controller the operator-approved Matrix authorization must be
+    # provisioned before optional UI plugins; avoid leaving it behind Stage View.
+    if matrix_restriction_pending() and 'matrix-auth' in missing:
+        missing = ['matrix-auth'] + [p for p in missing if p != 'matrix-auth']
     _short_step('PLUGINS ET SÉCURITÉ')
     output('+' if missing else '✓', f'Profil {args.profile} · {len(plugins) - len(missing)} présents · {len(missing)} à installer')
     if args.multibranch_scan:
@@ -673,8 +700,8 @@ def j = Jenkins.get()
         _short_step('APPLICATION')
         if missing:
             output('+', f'Installation de {len(missing)} plugins manquants')
-            cli(auth_file, ['install-plugin', *missing], timeout=1800, status='Installation des plugins Jenkins')
-            output('✓', f'Téléchargement de {len(missing)} plugins demandé à Jenkins')
+            install_missing([p.split(':', 1)[0] for p in missing], cli, auth_file, output=output)
+            output('✓', f'Installation des {len(missing)} plugins demandée et confirmée individuellement')
         if args.admin_user:
             handle_admin(auth_file, args.admin_user, args.admin_password_file, True)
         if args.harden:
