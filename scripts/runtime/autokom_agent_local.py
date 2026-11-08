@@ -19,6 +19,12 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 from urllib.request import Request,build_opener,HTTPRedirectHandler
+# The runner is loaded both as a Jenkins script and through importlib in tests.
+_RUNTIME_DIR = str(Path(__file__).resolve().parent)
+if _RUNTIME_DIR not in sys.path:
+    sys.path.insert(0, _RUNTIME_DIR)
+from autokom_frontend_recipes import (ALL_PROFILES, STATIC_PROFILES, recipe as frontend_recipe,
+    static_server_config, validate_profile_source)
 
 UUID=re.compile(r'^[a-f0-9-]{36}$')
 SHA=re.compile(r'^[a-f0-9]{40}$')
@@ -186,8 +192,9 @@ def public_vite_build_args(doc):
 # platform. Never copy those files on top of dependencies installed by npm ci:
 # a non-executable node_modules/.bin/vite otherwise causes exit code 126.
 VITE_CONTEXT_EXCLUDES = frozenset({
-    '.git', 'node_modules', 'dist', '.next', '.nuxt', '.turbo', '.vite',
-    'coverage', '.cache',
+    '.git', '.github', '.ssh', '.aws', '.npmrc', '.env', '.env.local', '.env.production',
+    '.env.development', 'node_modules', 'dist', 'build', 'out', '.next', '.nuxt',
+    '.turbo', '.vite', 'coverage', '.cache',
 })
 
 
@@ -199,22 +206,54 @@ def prepare_vite_build_context(source_dir, destination):
     symlinks outside the checkout. Only the trusted AUTOKOM Dockerfile is used.
     """
     def exclude_generated(_directory, names):
-        return [name for name in names if name in VITE_CONTEXT_EXCLUDES]
+        return [name for name in names if name in VITE_CONTEXT_EXCLUDES or name.startswith('.env.') or name.endswith(('.pem','.key','.p12','.pfx'))]
 
     try:
         shutil.copytree(source_dir, destination, symlinks=True, ignore=exclude_generated)
+        # Source .dockerignore cannot override AUTOKOM trusted build recipe.
+        ignorefile = destination / '.dockerignore'
+        if ignorefile.is_symlink() or ignorefile.is_file():
+            ignorefile.unlink()
+        elif ignorefile.exists():
+            fail('Fichier .dockerignore du projet invalide.')
+        ignorefile.write_text(
+            '.git\nnode_modules\n.env\n.env.*\n*.pem\n*.key\n', encoding='utf-8')
     except (OSError, shutil.Error) as exc:
-        fail('Préparation du contexte Vite impossible; vérifier les fichiers du dépôt GitHub.')
+        fail('Préparation du contexte frontend impossible; vérifier les fichiers du dépôt GitHub.')
+
+
+def protect_static_html_context(destination):
+    # Public static assets only; never serve source or deployment secrets.
+    allowed = {'.html','.htm','.css','.js','.mjs','.json','.txt','.xml',
+        '.webmanifest','.svg','.png','.jpg','.jpeg','.gif','.webp','.avif',
+        '.ico','.bmp','.woff','.woff2','.ttf','.otf','.eot','.wasm','.pdf',
+        '.mp4','.mp3','.webm','.ogg','.wav','.map'}
+    for item in sorted(destination.rglob('*'), key=lambda entry: len(entry.parts), reverse=True):
+        if item.name == 'autokom-nginx.conf':
+            continue
+        if item.is_symlink():
+            item.unlink()
+        elif item.is_file() and (item.name.startswith('.') or item.suffix.lower() not in allowed):
+            item.unlink()
+        elif item.is_dir() and not any(item.iterdir()):
+            item.rmdir()
 
 
 
 def build(doc):
     path=source(doc)
     cfg=doc['build']
-    if cfg['method'] not in ('DOCKERFILE','STATIC'):
-        fail('Buildpacks et AUTO ne sont pas encore pris en charge.')
-    if cfg.get('start_command') or cfg.get('build_command'):
+    profile = cfg.get('profile') or ('vite' if cfg['method'] == 'STATIC' else '')
+    if not isinstance(profile, str):
+        fail('Recette frontend invalide.')
+    if cfg['method'] not in ('DOCKERFILE', 'STATIC', 'AUTO'):
+        fail('Méthode de compilation non prise en charge.')
+    if cfg['method'] == 'DOCKERFILE' and (cfg.get('start_command') or cfg.get('build_command')):
         fail('Commande personnalisée non autorisée pour le runner Dockerfile actuel.')
+    if cfg['method'] == 'STATIC' and profile not in STATIC_PROFILES:
+        fail('Recette statique non autorisée.')
+    if cfg['method'] == 'AUTO' and profile != 'next_server':
+        fail('La recette serveur automatique demandée est inconnue.')
     rid=doc['run_id']
     artifact_dir=Path(os.getenv('AUTOKOM_ARTIFACT_DIR','/var/lib/autokom/build-artifacts'))
     if not artifact_dir.is_dir() or artifact_dir.is_symlink():fail('Répertoire d’artefacts non préparé.')
@@ -227,7 +266,9 @@ def build(doc):
         file=(path/dockerfile).resolve()
         if not file.is_relative_to(path) or not file.is_file():
             fail('Dockerfile introuvable pour le build demandé.')
-    else:
+    elif profile == 'vite':
+        if cfg.get('start_command'):
+            fail('Commande de démarrage personnalisée non autorisée pour Vite.')
         if cfg.get('runtime') != 'STATIC' or cfg.get('output_directory') != 'dist' or cfg.get('port') != 8080:
             fail('Configuration Vite statique invalide.')
         package = path/'package.json'
@@ -242,6 +283,13 @@ def build(doc):
         deps = {**(parsed.get('dependencies') or {}), **(parsed.get('devDependencies') or {})}
         if 'vite' not in deps or 'build' not in (parsed.get('scripts') or {}):
             fail('Projet Vite avec script build requis pour ce build gratuit.')
+        try:
+            from autokom_frontend_recipes import script_name
+            build_script = script_name(cfg.get('build_command'))
+            if build_script not in (parsed.get('scripts') or {}):
+                fail('Script npm demandé absent de package.json.')
+        except ValueError as exc:
+            fail(str(exc))
         # Base images are provisioned by BuildKit and should be digest-pinned in production.
         # Only the trusted AUTOKOM recipe is executed, never an arbitrary user path.
         vite_arg_lines, vite_build_args = public_vite_build_args(doc)
@@ -252,7 +300,7 @@ def build(doc):
             + 'COPY package.json package-lock.json ./\n'
             'RUN npm ci --ignore-scripts --no-audit --no-fund\n'
             'COPY . .\n'
-            'RUN npm run build\n'
+            f'RUN npm run {build_script}\n'
             'RUN printf "%s\\n" "server {" "listen 8080;" "server_name _;" '
             '"root /usr/share/nginx/html;" "index index.html;" '
             '"location / { try_files \\$uri \\$uri/ /index.html; }" '
@@ -262,24 +310,42 @@ def build(doc):
             'COPY --from=builder /app/dist/ /usr/share/nginx/html/\n'
             'EXPOSE 8080\n'
         )
+    else:
+        if cfg.get('port') != 8080 or cfg.get('runtime') != ('NODE' if profile == 'next_server' else 'STATIC'):
+            fail('Port et runtime frontend non conformes à la recette autorisée.')
+        try:
+            validate_profile_source(path, profile, cfg)
+            recipe, frontend_args = frontend_recipe(profile, cfg, doc)
+        except ValueError as exc:
+            fail(str(exc))
     stage('build','RUNNING')
     buildkit_preflight()
     with tempfile.NamedTemporaryFile(dir=artifact_dir,prefix='.building-',suffix='.tar',delete=False) as tmp:
         temp=Path(tmp.name)
     try:
-        if cfg['method'] == 'STATIC':
-            with tempfile.TemporaryDirectory(prefix='autokom-vite-build-') as trusted_dir:
+        if cfg['method'] in ('STATIC', 'AUTO'):
+            with tempfile.TemporaryDirectory(prefix='autokom-frontend-build-') as trusted_dir:
                 trusted_root = Path(trusted_dir)
                 trusted_dockerfile = trusted_root/'recipe'
                 trusted_context = trusted_root/'context'
                 trusted_dockerfile.mkdir()
                 prepare_vite_build_context(path, trusted_context)
+                if profile == 'html':
+                    protect_static_html_context(trusted_context)
+                if profile != 'vite':
+                    # The only nginx configuration in the container comes from AUTOKOM.
+                    conf = trusted_context / 'autokom-nginx.conf'
+                    if conf.is_symlink() or conf.is_file():
+                        conf.unlink()
+                    elif conf.exists():
+                        fail('Configuration Nginx du contexte invalide.')
+                    conf.write_text(static_server_config(), encoding='utf-8')
                 (trusted_dockerfile/'Dockerfile').write_text(recipe, encoding='utf-8')
                 execute(['buildctl','build','--frontend','dockerfile.v0',
                          '--local','context='+str(trusted_context),
                          '--local','dockerfile='+str(trusted_dockerfile),
                          '--opt','filename=Dockerfile',
-                         *vite_build_args,
+                         *(vite_build_args if profile == 'vite' else frontend_args),
                          '--output','type=docker,name=autokom-local:'+rid+',dest='+str(temp)],timeout=1800)
         else:
             execute(['buildctl','build','--frontend','dockerfile.v0',

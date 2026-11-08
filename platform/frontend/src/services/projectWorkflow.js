@@ -4,6 +4,7 @@
 import { projectsApi } from './projectsApi.js'
 import { deploymentsApi } from './deploymentsApi.js'
 import { normalizeFrontendEnv, publicEnvForFramework } from './frontendEnv.js'
+import { availableFrontendProfiles, frontendProfile, supportedFrontend } from './sourceAnalysis.js'
 
 export function errorText(error) {
   const raw = String(error?.message || '')
@@ -26,24 +27,17 @@ export function errorText(error) {
  */
 export function verifiedDeploymentForm(form, analysis) {
   if (!analysis || !analysis.available || analysis.confidence === 'low') {
-    throw new Error('Analyse du dossier GitHub incomplète : sélectionnez le dossier contenant package.json et attendez la détection.');
+    throw new Error('Analyse du dossier GitHub incomplète : sélectionnez le dossier du projet puis patientez.');
   }
-  const selected = {
-    ...form, detectedKind: analysis.applicationType, detectedFramework: analysis.framework,
-    detectedVite: Boolean(analysis.isVite), hasNpmLockfile: Boolean(analysis.hasNpmLockfile),
-    hasDockerfile: Boolean(analysis.hasDockerfile),
+  const candidate = form.advancedBuild?.profile
+  const profile = availableFrontendProfiles(analysis).includes(candidate) ? candidate : frontendProfile(analysis)
+  if (profile !== 'html' && !analysis.hasNpmLockfile) throw new Error('package-lock.json absent du dossier source.')
+  if (!supportedFrontend(analysis, profile)) {
+    throw new Error('Configuration non prise en charge : vérifier le dossier source, le profil et package-lock.json si npm est utilisé.')
   }
-  const supportedVite = selected.detectedKind === 'static' && selected.detectedVite &&
-    ['React', 'Vue', 'Svelte'].includes(selected.detectedFramework)
-  if (selected.pricingPlan === 'free' && !supportedVite) {
-    throw new Error('Le projet sélectionné n’est pas reconnu comme React/Vue/Svelte + Vite. Choisissez le dossier source contenant package.json ; les applications serveur nécessitent une offre adaptée.');
-  }
-  if (supportedVite && !selected.hasNpmLockfile) {
-    throw new Error('package-lock.json absent du dossier source. La compilation automatique gratuite exige ce fichier.');
-  }
-  if (supportedVite && !analysis.build?.buildCommand) {
-    throw new Error('Le script npm « build » est absent de package.json. Ajoutez-le avant de déployer avec Vite.');
-  }
+  const selected = { ...form, frontendProfile: profile, detectedKind: analysis.applicationType,
+    detectedFramework: analysis.framework, detectedVite: Boolean(analysis.isVite),
+    hasNpmLockfile: Boolean(analysis.hasNpmLockfile), hasDockerfile: Boolean(analysis.hasDockerfile) }
   return selected
 }
 
@@ -53,7 +47,9 @@ export function verifiedDeploymentForm(form, analysis) {
 export async function syncFrontendVariables(projectId, envId, rows, analysis) {
   const desired = publicEnvForFramework(rows, analysis)
   const original = (await projectsApi.variables(projectId, envId))?.variables || []
-  const previous = new Map(original.filter(v => v.key.startsWith('VITE_') && !v.secret_id).map(v => [v.key, v]))
+  const prefix = analysis?.profile === 'next_export' || analysis?.profile === 'next_server' ? 'NEXT_PUBLIC_' : analysis?.profile === 'vite' || analysis?.isVite ? 'VITE_' : ''
+  const publicKeys = prefix ? key => key.startsWith(prefix) : key => /^(?:VITE_|REACT_APP_|VUE_APP_)/.test(key)
+  const previous = new Map(original.filter(v => publicKeys(v.key) && !v.secret_id).map(v => [v.key, v]))
   const expected = new Set(desired.map(v => v.key))
   for (const row of desired) {
     const item = previous.get(row.key)
@@ -67,26 +63,39 @@ export async function syncFrontendVariables(projectId, envId, rows, analysis) {
 
 export function toBackendConfiguration(form) {
   const advanced = form.advancedBuild || {}
-  const selectedDirectory = (form.workdir || './').trim()
-  const path = selectedDirectory === './' ? '' : selectedDirectory.replace(/^\.\//, '').replace(/\/$/, '')
-  if (path.startsWith('/') || path.split('/').includes('..') || path.includes('\\')) throw new Error('Dossier source Git invalide.')
-  // AUTO demeure disponible en brouillon ; le runner actuel exige DOCKERFILE pour finaliser.
-  const viteStatic = form.detectedKind === 'static' && form.detectedVite === true &&
-    ['React', 'Vue', 'Svelte'].includes(form.detectedFramework) && (!form.pricingPlan || form.pricingPlan === 'free')
-  if (form.detectedKind === 'service' && form.pricingPlan === 'free') throw new Error('Les applications backend (Next.js SSR, Django, Flask, Node, Java, PHP/Laravel) nécessitent une offre serveur. L’offre gratuite est réservée aux frontends Vite.')
-  if (viteStatic && form.hasNpmLockfile === false) throw new Error('package-lock.json est requis pour construire ce projet Vite automatiquement. Ajoutez le lockfile dans le dossier source GitHub.')
-  if (form.detectedKind && !viteStatic && !form.hasDockerfile) {
-    throw new Error('Ce framework nécessite un Dockerfile ou une offre backend adaptée. La version gratuite automatique couvre actuellement React/Vue/Svelte avec Vite.')
+  const rawSource = (form.workdir || './').trim()
+  const path = rawSource === './' ? '' : rawSource.replace(/^\.\//, '').replace(/\/$/, '')
+  if (path.startsWith('/') || (path && path.split('/').some(part => ['.', '..', ''].includes(part))) || path.includes('\\')) throw new Error('Dossier source Git invalide.')
+  const profile = form.frontendProfile || advanced.profile || (form.detectedFramework === 'Next.js' ? 'next_server' : form.detectedKind === 'static' && form.detectedFramework === 'HTML / CSS / JavaScript' ? 'html' : form.detectedVite ? 'vite' : form.detectedFramework === 'React' || form.detectedFramework === 'Vue' ? 'npm_static' : '')
+  // Keep pre-existing draft behavior for manually supplied Dockerfiles. A free
+  // plan can still never finalize a custom Dockerfile without a paid entitlement.
+  if (!profile && !form.detectedFramework) return {
+    mode: (form.pipelineMode || 'devops').toUpperCase(), branch: form.branch,
+    root_directory: path, build_method: 'DOCKERFILE', runtime_type: 'OTHER',
+    dockerfile_path: String(advanced.dockerfile || 'Dockerfile'),
+    build_command: String(advanced.buildCommand || ''), start_command: String(advanced.startCommand || ''),
+    output_directory: String(advanced.outputDir || ''), auto_deploy: Boolean(form.autoDeploy),
+    auto_deploy_branch: form.autoDeploy ? form.branch : '',
   }
-  const dockerfile = String(advanced.dockerfile || 'Dockerfile').trim()
+
+  if (!['vite', 'npm_static', 'html', 'next_server', 'next_export'].includes(profile)) throw new Error('Recette frontend non autorisée.')
+  const isServer = profile === 'next_server'
+  const isHtml = profile === 'html'
+  const output = isHtml ? '' : isServer ? '.next' : profile === 'next_export' ? 'out' : profile === 'vite' ? 'dist' : String(advanced.outputDir || (form.detectedFramework === 'Vue' ? 'dist' : 'build')).trim()
+  if (output && (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(output) || output.split('/').includes('..'))) throw new Error('Dossier de sortie invalide.')
+  if (profile === 'npm_static' && !['dist', 'build'].includes(output)) throw new Error('Dossier de sortie autorisé : dist ou build.')
+  if (!isHtml && form.hasNpmLockfile === false) throw new Error('package-lock.json absent du dossier source.')
+  const buildCommand = ['vite','npm_static','next_server','next_export'].includes(profile) ? String(advanced.buildCommand || '').trim() : ''
+  if (buildCommand && !/^npm run [a-zA-Z][a-zA-Z0-9:_-]{0,63}$/.test(buildCommand)) throw new Error('Commande de build autorisée : npm run NOM.')
   const mode = (form.pipelineMode || 'devops').toUpperCase()
   if (!['DEVOPS', 'DEVSECOPS'].includes(mode)) throw new Error('Mode de pipeline invalide.')
   return {
     mode, branch: form.branch, root_directory: path,
-    build_method: viteStatic ? 'STATIC' : 'DOCKERFILE', dockerfile_path: dockerfile, runtime_type: viteStatic ? 'STATIC' : 'OTHER',
-    build_command: viteStatic ? '' : String(advanced.buildCommand || ''),
-    start_command: viteStatic ? '' : String(advanced.startCommand || ''),
-    output_directory: viteStatic ? 'dist' : String(advanced.outputDir || ''),
+    build_method: isServer ? 'AUTO' : 'STATIC', runtime_type: isServer ? 'NODE' : 'STATIC',
+    dockerfile_path: 'Dockerfile', build_command: buildCommand,
+    start_command: isServer ? 'npm run start' : '', output_directory: output,
+    settings: { frontend_profile: profile },
+    healthcheck_path: String(advanced.healthcheckPath || '/').trim(),
     auto_deploy: Boolean(form.autoDeploy), auto_deploy_branch: form.autoDeploy ? form.branch : '',
   }
 }
@@ -185,7 +194,7 @@ export async function saveRemoteProject(form, { onCreated = () => {} } = {}) {
   if (!draft?.id) throw new Error('Le backend n’a pas confirmé la configuration.')
   if (form.frontendEnvTouched) {
     await syncFrontendVariables(projectId, envId, form.frontendEnv || [], {
-      isVite: form.detectedVite, applicationType: form.detectedKind,
+      isVite: form.detectedVite, applicationType: form.detectedKind, framework: form.detectedFramework, profile: form.frontendProfile || form.advancedBuild?.profile || (form.detectedFramework === 'Next.js' ? 'next_server' : form.detectedVite ? 'vite' : 'npm_static'),
     })
   }
   return { projectId, environmentId: envId, configurationId: draft.id, configuration: draft }
@@ -209,9 +218,9 @@ export function remoteProjectToForm(detail) {
     pipelineMode: (cfg.mode || 'DEVOPS').toLowerCase(),
     environment: env.slug,
     autoDeploy: Boolean(cfg.auto_deploy),
-    frontendEnv: (detail.variables || []).filter(item => item.key.startsWith('VITE_') && !item.secret_id).map(item => ({key:item.key, value:item.value})),
+    frontendEnv: (detail.variables || []).filter(item => /^(?:VITE_|REACT_APP_|VUE_APP_|NEXT_PUBLIC_)/.test(item.key) && !item.secret_id).map(item => ({key:item.key, value:item.value})),
     frontendEnvTouched: false,
-    advancedBuild: { dockerfile: cfg.dockerfile_path || 'Dockerfile', buildCommand: cfg.build_command || '',
+    advancedBuild: { healthcheckPath: cfg.healthcheck_path || '/', profile: cfg.settings?.frontend_profile || '', dockerfile: cfg.dockerfile_path || 'Dockerfile', buildCommand: cfg.build_command || '',
       startCommand: cfg.start_command || '', outputDir: cfg.output_directory || '', appPort: cfg.internal_port || 8000 },
   }
 }

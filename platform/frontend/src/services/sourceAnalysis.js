@@ -27,32 +27,56 @@ export function detectSource(files, packageJson = null) {
   else if (has('dockerfile')) { runtime = 'Docker'; framework = 'Docker'; applicationType = 'container'; build = { dockerfile: 'Dockerfile' } }
   else { confidence = 'low' }
   if (has('dockerfile')) build.dockerfile = 'Dockerfile'
+  // A lockfile and an npm build script are required by the isolated npm recipes.
+  if (has('package.json') && scripts.build) {
+    build.buildCommand = 'npm run build'
+    if (framework === 'React' && !Boolean(has('vite.config.js') || has('vite.config.ts') || deps.vite)) build.outputDir = 'build'
+    if (framework === 'Vue' && !Boolean(has('vite.config.js') || has('vite.config.ts') || deps.vite)) build.outputDir = 'dist'
+    if (framework === 'Next.js') build.outputDir = '.next'
+  }
   return { framework, runtime, applicationType, hasNpmLockfile: has('package-lock.json'), hasDockerfile: has('dockerfile'),
     isVite: Boolean(has('package.json') && (has('vite.config.js') || has('vite.config.ts') || deps.vite)), confidence, build, resources, available: confidence !== 'low', explanation: 'Analyse indicative des fichiers GitHub. Les commandes exactes seront validées lors du déploiement.', warnings: confidence === 'low' ? ['Structure non reconnue : vérifiez les paramètres avancés.'] : [], applications: [] }
 }
 
-/** Suggestions only: the current production runner decides which recipes are executable. */
-export function recommendFrontendCommands(analysis, files = []) {
+/** A trusted deployment profile, not an arbitrary command runner. */
+export function frontendProfile(analysis) {
+  if (!analysis) return ''
+  if (analysis.framework === 'HTML / CSS / JavaScript') return 'html'
+  if (analysis.framework === 'Next.js') return 'next_server'
+  if (analysis.isVite && analysis.applicationType === 'static' && ['React', 'Vue', 'Svelte'].includes(analysis.framework)) return 'vite'
+  if ((analysis.framework === 'React' || analysis.framework === 'Vue') && analysis.build?.buildCommand) return 'npm_static'
+  return ''
+}
+
+export function availableFrontendProfiles(analysis) {
+  const standard = frontendProfile(analysis)
+  if (!standard) return []
+  return standard === 'next_server' ? ['next_server', 'next_export'] : [standard]
+}
+
+export function supportedFrontend(analysis, choice) {
+  const supported = availableFrontendProfiles(analysis)
+  const profile = choice || supported[0]
+  if (!supported.includes(profile)) return false
+  if (profile === 'html') return true
+  return Boolean(analysis?.hasNpmLockfile && analysis?.build?.buildCommand)
+}
+
+/** Suggestions are explicit; actual commands execute only through approved runner recipes. */
+export function recommendFrontendCommands(analysis, files = [], preferred = '') {
   if (!analysis) return null
-  const names = new Set(files.filter(f => f.type === 'file').map(f => String(f.name).toLowerCase()))
-  const pnpm = names.has('pnpm-lock.yaml'), yarn = names.has('yarn.lock')
-  const packageManager = pnpm ? 'pnpm' : yarn ? 'yarn' : 'npm'
-  const install = pnpm ? 'pnpm install --frozen-lockfile' : yarn ? 'yarn install --frozen-lockfile' : 'npm ci'
-  const runBuild = packageManager === 'npm' ? 'npm run build' : `${packageManager} build`
-  let description = `${analysis.framework} détecté à partir des fichiers de ce dossier.`, output = analysis.build?.outputDir || '', start = analysis.build?.startCommand || '', supported = false
-  if (analysis.isVite && analysis.applicationType === 'static') {
-    output = 'dist'; description = `${analysis.framework} + Vite · frontend statique.`
-    supported = ['React','Vue','Svelte'].includes(analysis.framework) && names.has('package-lock.json') && Boolean(analysis.build?.buildCommand)
-  } else if (analysis.framework === 'Next.js') {
-    output = 'À déterminer (SSR ou export statique)'; start = 'npm run start';
-    description = 'Next.js : détection du framework, publication SSR non activée dans l’offre gratuite.'
-  } else if (analysis.framework === 'React') {
-    output = 'build'; description = 'React sans Vite : recette indicative, runner automatique non disponible.'
-  } else if (analysis.framework === 'HTML / CSS / JavaScript') {
-    return { framework: analysis.framework, install: 'Non nécessaire', build: 'Non nécessaire', output: './', start: 'Serveur web statique', supported: false,
-      description: 'Site HTML/CSS/JS détecté ; le runner gratuit actuel exige Vite. Utilisez un Dockerfile lorsque l’offre correspondante sera disponible.' }
-  } else if (analysis.runtime !== 'Node.js') return { framework: analysis.framework, install: analysis.build?.installCommand || 'Selon le projet', build: analysis.build?.buildCommand || 'Selon le projet', output, start,
-    supported: false, description: 'Source détectée. Le support de déploiement doit être vérifié avec le runtime.' }
-  return { framework: analysis.framework, install, build: analysis.build?.buildCommand ? runBuild : 'Script build absent', output: output || 'À vérifier', start: start || 'Serveur statique',
-    supported, description: supported ? description + ' Pris en charge par le runner actuel.' : description + ' Configuration indicative, ne garantit pas le déploiement.' }
+  const baseProfile = frontendProfile(analysis)
+  const profile = preferred || baseProfile
+  const valid = availableFrontendProfiles(analysis).includes(profile)
+  const output = profile === 'html' ? './' : profile === 'npm_static' ? (analysis.framework === 'Vue' ? 'dist' : 'build') :
+    profile === 'next_export' ? 'out' : profile === 'next_server' ? '.next' : 'dist'
+  const start = profile === 'next_server' ? 'npm run start' : 'Nginx statique'
+  const description = profile === 'next_server' ? 'Next.js avec rendu serveur (SSR), routage et API Node.' :
+    profile === 'next_export' ? 'Next.js export statique : nécessite output: "export" dans next.config.' :
+    profile === 'html' ? 'Site HTML/CSS/JS sans compilation.' :
+    `${analysis.framework} · compilation statique approuvée.`
+  return { profile, framework: analysis.framework, install: profile === 'html' ? 'Non nécessaire' : 'npm ci',
+    build: profile === 'html' ? 'Sans compilation' : 'npm run build', output, start,
+    supported: valid && supportedFrontend(analysis, profile),
+    description: valid ? description : 'Recette non compatible avec cette source ; sélectionner un profil adapté.' }
 }

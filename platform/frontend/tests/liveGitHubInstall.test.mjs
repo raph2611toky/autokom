@@ -35,11 +35,12 @@ test('React et Vue sous Vite = sources, dist est produit au build', () => {
   assert.equal(cfg.root_directory,'portfolio-app')
 })
 
-test('Next.js et backend sans Dockerfile ne sont jamais déclarés prêts sur le plan gratuit', () => {
+test('Next.js détecté configure le runtime Node sans Dockerfile utilisateur', () => {
   const next=detectSource([{name:'package.json',type:'file'}],{dependencies:{next:'*',react:'*'},scripts:{build:'configured',start:'configured'}})
   assert.equal(next.framework,'Next.js')
   assert.equal(next.applicationType,'service')
-  assert.throws(()=>toBackendConfiguration({...plan,detectedKind:'service',detectedFramework:'Next.js'}),/Dockerfile|offre backend/)
+  const nextCfg = toBackendConfiguration({...plan,detectedKind:'service',detectedFramework:'Next.js'})
+  assert.equal(nextCfg.build_method, 'AUTO'); assert.equal(nextCfg.runtime_type, 'NODE')
 })
 
 test('inscription GitHub prépare la continuation vers la liaison des dépôts', async () => {

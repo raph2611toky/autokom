@@ -204,3 +204,9 @@
 .ak-log-console-line code { white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; font:inherit; color:inherit; }
 .ak-log-console-empty { margin:0; color:var(--ak-muted); padding:16px 4px; line-height:1.7; }
 @media(max-width:850px){.ak-log-console-line{grid-template-columns:1fr;row-gap:2px;padding:8px 0;} .ak-log-mode-toggle{width:100%;} .ak-log-mode-toggle button{flex:1;justify-content:center;} }
+
+/* Les recommandations de sécurité frontend restent accessibles sur demande. */
+.ak-env-heading{display:flex;align-items:center;gap:8px}.ak-env-heading h3{margin:0}
+.ak-env-help{position:relative}.ak-env-help summary{list-style:none;display:grid;place-items:center;border:1px solid var(--ak-border);width:28px;height:28px;color:var(--ak-muted);cursor:pointer}
+.ak-env-help summary::-webkit-details-marker{display:none}.ak-env-help[open] summary{color:var(--ak-accent);border-color:var(--ak-accent)}
+.ak-env-help p{position:absolute;left:0;top:32px;z-index:5;width:min(310px,75vw);margin:0!important;padding:12px;background:var(--ak-surface);border:1px solid var(--ak-border-strong);box-shadow:0 8px 30px #0006;font-size:11px;line-height:1.65}

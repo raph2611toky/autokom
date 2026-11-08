@@ -11,37 +11,51 @@ def get_config(env, config_id):
     return cfg
 
 
-def check_configuration(cfg):
-    """Only approve configurations the CURRENT isolated Jenkins runner can build.
+ALLOWED_STATIC_PROFILES = {'vite', 'npm_static', 'next_export', 'html'}
+_NPM_SCRIPT = __import__('re').compile(r'^npm run [A-Za-z][A-Za-z0-9:_-]{0,63}$')
 
-    Other modes remain editable in drafts; never represent AUTO, STATIC or
-    buildpacks as deployable until the actual builder supports them.
-    """
+
+def check_configuration(cfg):
+    """Explicitly allow only the fixed trusted frontend recipes in the isolated runner."""
     issues = {}
+    options = cfg.settings if isinstance(cfg.settings, dict) else {}
+    profile = options.get('frontend_profile', 'vite')
+    if not isinstance(profile, str):
+        return {'settings': 'Recette frontend invalide.'}
     if cfg.build_method == DeploymentConfig.BuildMethod.STATIC:
-        if cfg.runtime_type != DeploymentConfig.RuntimeType.STATIC or cfg.output_directory != 'dist' or cfg.internal_port != 8080:
-            issues['static'] = 'Le mode statique approuvé requiert Vite, dist et le port 8080.'
+        outputs = {'vite': {'dist'}, 'npm_static': {'dist', 'build'},
+                   'next_export': {'out'}, 'html': {''}}
+        if (profile not in ALLOWED_STATIC_PROFILES or cfg.runtime_type != DeploymentConfig.RuntimeType.STATIC or
+                cfg.output_directory not in outputs.get(profile, set()) or cfg.internal_port != 8080):
+            issues['static'] = 'La recette frontend, son dossier de sortie et le port 8080 doivent correspondre.'
+        if cfg.start_command:
+            issues['start_command'] = 'Le site statique est servi automatiquement par Nginx.'
+        if cfg.build_command and (profile == 'html' or not _NPM_SCRIPT.fullmatch(cfg.build_command)):
+            issues['build_command'] = 'Commande de build non autorisée pour cette recette.'
+    elif cfg.build_method == DeploymentConfig.BuildMethod.AUTO:
+        if (profile != 'next_server' or cfg.runtime_type != DeploymentConfig.RuntimeType.NODE or
+                cfg.internal_port != 8080 or cfg.output_directory not in ('', '.next')):
+            issues['build_method'] = 'La recette serveur automatique approuvée est Next.js sur le port privé 8080.'
+        if cfg.build_command and not _NPM_SCRIPT.fullmatch(cfg.build_command):
+            issues['build_command'] = 'Utilisez un script npm run NOM.'
+        if cfg.start_command not in ('', 'npm run start'):
+            issues['start_command'] = 'Démarrage Next.js pris en charge : npm run start.'
     elif cfg.build_method == DeploymentConfig.BuildMethod.DOCKERFILE:
         if not cfg.dockerfile_path:
             issues['dockerfile_path'] = 'Indiquer le chemin du Dockerfile.'
+        if cfg.build_command or cfg.start_command:
+            issues['commands'] = 'Définir les commandes directement dans le Dockerfile.'
     else:
-        issues['build_method'] = 'Buildpacks et AUTO ne sont pas encore exécutables par le runner.'
-    if cfg.build_command or cfg.start_command:
-        issues['commands'] = (
-            'Commandes personnalisées non prises en charge par le runner Dockerfile isolé. '
-            'Configurer les commandes dans le Dockerfile approuvé.')
-    if (cfg.settings or {}).get('install_command'):
-        issues['settings'] = (
-            'install_command ne sera pas exécuté par le runner actuel ; '
-            'placer cette instruction dans le Dockerfile.')
+        issues['build_method'] = 'Buildpacks non encore pris en charge.'
+    if options.get('install_command') not in (None, '', 'npm ci'):
+        issues['settings'] = 'La recette approuvée installe les dépendances avec npm ci.'
     if cfg.auto_deploy and not (cfg.auto_deploy_branch or cfg.branch):
         issues['auto_deploy_branch'] = 'Branche automatique requise.'
     health = cfg.healthcheck_path
     if (not isinstance(health, str) or not health.startswith('/') or
-            len(health) > 128 or any(c in health for c in ('?', '#', '%', '\\', '\r', '\n'))):
+            len(health) > 128 or any(c in health for c in ('?', '#', '%', chr(92), chr(13), chr(10)))):
         issues['healthcheck_path'] = 'Chemin HTTP local invalide pour le broker AUTOKOM.'
     return issues
-
 
 def validate_branch(user, cfg):
     project = cfg.environment.project
@@ -78,13 +92,11 @@ def check_entitlement(cfg):
     if (entitlement is None or entitlement.status != 'ACTIVE' or
             (entitlement.expires_at and entitlement.expires_at <= timezone.now())):
         raise PermissionDenied('Aucun plan actif attribué à cet environnement.')
-    # Server-side product boundary: free includes only the trusted Vite STATIC recipe.
+    # Free plan is still limited by assigned CPU/RAM/quota; only fixed, non-Dockerfile
+    # frontend recipes are allowed. Custom services remain paid.
     # A client must not gain a paid backend runtime by editing request JSON.
-    if not entitlement.resource_plan.is_premium and cfg.build_method != DeploymentConfig.BuildMethod.STATIC:
-        raise PermissionDenied(
-            'L’offre Découverte attend une configuration STATIC (Vite), mais le brouillon actuel est '
-            f'{cfg.build_method}. Revenez à Source GitHub, sélectionnez le dossier contenant package.json '
-            'et package-lock.json, attendez la détection Vite, puis enregistrez de nouveau.')
+    if not entitlement.resource_plan.is_premium and cfg.build_method not in (DeploymentConfig.BuildMethod.STATIC, DeploymentConfig.BuildMethod.AUTO):
+        raise PermissionDenied('L’offre Découverte autorise les recettes frontend approuvées, sans Dockerfile personnalisé.')
     if cfg.mode == 'DEVSECOPS' and entitlement.mode_offer.code != 'DEVSECOPS':
         raise PermissionDenied('Le mode DevSecOps nécessite une autorisation premium.')
     chosen = cfg.resource_plan or entitlement.resource_plan

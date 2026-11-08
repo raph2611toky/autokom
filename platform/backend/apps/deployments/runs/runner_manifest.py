@@ -12,7 +12,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from apps.deployments.runs.models import DeploymentRun
 from apps.projects.environments.models import EnvironmentVariable
 from apps.projects.git.services import decrypt
-from apps.deployments.runs.public_build_env import public_vite_variables
+from apps.deployments.runs.public_build_env import public_frontend_variables
 
 
 def check_runner_signature(run_id, epoch, signature):
@@ -51,13 +51,15 @@ def fetch_runner_manifest(run_id, *, include_secrets=False):
         else:
             variables[item.key] = item.value
     domains = list(env.domains.filter(status='ACTIVE').values_list('hostname', flat=True)) if hasattr(env, 'domains') else []
-    # This runner currently builds Vite STATIC only. Never include secret references,
-    # non-public variables, or values for arbitrary Dockerfiles.
+    # Only non-secret, browser-public values for the selected trusted recipe.
+    # No environment values are forwarded to arbitrary Dockerfiles.
+    profile = (cfg.settings or {}).get('frontend_profile', 'vite')
     public_build = {}
-    if cfg.build_method == 'STATIC' and cfg.runtime_type == 'STATIC':
+    if (cfg.build_method in ('STATIC', 'AUTO') and
+            profile in ('vite', 'npm_static', 'next_export', 'next_server')):
         try:
-            public_build = public_vite_variables(EnvironmentVariable.objects.filter(
-                environment=env, key__startswith='VITE_').values_list('key', 'value', 'secret_id'))
+            public_build = public_frontend_variables(EnvironmentVariable.objects.filter(
+                environment=env).values_list('key', 'value', 'secret_id'), profile)
         except ValueError:
             raise ValidationError('Variables frontend publiques invalides ; corriger la configuration avant le build.')
     return {
@@ -66,6 +68,7 @@ def fetch_runner_manifest(run_id, *, include_secrets=False):
         'installation_id': project.git_connection.installation_id,
         'commit_sha': run.commit_sha, 'branch': run.branch,
         'build': {'method': cfg.build_method, 'runtime': cfg.runtime_type, 'root': cfg.root_directory,
+                  'profile': profile,
                   'dockerfile': cfg.dockerfile_path, 'build_command': cfg.build_command,
                   'start_command': cfg.start_command, 'output_directory': cfg.output_directory,
                   'port': cfg.internal_port, 'healthcheck': cfg.healthcheck_path},

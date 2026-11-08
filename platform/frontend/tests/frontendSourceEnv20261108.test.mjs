@@ -11,10 +11,10 @@ test('React + Vite with lockfile: build recommendations and supported',()=>{
   assert.equal(analysis.framework,'React');assert.equal(analysis.isVite,true)
   assert.equal(result.build,'npm run build');assert.equal(result.output,'dist');assert.equal(result.supported,true)
 })
-test('Next.js SSR identified but not falsely marked deployable',()=>{
+test('Next.js SSR identified as approved Node profile when package lock is available',()=>{
   const items=files(['package.json','package-lock.json'])
   const analysis=detectSource(items,{dependencies:{next:'*',react:'*'},scripts:{build:'configured',start:'configured'}})
-  assert.equal(analysis.framework,'Next.js'); assert.equal(recommendFrontendCommands(analysis,items).supported,false)
+  assert.equal(analysis.framework,'Next.js'); assert.equal(recommendFrontendCommands(analysis,items).supported,true)
 })
 test('static HTML recognized and no misleading npm command',()=>{
   const analysis=detectSource(files(['index.html','style.css']))

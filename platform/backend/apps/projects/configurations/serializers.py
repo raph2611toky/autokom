@@ -31,7 +31,7 @@ class DeploymentConfigWriteSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         # Port listening is a server-side runtime concern, not a public API setting.
-        if attrs.get('build_method') == DeploymentConfig.BuildMethod.STATIC:
+        if attrs.get('build_method') in (DeploymentConfig.BuildMethod.STATIC, DeploymentConfig.BuildMethod.AUTO):
             attrs['internal_port'] = 8080
         for name in ('root_directory', 'output_directory'):
             if name in attrs:
@@ -47,6 +47,9 @@ class DeploymentConfigWriteSerializer(serializers.Serializer):
             raise serializers.ValidationError({'healthcheck_path': 'Chemin devant commencer par /.'})
         if 'settings' in attrs:
             keys = set(attrs['settings'])
-            if keys - {'node_version', 'python_version', 'java_version', 'php_version', 'package_manager', 'install_command'}:
+            if keys - {'node_version', 'python_version', 'java_version', 'php_version', 'package_manager', 'install_command', 'frontend_profile'}:
                 raise serializers.ValidationError({'settings': 'Paramètre non autorisé. Utiliser les variables d’environnement pour les autres valeurs.'})
+            profile = attrs['settings'].get('frontend_profile')
+            if profile is not None and (not isinstance(profile, str) or profile not in {'vite', 'npm_static', 'next_export', 'next_server', 'html'}):
+                raise serializers.ValidationError({'settings': 'Recette frontend inconnue.'})
         return attrs

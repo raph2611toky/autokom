@@ -1,12 +1,12 @@
 /** Public frontend build-time variables. Never store imported contents in localStorage. */
-const PUBLIC_PREFIX = /^(?:VITE_|NEXT_PUBLIC_|REACT_APP_|PUBLIC_)[A-Z][A-Z0-9_]*$/
+const PUBLIC_PREFIX = /^(?:VITE_|NEXT_PUBLIC_|REACT_APP_|VUE_APP_)[A-Z][A-Z0-9_]*$/
 const SENSITIVE = /(?:SECRET|PASSWORD|PRIVATE|TOKEN|CREDENTIAL|API_KEY|ACCESS_KEY|CLIENT_SECRET|SESSION|AUTH_KEY)/i
 const MAX_ROWS = 40
 const MAX_VALUE = 1024
 
 export function validateFrontendEnvEntry(key, value) {
   const name = String(key || '').trim()
-  if (!PUBLIC_PREFIX.test(name) || name.length > 100) throw new Error(`« ${name || 'Clé vide'} » : préfixe frontend public ou nom invalide (VITE_, NEXT_PUBLIC_, REACT_APP_, PUBLIC_).`)
+  if (!PUBLIC_PREFIX.test(name) || name.length > 100) throw new Error(`« ${name || 'Clé vide'} » : préfixe frontend public ou nom invalide (VITE_, NEXT_PUBLIC_, REACT_APP_, VUE_APP_).`)
   if (SENSITIVE.test(name)) throw new Error(`« ${name} » : un secret ne doit jamais être embarqué dans un frontend.`)
   if (typeof value !== 'string' || value.length > MAX_VALUE || /[\x00-\x1F\x7F]/.test(value)) throw new Error(`« ${name} » : valeur trop longue ou multiligne.`)
   return { key: name, value }
@@ -52,14 +52,14 @@ export function parseFrontendEnv(content) {
   return rows
 }
 
-export function publicEnvForFramework(rows, analysis) {
+export function publicEnvForFramework(rows, analysis, requestedProfile = '') {
   const validated = normalizeFrontendEnv(rows)
   if (!validated.length) return []
-  if (!analysis?.isVite || analysis?.applicationType !== 'static') {
-    throw new Error('Les variables de build frontend sont actuellement applicables aux projets Vite statiques. Pour Next.js SSR, un runtime adapté est requis.')
-  }
+  const profile = requestedProfile || (analysis?.framework === 'Next.js' ? 'next_server' : analysis?.isVite ? 'vite' : ['React','Vue'].includes(analysis?.framework) ? 'npm_static' : '')
+  const prefixes = profile === 'vite' ? ['VITE_'] : profile === 'next_export' || profile === 'next_server' ? ['NEXT_PUBLIC_'] :
+    profile === 'npm_static' ? ['VITE_', 'REACT_APP_', 'VUE_APP_'] : []
   for (const row of validated) {
-    if (!row.key.startsWith('VITE_')) throw new Error(`${row.key} : le build Vite n’accepte ici que les clés VITE_.`)
+    if (!prefixes.some(prefix => row.key.startsWith(prefix))) throw new Error(`${row.key} : variable publique incompatible avec le framework sélectionné.`)
   }
   return validated
 }

@@ -24,12 +24,13 @@ test('Vite avec package.json et lockfile => STATIC sans Dockerfile client', () =
   assert.equal(config.root_directory, 'portfolio-app')
 })
 
-test('ne crée jamais un brouillon DOCKERFILE gratuit par détection absente', () => {
+test('détection obligatoire et Next.js traité par recette serveur approuvée', () => {
   assert.throws(() => verifiedDeploymentForm(base, null), /Analyse du dossier GitHub incomplète/)
   const serverSource = detectSource([file('package.json'), file('package-lock.json')], {
     dependencies: { next: '*' }, scripts: { build: 'configured', start: 'configured' }
   })
-  assert.throws(() => verifiedDeploymentForm(base, serverSource), /nécessitent une offre adaptée/)
+  const selected = verifiedDeploymentForm(base, serverSource)
+  assert.equal(toBackendConfiguration(selected).build_method, 'AUTO')
 })
 
 test('Vite gratuit sans lockfile est refusé avant Django', () => {
