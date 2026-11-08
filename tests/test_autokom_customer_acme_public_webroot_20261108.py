@@ -115,7 +115,9 @@ class TestCustomerAcme(unittest.TestCase):
                      patch.object(broker,'_load_state',return_value={'port':32001}),
                      patch.object(broker,'_runtime_dns_env',return_value={'AUTOKOM_ACME_EMAIL':'ops@ikom.mg'}),
                      patch.object(broker,'run',side_effect=fake_run),
-                     patch.object(broker,'_preflight_public_acme_challenge')]
+                     patch.object(broker,'_preflight_public_acme_challenge'),
+                     patch.object(broker,'_verify_customer_https'),
+                     patch.object(broker,'_usable_customer_certificate',side_effect=[False,False,True,False])]
             for item in patches:
                 item.start()
                 self.addCleanup(item.stop)

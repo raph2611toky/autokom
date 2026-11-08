@@ -109,6 +109,11 @@ def run(*, apply=False):
     control_ok = control_inspect().ready
     from autokom_runtime_integrity import inspect as integrity_inspect, reconcile as integrity_reconcile
     from autokom_jenkins_pipeline import inspect as pipeline_inspect, reconcile as pipeline_reconcile, PipelineError
+    from observability_dns01 import CLOUDFLARE_CONFIG, plugin_available, ensure_dns_plugin, DNS01Error
+    # The Cloudflare plugin is an administrative dependency, never installed by
+    # the privileged broker in the middle of a client deployment.
+    dns01_needed = CLOUDFLARE_CONFIG.is_file()
+    dns01_ok = not dns01_needed or plugin_available()
     integrity_ok = integrity_inspect().ready
     try:
         pipeline_ok = pipeline_inspect().ready
@@ -122,6 +127,7 @@ def run(*, apply=False):
     print('  Déploiements : '+('✓ broker et worker accessibles' if control_ok else '+ broker/socket/worker à réconcilier'))
     print('  Sécurité & domaines : '+('✓ scanners et reconciler opérationnels' if integrity_ok else '+ intégration DevSecOps / DNS-HTTPS à réparer'))
     print('  Pipeline Jenkins : '+('✓ Declarative actif' if pipeline_ok else '+ plugin et moteur d’exécution à réparer'))
+    print('  HTTPS clients DNS-01 : '+('✓ plugin Cloudflare prêt' if dns01_needed and dns01_ok else ('+ plugin Certbot à préparer' if dns01_needed else '› aucune configuration Cloudflare DNS-01 locale')))
     print('  Domaine : https://' + front + ' → https://' + back)
     print('  Politique : aucun effacement MySQL, aucun changement UFW, aucun basculement implicite Docker ↔ systemd')
     if not apply:
@@ -165,6 +171,25 @@ def run(*, apply=False):
             print('  ✗ '+failures[-1])
     elif not control_ok and not pipeline_ok:
         failures.append('Jenkins Pipeline : broker/worker indisponibles, réparation différée')
+
+    if dns01_needed and not dns01_ok:
+        try:
+            import subprocess
+            print('  › HTTPS clients : installation ciblée du plugin DNS-01 Cloudflare officiel')
+            def apt_command(argv, *, timeout=300):
+                process = subprocess.run(argv, capture_output=True, text=True,
+                                         timeout=timeout, check=False)
+                if process.returncode:
+                    raise RecoverError('APT a refusé de préparer le plugin DNS-01 ; '
+                                       'voir sudo journalctl -u apt-daily.service et /var/log/apt/term.log')
+            ensure_dns_plugin(apt_command)
+            dns01_ok = plugin_available()
+            if not dns01_ok:
+                raise RecoverError('Plugin Certbot Cloudflare absent après installation')
+            print('  ✓ Certbot DNS-01 Cloudflare prêt pour les sous-domaines clients')
+        except (DNS01Error, RecoverError, OSError, subprocess.TimeoutExpired) as exc:
+            failures.append('HTTPS DNS-01 : '+str(exc))
+            print('  ✗ '+failures[-1])
 
     if not integrity_ok:
         try:
@@ -232,7 +257,8 @@ def run(*, apply=False):
           ' · Frontend='+('OK' if ui_ok else 'ERREUR')+
           ' · Déploiements='+('OK' if control_ok else 'ERREUR')+
           ' · Automatisation='+('OK' if integrity_ok else 'ERREUR')+
-          ' · Pipeline Jenkins='+('OK' if pipeline_ok else 'ERREUR'))
+          ' · Pipeline Jenkins='+('OK' if pipeline_ok else 'ERREUR')+
+          ' · DNS-01='+('OK' if dns01_ok else 'ERREUR'))
     if failures:
         raise RecoverError('; '.join(failures))
     return 0

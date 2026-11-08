@@ -347,7 +347,7 @@ def _release_docker_and_proxy(run):
             'hostname':domain.hostname,'environment_id':str(run.environment_id),
             'managed':domain.domain_type==Domain.Type.SUBDOMAIN,
             'token':_challenge(domain),
-        },timeout=160)
+        },timeout=720)
         domain.status=Domain.Status.ACTIVE
         domain.tls_status='ACTIVE'
         domain.save(update_fields=['status','tls_status'])

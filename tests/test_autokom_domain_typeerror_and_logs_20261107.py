@@ -48,11 +48,14 @@ class DomainActivationRegressionTests(unittest.TestCase):
         helper=patch.object(broker,'run',side_effect=fake_run)
         helper.start()
         self.addCleanup(helper.stop)
-        # Domain activation now verifies a public ACME probe after Nginx reload.
-        # This unit test exercises vhost/rollback without a live Nginx instance.
-        preflight=patch.object(broker,'_preflight_public_acme_challenge')
-        preflight.start()
-        self.addCleanup(preflight.stop)
+        # The managed Cloudflare domain now uses DNS-01 before Nginx is published.
+        # No real CA/Nginx calls are made by this offline regression test.
+        for method, kw in (('_issue_customer_certificate', {'return_value':'dns01'}),
+                           ('_verify_customer_https', {}),
+                           ('_usable_customer_certificate', {'return_value':False})):
+            helper=patch.object(broker,method,**kw)
+            helper.start()
+            self.addCleanup(helper.stop)
 
     def test_domain_activate_creates_owned_vhost_without_typeerror(self):
         result=broker.handle('domain.activate',{
@@ -68,8 +71,9 @@ class DomainActivationRegressionTests(unittest.TestCase):
         config=vhost.read_text()
         self.assertIn('listen 443 ssl;',config)
         self.assertIn('proxy_pass http://127.0.0.1:32001;',config)
-        self.assertTrue(any(command[0]=='certbot' for command, kw in self.calls))
-        self.assertEqual(sum(command==['nginx','-t'] for command,kw in self.calls), 2)
+        # DNS-01 obtains the certificate before publishing a TLS vhost.
+        self.assertFalse(any(command[0]=='certbot' for command, kw in self.calls))
+        self.assertEqual(sum(command==['nginx','-t'] for command,kw in self.calls), 1)
 
     def test_activation_idempotent_and_owner_marker_consistent(self):
         for i in range(2):
@@ -78,12 +82,8 @@ class DomainActivationRegressionTests(unittest.TestCase):
         self.assertEqual(len(list(self.enabled.glob('autokom-customer-*'))),1)
 
     def test_certificate_failure_rolls_back_unpublished_new_vhost(self):
-        def fail_certbot(argv,**kwargs):
-            if argv[0]=='certbot':
-                raise broker.BrokerError('AUTOKOM_CERTBOT_COMMAND_FAILED: Certbot refused.')
-            return ''
-        with patch.object(broker,'run',side_effect=fail_certbot):
-            with self.assertRaisesRegex(broker.BrokerError,'AUTOKOM_ACME_FAILED'):
+        with patch.object(broker, '_issue_customer_certificate',side_effect=broker.BrokerError('AUTOKOM_ACME_CERT_FAILED')):
+            with self.assertRaisesRegex(broker.BrokerError,'AUTOKOM_ACME_CERT_FAILED'):
                 broker.handle('domain.activate',{'hostname':DOMAIN,'environment_id':ENV,'managed':True})
         self.assertFalse((self.available/('autokom-customer-'+DOMAIN+'.conf')).exists())
         self.assertFalse((self.enabled/('autokom-customer-'+DOMAIN+'.conf')).is_symlink())

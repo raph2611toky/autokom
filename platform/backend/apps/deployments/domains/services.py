@@ -86,7 +86,7 @@ def verify_and_activate(user,project_id,environment_id,domain_id):
     runtime=request_control('runtime.status',{'environment_id':str(env.id)},timeout=12).get('runtime')
     if runtime:
         request_control('domain.activate',{'hostname':domain.hostname,
-                        'environment_id':str(env.id),'managed':managed,'token':token},timeout=175)
+                        'environment_id':str(env.id),'managed':managed,'token':token},timeout=720)
         domain.status=Domain.Status.ACTIVE
         domain.tls_status='ACTIVE'
         if not Domain.objects.filter(environment=env, is_primary=True).exclude(pk=domain.pk).exists():
@@ -128,7 +128,7 @@ def activate_managed_domains_for_release(environment):
         request_control('domain.activate', {
             'hostname':domain.hostname, 'environment_id':str(environment.id),
             'managed':True, 'token':token,
-        }, timeout=175)
+        }, timeout=720)
         domain.verified_at=timezone.now()
         domain.status=Domain.Status.ACTIVE
         domain.tls_status='ACTIVE'

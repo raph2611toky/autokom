@@ -21,6 +21,7 @@ import pwd
 import re
 import shutil
 import socket
+import ssl
 import socketserver
 import stat
 import struct
@@ -687,9 +688,11 @@ def _acme_ingress_local_ipv4():
 
 
 def _preflight_public_acme_challenge(host):
-    """Confirm Nginx can read a known public token on the inbound NIC.
+    """Test the actual vhost (not nginx -t) after an asynchronous reload.
 
-    Does not log the token or expose secrets. No external certificate request.
+    Brief bounded retry tolerates old Nginx workers just after reload.  Every
+    attempt uses a fresh connection with the exact Host header.  Never calls
+    Let's Encrypt on an unverified route.
     """
     valid_hostname(host)
     root = WEBROOT / '.well-known' / 'acme-challenge'
@@ -700,94 +703,228 @@ def _preflight_public_acme_challenge(host):
     fd = os.open(file, flags, 0o644)
     try:
         with os.fdopen(fd, 'w', encoding='ascii') as handle:
-            os.fchmod(handle.fileno(), 0o644)  # broker inherits UMask=0077
+            os.fchmod(handle.fileno(), 0o644)  # broker has UMask=0077
             handle.write(marker)
         address = _acme_ingress_local_ipv4() or '127.0.0.1'
-        connection = http.client.HTTPConnection(address, 80, timeout=6)
-        try:
-            connection.request('GET', '/.well-known/acme-challenge/' + name,
-                               headers={'Host': host})
-            response = connection.getresponse()
-            body = response.read(256).decode('ascii', errors='replace')
-            status = response.status
-        except (OSError, http.client.HTTPException) as exc:
-            raise BrokerError('AUTOKOM_ACME_HTTP01_UNREACHABLE: Nginx HTTP/80 inaccessible depuis l’interface locale.') from exc
-        finally:
-            connection.close()
-        if status != 200 or body != marker:
-            raise BrokerError(
-                f'AUTOKOM_ACME_HTTP01_PREFLIGHT_FAILED: Nginx HTTP {status} sur {host} ; '
-                'vérifier vhost et permissions de /var/www/autokom-acme. '
-                'Aucune demande de certificat envoyée.')
+        last_status = 'unreachable'
+        for attempt in range(5):
+            connection = http.client.HTTPConnection(address, 80, timeout=4)
+            try:
+                connection.request('GET', '/.well-known/acme-challenge/' + name,
+                                   headers={'Host': host})
+                response = connection.getresponse()
+                status = response.status
+                body = response.read(256).decode('ascii', errors='replace')
+                last_status = str(status)
+                if status == 200 and body == marker:
+                    logger.info('AUTOKOM_ACME_HTTP01_PREFLIGHT_OK host=%s attempt=%d', host, attempt + 1)
+                    return
+                if status == 200:
+                    last_status = '200-content-mismatch'
+            except (OSError, http.client.HTTPException):
+                last_status = 'unreachable'
+            finally:
+                connection.close()
+            if attempt < 4:
+                time.sleep(0.6)
+        logger.warning('AUTOKOM_ACME_HTTP01_PREFLIGHT_FAILED host=%s result=%s', host, last_status)
+        raise BrokerError('AUTOKOM_ACME_HTTP01_PREFLIGHT_FAILED: '
+                          'Réponse HTTP '+last_status+' ; vérifier le vhost actif et le chemin ACME public.')
     finally:
         file.unlink(missing_ok=True)
 
 
-def _proxy_apply(host,environment):
+def _usable_customer_certificate(host, *, live_root=None):
+    """Reuse only a matching and sufficiently valid Certbot certificate.
+
+    OpenSSL checks both SAN/CN and minimum remaining validity.  nginx -t will
+    additionally verify that the private key matches the certificate.
+    """
+    valid_hostname(host)
+    directory = (Path('/etc/letsencrypt/live') if live_root is None else Path(live_root)) / host
+    certificate = directory / 'fullchain.pem'
+    private_key = directory / 'privkey.pem'
+    if not certificate.is_file() or not private_key.is_file():
+        return False
+    try:
+        # Both OpenSSL tests are mandatory. Combining -checkhost with -checkend
+        # in one invocation can report success based on expiry alone.
+        for args in (['-checkhost', host], ['-checkend', '1209600']):
+            probe = subprocess.run(['openssl', 'x509', '-in', str(certificate),
+                                    '-noout', *args], capture_output=True,
+                                   text=True, timeout=8, check=False)
+            if probe.returncode:
+                return False
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
+def _issue_customer_certificate(host, *, managed):
+    """Use DNS-01 for Cloudflare-managed domains; HTTP-01 for external ones.
+
+    Managed-domain DNS credentials already exist on this VM and are root-only.
+    DNS-01 does not need a temporary Nginx site or open HTTP/80, and Certbot
+    handles the temporary TXT record with the restricted Cloudflare token.
+    """
+    if _usable_customer_certificate(host):
+        logger.info('AUTOKOM_ACME_CERT_REUSED host=%s', host)
+        return 'reused'
+    email = _runtime_dns_env().get('AUTOKOM_ACME_EMAIL', '')
+    if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email):
+        raise BrokerError('AUTOKOM_ACME_EMAIL_MISSING: Adresse TLS absente.')
+    if managed:
+        from observability_dns01 import (plugin_available, ensure_certbot_credentials,
+                                         certbot_dns01_args, DNS01Error)
+        try:
+            settings = _cloudflare_settings()
+            if host == settings['suffix'] or not host.endswith('.' + settings['suffix']):
+                raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH: Domaine hors de la zone gérée.')
+            if not plugin_available():
+                raise BrokerError('AUTOKOM_ACME_DNS01_PLUGIN_MISSING: '
+                                  'Exécuter sudo autokom recover --apply pour installer '
+                                  'le plugin Certbot officiel avant de publier.')
+            credentials = ensure_certbot_credentials(settings['token'])
+            challenge = certbot_dns01_args(host, credentials)
+        except DNS01Error as exc:
+            raise BrokerError('AUTOKOM_ACME_DNS01_SETUP_FAILED: '
+                              'Plugin Certbot Cloudflare ou credentials privés indisponibles.') from exc
+        method = 'dns01'
+    else:
+        challenge = ['--webroot', '-w', str(WEBROOT), '-d', host]
+        method = 'http01'
+    logger.info('AUTOKOM_ACME_CERT_REQUEST host=%s method=%s', host, method)
+    try:
+        run(['certbot', 'certonly', '--non-interactive', '--agree-tos', '--no-eff-email',
+             '--keep-until-expiring', '--cert-name', host, '--email', email, *challenge],
+            timeout=420)
+    except BrokerError as exc:
+        # Never log the Cloudflare token or the raw Certbot command/output.
+        logger.warning('AUTOKOM_ACME_CERT_FAILED host=%s method=%s', host, method)
+        raise BrokerError('AUTOKOM_ACME_CERT_FAILED: Émission du certificat '+method+
+                          ' refusée ; consulter sudo tail -n 100 /var/log/letsencrypt/letsencrypt.log.') from exc
+    if not _usable_customer_certificate(host):
+        raise BrokerError('AUTOKOM_ACME_CERT_NOT_VALID: '
+                          'Certbot terminé sans certificat correspondant et valide.')
+    return method
+
+
+def _verify_customer_https(host, healthcheck):
+    """Prove SNI, CA validation and proxy routing on the local Nginx listener.
+
+    The application may redirect its health endpoint.  A proxy/catchall 404,
+    TLS mismatch or 50x must not be mistaken for a successful publication.
+    """
+    valid_hostname(host)
+    if not isinstance(healthcheck, str) or not healthcheck.startswith('/') or ('\r' in healthcheck or '\n' in healthcheck):
+        raise BrokerError('AUTOKOM_HTTPS_HEALTHCHECK_INVALID: Chemin de validation refusé.')
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection(('127.0.0.1', 443), timeout=6) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as connection:
+                connection.settimeout(6)
+                connection.sendall(('GET '+healthcheck+' HTTP/1.1\r\nHost: '+host+
+                                    '\r\nConnection: close\r\n\r\n').encode('ascii'))
+                response = http.client.HTTPResponse(connection)
+                response.begin()
+                status = response.status
+                response.close()
+    except (ssl.SSLError, OSError, http.client.HTTPException, UnicodeEncodeError) as exc:
+        raise BrokerError('AUTOKOM_HTTPS_SNI_FAILED: '
+                          'TLS/SNI ou connexion au reverse proxy local non validé.') from exc
+    if not 200 <= status < 400:
+        raise BrokerError('AUTOKOM_HTTPS_UPSTREAM_FAILED: '
+                          'Le reverse proxy HTTPS retourne HTTP '+str(status)+'.')
+    logger.info('AUTOKOM_HTTPS_PROXY_VERIFIED host=%s status=%d', host, status)
+
+
+def _proxy_apply(host, environment, *, managed=False):
     valid_hostname(host); valid_id(environment)
-    state=_load_state(environment)
-    if not state:raise BrokerError('Aucune version saine en service pour cet environnement.')
-    # Do not steal an unrelated Nginx vhost.
+    state = _load_state(environment)
+    if not state: raise BrokerError('Aucune version saine en service pour cet environnement.')
+    # Never steal a vhost owned by a different application.
     for directory in (PROXY, ENABLED):
         if directory.is_dir():
-            for file in directory.iterdir():
-                if file.is_file() and not file.is_symlink() and not file.name.startswith('autokom-customer-'):
-                    try:content=file.read_text(encoding='utf-8',errors='replace')
-                    except OSError:continue
-                    if re.search(r'(?m)^\s*server_name\s+[^;]*\b'+re.escape(host)+r'\b',content):
+            for item in directory.iterdir():
+                if item.is_file() and not item.is_symlink() and not item.name.startswith('autokom-customer-'):
+                    try: content = item.read_text(encoding='utf-8', errors='replace')
+                    except OSError: continue
+                    if re.search(r'(?m)^\s*server_name\s+[^;]*\b' + re.escape(host) + r'\b', content):
                         raise BrokerError('Ce domaine est déjà défini dans un vhost Nginx existant.')
-    name='autokom-customer-'+host+'.conf'
-    owner=STATE/('domain-owner-'+host+'.txt')
-    if owner.is_file() and owner.read_text(encoding='utf-8').strip()!=environment:
+    name = 'autokom-customer-' + host + '.conf'
+    owner = STATE / ('domain-owner-' + host + '.txt')
+    if owner.is_symlink() or (owner.is_file() and owner.read_text(encoding='utf-8').strip() != environment):
         raise BrokerError('Domaine déjà attribué à un autre environnement.')
-    path=PROXY/name; symlink=ENABLED/name
-    if path.exists() and (path.is_symlink() or not owner.is_file()):
+    path = PROXY / name
+    symlink = ENABLED / name
+    if (path.exists() and (path.is_symlink() or not owner.is_file())) or (symlink.exists() and not symlink.is_symlink()):
         raise BrokerError('Vhost existant non géré par AUTOKOM : aucune modification.')
-    _prepare_public_acme_webroot()
-    old=path.read_text() if path.exists() else None
+    if symlink.is_symlink() and symlink.resolve() != path.resolve():
+        raise BrokerError('AUTOKOM_DOMAIN_VHOST_TAMPERED: Lien Nginx modifié.')
+    old = path.read_text(encoding='utf-8') if path.exists() else None
+    had_link = symlink.is_symlink()
+
     def publish(content):
-        with tempfile.NamedTemporaryFile('w',dir=PROXY,delete=False,prefix='.autokom-',encoding='utf-8') as f:
-            f.write(content); tmp=f.name
-        os.chmod(tmp,0o644);os.replace(tmp,path)
-        if not symlink.exists():symlink.symlink_to(path)
-        run(['nginx','-t'])
-        run(['systemctl','reload','nginx'])
-    phase = 'nginx_http'
+        with tempfile.NamedTemporaryFile('w', dir=PROXY, delete=False,
+                                         prefix='.autokom-', encoding='utf-8') as handle:
+            handle.write(content)
+            temporary = Path(handle.name)
+        try:
+            os.chmod(temporary, 0o644)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        if not symlink.is_symlink():
+            symlink.symlink_to(path)
+        run(['nginx', '-t'])
+        run(['systemctl', 'reload', 'nginx'])
+
+    phase = 'certificate'
     try:
-        logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started', phase)
-        publish(_nginx_config(host,state['port'],tls=False))
-        # Validate the *real* Nginx vhost and token permissions before asking
-        # Let's Encrypt; a successful nginx -t cannot detect HTTP 403.
-        _preflight_public_acme_challenge(host)
-        phase = 'acme_certificate'
-        logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started', phase)
-        # Certbot --keep-until-expiring reuses a currently valid certificate.
-        if True:
-            email=_runtime_dns_env().get('AUTOKOM_ACME_EMAIL','')
-            if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email):raise BrokerError('AUTOKOM_ACME_EMAIL_MISSING: Adresse de contact TLS absente.')
-            try:
-                run(['certbot','certonly','--webroot','-w',str(WEBROOT),
-                     '-d',host,'--agree-tos','--keep-until-expiring','--non-interactive','--email',email],timeout=130)
-            except BrokerError as exc:
-                raise BrokerError('AUTOKOM_ACME_FAILED: Certificat HTTPS non délivré ; vérifier DNS public et TCP/80.') from exc
+        if _usable_customer_certificate(host):
+            logger.info('AUTOKOM_ACME_CERT_REUSED host=%s', host)
+        else:
+            if not managed:
+                _prepare_public_acme_webroot()
+                phase = 'nginx_http'
+                logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started host=%s', phase, host)
+                publish(_nginx_config(host, state['port'], tls=False))
+                _preflight_public_acme_challenge(host)
+            phase = 'certificate'
+            logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started host=%s', phase, host)
+            _issue_customer_certificate(host, managed=managed)
         phase = 'nginx_https'
-        logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started', phase)
-        publish(_nginx_config(host,state['port'],tls=True))
+        logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started host=%s', phase, host)
+        publish(_nginx_config(host, state['port'], tls=True))
+        phase = 'https_verify'
+        _verify_customer_https(host, state.get('healthcheck', '/'))
         phase = 'ownership_commit'
-        owner.write_text(environment,encoding='utf-8')
-        os.chmod(owner,0o600)
-        logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=success', phase)
+        owner.write_text(environment, encoding='utf-8')
+        os.chmod(owner, 0o600)
+        logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=success host=%s', phase, host)
     except Exception as exc:
-        # Keep the operator's event log useful but do not expose command output,
-        # paths, environment values or third-party API responses.
-        logger.warning('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=failed category=%s',
-                       phase, type(exc).__name__)
-        if old is not None:path.write_text(old,encoding='utf-8')
-        else:path.unlink(missing_ok=True);symlink.unlink(missing_ok=True)
-        subprocess.run(['nginx','-t'],capture_output=True,timeout=10)
-        subprocess.run(['systemctl','reload','nginx'],capture_output=True,timeout=15)
+        # Retain the exact prior healthy vhost; don't expose a half-built
+        # HTTPS configuration referencing a missing certificate.
+        logger.warning('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=failed category=%s host=%s',
+                       phase, type(exc).__name__, host)
+        if old is not None:
+            with tempfile.NamedTemporaryFile('w', dir=PROXY, delete=False,
+                                             prefix='.autokom-restore-', encoding='utf-8') as stream:
+                stream.write(old)
+                previous = Path(stream.name)
+            os.chmod(previous, 0o644)
+            os.replace(previous, path)
+        else:
+            path.unlink(missing_ok=True)
+            if not had_link:
+                symlink.unlink(missing_ok=True)
+        try:
+            run(['nginx', '-t'])
+            run(['systemctl', 'reload', 'nginx'])
+        except BrokerError:
+            logger.error('AUTOKOM_DOMAIN_ROLLBACK_INCOMPLETE host=%s', host)
         raise
-    return {'active':True,'hostname':host}
+    return {'active': True, 'hostname': host}
 
 
 def _domain_inspect(params):
@@ -927,7 +1064,7 @@ def _activate_owned_domain(params):
     host=valid_hostname(params.get('hostname'))
     env=valid_id(params.get('environment_id'))
     _check_dns(host,params.get('token'),params.get('managed') is True)
-    return _proxy_apply(host,env)
+    return _proxy_apply(host, env, managed=params.get('managed') is True)
 
 
 def handle(action,params):
