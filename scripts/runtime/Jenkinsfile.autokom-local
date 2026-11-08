@@ -20,15 +20,22 @@ pipeline {
                         def repositoryName = metadataParts[0]
                         def commitSha = metadataParts[1]
                         // A public repository can be cloned without a static token.
-                        // The private-repository path requires a separate scoped credential.
+                        // Private snapshots are served by the authenticated AUTOKOM backend.
                         def repositoryUrl = 'https://github.com/' + repositoryName + '.git'
-                        def publicRepo = (sh(script: 'set +x; git ls-remote --exit-code ' + repositoryUrl + ' HEAD >/dev/null 2>&1', returnStatus: true) == 0)
-                        def remoteConfig = [url:repositoryUrl]
-                        if (!publicRepo) { remoteConfig.credentialsId = 'autokom-github-app' }
-                        checkout([$class:'GitSCM',branches:[[name:commitSha]],
-                           doGenerateSubmoduleConfigurations:false,
-                           extensions:[[$class:'CloneOption',shallow:true,depth:1,noTags:true]],
-                           userRemoteConfigs:[remoteConfig]])
+                        // Wipe the previous tenant before probing the remote, including .git/config.
+                        deleteDir()
+                        // Anonymous check: never let a cached credential misclassify a private repo.
+                        def publicRepo = (sh(script: 'set +x; GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false GIT_CONFIG_GLOBAL=/dev/null git -c credential.helper= ls-remote --exit-code ' + repositoryUrl + ' HEAD >/dev/null 2>&1', returnStatus: true) == 0)
+                        if (publicRepo) {
+                            checkout([$class:'GitSCM',branches:[[name:commitSha]],
+                               doGenerateSubmoduleConfigurations:false,
+                               extensions:[[$class:'CloneOption',shallow:true,depth:1,noTags:true]],
+                               userRemoteConfigs:[[url:repositoryUrl]]])
+                        } else {
+                            // Django fetches the exact, authorized GitHub App snapshot.
+                            // Never install a permanent cross-tenant Jenkins Git credential.
+                            sh 'set +x; python3 /opt/autokom/source/scripts/runtime/autokom_agent_local.py private-source'
+                        }
                     }
                     echo 'AUTOKOM_STAGE:source:SUCCESS'
                 }

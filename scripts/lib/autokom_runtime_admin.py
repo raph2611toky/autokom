@@ -392,6 +392,19 @@ except (OSError,ValueError,KeyError,TypeError):
     if status!=200:
         raise SetupError('Le job Jenkins n’est pas accessible au compte de service (code HTTP '+str(status)+').')
     print('  ✓ Job Jenkins accessible avec les identifiants du runtime.')
+    # A job can be accessible while still running the *old* trusted Jenkinsfile.
+    # Detect drift before declaring builds ready; do not overwrite UI changes here.
+    code, config_xml = jenkins_request(env, 'GET', '/job/'+quote(job,safe='')+'/config.xml')
+    if code != 200:
+        raise SetupError('Impossible de vérifier le Jenkinsfile approuvé (Job/Configure requis).')
+    try:
+        active_script = ET.fromstring(config_xml).findtext('./definition/script')
+    except ET.ParseError as exc:
+        raise SetupError('Configuration Jenkinsfile invalide ; aucune synchronisation automatique.') from exc
+    if not JOB_SCRIPT.is_file() or active_script != JOB_SCRIPT.read_text(encoding='utf-8'):
+        raise SetupError('Jenkins utilise un ancien pipeline AUTOKOM : '
+                         'sudo autokom runtime jenkins --apply pour synchroniser le job.')
+    print('  ✓ Jenkinsfile AUTOKOM synchronisé avec le runtime installé.')
     from autokom_jenkins_pipeline import inspect as pipeline_inspect, PipelineError
     try:
         pipeline_state=pipeline_inspect(env)

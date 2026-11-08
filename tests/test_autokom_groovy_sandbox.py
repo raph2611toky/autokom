@@ -49,7 +49,9 @@ class SandboxPipelineTests(unittest.TestCase):
         self.assertIn("credentialsId:'autokom-runner-key'", pipeline)
         self.assertIn('autokom-isolated', pipeline)
         self.assertIn('AUTOKOM_STAGE:source:SUCCESS', pipeline)
-        self.assertIn("if (!publicRepo) { remoteConfig.credentialsId = 'autokom-github-app' }", pipeline)
+        self.assertNotIn("credentialsId = 'autokom-github-app'", pipeline)
+        self.assertIn("private-source", pipeline)
+        self.assertIn("deleteDir()", pipeline)
 
     def test_pipeline_contract_rejects_injected_text(self):
         pattern = re.compile(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+ [a-f0-9]{40}$')

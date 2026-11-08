@@ -11,7 +11,7 @@ from rest_framework.permissions import IsAdminUser
 
 from config.views import SwaggerLoginPageAPIView, SwaggerLoginSubmitAPIView, SwaggerLogoutAPIView
 from config.health import PlatformHealthAPIView
-from apps.deployments.runs.views import RunnerManifestAPIView
+from apps.deployments.runs.views import RunnerManifestAPIView, RunnerSourceArchiveAPIView
 
 # Only client APIs enter the generated schema; no internal/admin endpoints.
 client_api_patterns = [
@@ -49,6 +49,9 @@ urlpatterns = [
     path('api/internal/runner/deployments/<uuid:run_id>/manifest/',
          RunnerManifestAPIView.as_view(),
          name='internal-runner-manifest'),
+    path('api/internal/runner/deployments/<uuid:run_id>/source/',
+         RunnerSourceArchiveAPIView.as_view(),
+         name='internal-runner-source'),
     path('api/docs/', admin_documentation(schema_view.with_ui('swagger', cache_timeout=0)), name='swagger-ui'),
     path('api/schema.json', admin_documentation(schema_view.without_ui(cache_timeout=0)), name='swagger-schema'),
     path('api/redoc/', admin_documentation(schema_view.with_ui('redoc', cache_timeout=0)), name='swagger-redoc'),

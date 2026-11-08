@@ -218,6 +218,28 @@ class RunnerManifestAPIView(APIView):
             return handle_error(exc, 'runner_manifest')
 
 
+class RunnerSourceArchiveAPIView(APIView):
+    """Runner-only pinned GitHub snapshot; no OAuth token sent to Jenkins."""
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'runner_manifest'
+
+    def get(self, request, run_id):
+        try:
+            check_runner_signature(run_id, request.headers.get('X-Autokom-Runner-Time'),
+                                   request.headers.get('X-Autokom-Runner-Signature'))
+            from django.http import FileResponse
+            from apps.deployments.runs.github_sources import download_source_archive
+            response = FileResponse(download_source_archive(run_id), content_type='application/zip')
+            response['Cache-Control'] = 'no-store, private'
+            response['X-Content-Type-Options'] = 'nosniff'
+            response['Content-Disposition'] = 'attachment; filename="autokom-source.zip"'
+            return response
+        except Exception as exc:
+            return handle_error(exc, 'runner_source_archive')
+
+
 class RuntimeLogsAPIView(APIView):
     parser_classes = [JSONParser]
     permission_classes = [IsClientUser]
