@@ -148,12 +148,30 @@ def require_loki_only(backend):
 
 
 def new_backup():
-    stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-    BACKUP_ROOT.mkdir(parents=True,exist_ok=True,mode=0o700)
-    os.chmod(BACKUP_ROOT,0o700)
-    result=BACKUP_ROOT/stamp
-    result.mkdir(mode=0o700)
-    return result
+    """Reserve a unique backup directory without ever reusing an old snapshot.
+
+    Multiple independent stages (migration and legacy-config relocation) can
+    request backups during the same second. A timestamp alone is not unique;
+    do not let FileExistsError abort an otherwise safe recovery and NEVER
+    delete or overwrite the existing backup to make room.
+    """
+    if BACKUP_ROOT.is_symlink():
+        raise RuntimeErrorSafe('Répertoire de sauvegardes symbolique refusé : ' + str(BACKUP_ROOT))
+    BACKUP_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not BACKUP_ROOT.is_dir() or BACKUP_ROOT.is_symlink():
+        raise RuntimeErrorSafe('Répertoire de sauvegardes invalide : ' + str(BACKUP_ROOT))
+    os.chmod(BACKUP_ROOT, 0o700)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    # mkdir is atomic: concurrent AUTOKOM processes cannot select one path.
+    for sequence in range(10000):
+        name = stamp if sequence == 0 else f'{stamp}-{sequence:04d}'
+        destination = BACKUP_ROOT / name
+        try:
+            destination.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        return destination
+    raise RuntimeErrorSafe('Impossible de réserver une sauvegarde Loki unique : '+stamp)
 
 
 def backup_configs(target):
@@ -261,13 +279,16 @@ def prepare_native():
     prepare_native_data()
     expected = native_files()
     marker = (NATIVE / '.autokom-installed').is_file()
+    # Validate ALL managed paths before changing any file; an operator-edited
+    # path must not leave the installation half-upgraded. Save legacy files
+    # once per repair, not once per config (which caused duplicate snapshots).
+    to_create = []
+    legacy_backup_needed = False
     for key, content in expected.items():
         previous = NATIVE / key
         managed = CONFIG_DIR / key
         if previous.is_symlink() or managed.is_symlink():
             raise RuntimeErrorSafe('Fichier de configuration Loki symbolique interdit')
-        # Old AUTOKOM files must match byte-for-byte: refuse custom operator
-        # changes rather than quietly masking them with a newly generated file.
         if previous.exists():
             old = previous.read_text()
             allowed = (content, content.replace(str(DATA), str(LEGACY_DATA)))
@@ -276,11 +297,14 @@ def prepare_native():
         if managed.exists() and managed.read_text() != content:
             raise RuntimeErrorSafe('Configuration Loki non gérée : '+str(managed))
         if not managed.exists():
-            if previous.exists() and marker:
-                location = new_backup()
-                backup_configs(location)
-                print('  ✓ Sauvegarde des anciennes configurations Loki : '+str(location))
-            secure_save(managed, content)
+            to_create.append((managed, content))
+            legacy_backup_needed |= previous.exists() and marker
+    if legacy_backup_needed:
+        location = new_backup()
+        backup_configs(location)
+        print('  ✓ Sauvegarde unique des anciennes configurations Loki : '+str(location))
+    for managed, content in to_create:
+        secure_save(managed, content)
     if cmd('id', '-u', 'autokom-loki', check=False).returncode != 0:
         cmd('useradd', '--system', '--home-dir', str(DATA), '--shell', '/usr/sbin/nologin', 'autokom-loki')
     # Package service usually runs as `alloy`; ensure reading journald & nginx.
@@ -297,12 +321,30 @@ def prepare_native():
     unit_alloy=Path('/etc/systemd/system/alloy.service.d/90-autokom.conf')
     loki_binary=shutil.which('loki')
     secure_save(unit_loki,'[Service]\nExecStart=\nExecStart='+loki_binary+' -config.file='+str(native_loki)+'\nUser=autokom-loki\nGroup=autokom-loki\nNoNewPrivileges=true\n')
-    secure_save(NATIVE/'alloy.env','CONFIG_FILE="'+str(native_alloy)+'"\nCUSTOM_ARGS="--server.http.listen-addr=127.0.0.1:12345"\n')
+    secure_save(NATIVE/'alloy.env','CONFIG_FILE="'+str(native_alloy)+'"\nCUSTOM_ARGS="--server.http.listen-addr=127.0.0.1:12345"\nSTORAGE_DIRECTORY="/var/lib/alloy/data"\n')
     secure_save(unit_alloy,'[Service]\nEnvironmentFile=\nEnvironmentFile='+str(NATIVE/'alloy.env')+'\nNoNewPrivileges=true\n')
     cmd('systemctl','daemon-reload')
     cmd(shutil.which('alloy'),'validate',str(native_alloy),timeout=90)
     secure_save(NATIVE/'.autokom-installed','loki=3.7.0\nalloy=1.11.0\n',0o600)
     print('  ✓ Loki/Alloy : configurations et stockage accessibles aux comptes dédiés')
+
+
+def validate_native_permissions():
+    """Check that the daemon identities can traverse their real paths.
+
+    `alloy validate` under root alone is not proof that systemd's alloy user
+    can read its config. Likewise Loki needs access to its data directory.
+    """
+    for account, path, needed in (
+        ('autokom-loki', CONFIG_DIR / 'loki.yaml', 'r'),
+        ('autokom-loki', DATA, 'w'),
+        ('alloy', CONFIG_DIR / 'config.alloy', 'r'),
+    ):
+        result = cmd('runuser', '-u', account, '--', 'test', '-'+needed,
+                     str(path), check=False)
+        if result.returncode:
+            raise RuntimeErrorSafe(
+                f'Droits {account} insuffisants sur {path} ; services non relancés')
 
 
 def chown_loki(root):
@@ -342,6 +384,41 @@ def docker_volume_path():
     if not mount.is_dir() or mount.is_symlink() or not mount.resolve().is_relative_to(Path(root).resolve()):
         raise RuntimeErrorSafe('Chemin volume Docker invalide')
     return mount
+
+
+def native_journal_hints():
+    """Categorize startup errors without exposing log lines or credentials.
+
+    The operator should not have to collect basic service crash diagnostics
+    after each automated recovery. Raw journals may contain private headers or
+    environment values: never echo them in the unattended recovery summary.
+    """
+    categories = (
+        ('permission denied', 'permissions ou sandbox systemd'),
+        ('access denied', 'permissions ou sandbox systemd'),
+        ('read-only file system', 'stockage en lecture seule'),
+        ('address already in use', 'collision de port local'),
+        ('unknown flag', 'option de démarrage non prise en charge'),
+        ('flag provided but not defined', 'option de démarrage non prise en charge'),
+        ('failed to parse', 'fichier de configuration invalide'),
+        ('error parsing', 'fichier de configuration invalide'),
+        ('failed to load config', 'fichier de configuration inaccessible ou invalide'),
+        ('no such file or directory', 'chemin de configuration ou de stockage absent'),
+        ('out of memory', 'mémoire insuffisante'),
+    )
+    findings = []
+    for unit in UNITS:
+        result = cmd('journalctl', '-u', unit+'.service', '-n', '60',
+                     '--no-pager', '-o', 'cat', check=False, timeout=10)
+        if result.returncode:
+            continue
+        lines = result.stdout.lower().splitlines()
+        for line in reversed(lines):
+            match = next((label for pattern, label in categories if pattern in line), None)
+            if match:
+                findings.append(f'{unit}: {match}')
+                break
+    return '; '.join(findings)
 
 
 def native_failure_summary():
@@ -386,8 +463,10 @@ def wait_ready():
                     cmd('systemctl', 'reset-failed', unit, check=False)
                     cmd('systemctl', 'start', unit, check=False)
             time.sleep(3)
+    diagnosis = native_journal_hints()
     raise RuntimeErrorSafe('Loki/Alloy non prêts après démarrage et reprise ciblée : '
                            + native_failure_summary()
+                           + (' ; indices des journaux : '+diagnosis if diagnosis else '')
                            + '. Logs précis : journalctl -u loki -u alloy -n 80 --no-pager')
 
 
@@ -413,6 +492,7 @@ def migrate_to_native(backend):
             # Repair native config and data permissions before retrying units.
             prepare_native()
             chown_loki(DATA)
+            validate_native_permissions()
             for unit in UNITS:
                 cmd('systemctl', 'reset-failed', unit, check=False)
                 cmd('systemctl', 'enable', '--now', unit, check=False)
@@ -455,6 +535,7 @@ def migrate_to_native(backend):
             raise
     try:
         chown_loki(DATA)
+        validate_native_permissions()
         for unit in UNITS:cmd('systemctl','enable','--now',unit)
         wait_ready()
         verify_canary()
