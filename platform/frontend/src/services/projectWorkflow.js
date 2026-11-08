@@ -4,7 +4,7 @@
 import { projectsApi } from './projectsApi.js'
 import { deploymentsApi } from './deploymentsApi.js'
 import { normalizeFrontendEnv, publicEnvForFramework } from './frontendEnv.js'
-import { availableFrontendProfiles, frontendProfile, supportedFrontend } from './sourceAnalysis.js'
+import { availableFrontendProfiles, frontendProfile, supportedFrontend, BACKEND_PROFILES } from './sourceAnalysis.js'
 
 export function errorText(error) {
   const raw = String(error?.message || '')
@@ -31,9 +31,9 @@ export function verifiedDeploymentForm(form, analysis) {
   }
   const candidate = form.advancedBuild?.profile
   const profile = availableFrontendProfiles(analysis).includes(candidate) ? candidate : frontendProfile(analysis)
-  if (profile !== 'html' && !analysis.hasNpmLockfile) throw new Error('package-lock.json absent du dossier source.')
+  if (['vite', 'npm_static', 'next_server', 'next_export', 'node_express', 'node_nest'].includes(profile) && !analysis.hasNpmLockfile) throw new Error('package-lock.json absent du dossier source.')
   if (!supportedFrontend(analysis, profile)) {
-    throw new Error('Configuration non prise en charge : vérifier le dossier source, le profil et package-lock.json si npm est utilisé.')
+    throw new Error('Source non prise en charge : vérifier le profil et les fichiers de dépendances du dossier sélectionné.')
   }
   const selected = { ...form, frontendProfile: profile, detectedKind: analysis.applicationType,
     detectedFramework: analysis.framework, detectedVite: Boolean(analysis.isVite),
@@ -78,22 +78,23 @@ export function toBackendConfiguration(form) {
     auto_deploy_branch: form.autoDeploy ? form.branch : '',
   }
 
-  if (!['vite', 'npm_static', 'html', 'next_server', 'next_export'].includes(profile)) throw new Error('Recette frontend non autorisée.')
-  const isServer = profile === 'next_server'
+  if (!['vite', 'npm_static', 'html', 'next_server', 'next_export', ...BACKEND_PROFILES].includes(profile)) throw new Error('Recette de déploiement non autorisée.')
+  const isBackend = BACKEND_PROFILES.includes(profile)
+  const isServer = profile === 'next_server' || isBackend
   const isHtml = profile === 'html'
-  const output = isHtml ? '' : isServer ? '.next' : profile === 'next_export' ? 'out' : profile === 'vite' ? 'dist' : String(advanced.outputDir || (form.detectedFramework === 'Vue' ? 'dist' : 'build')).trim()
+  const output = isHtml || isBackend ? '' : isServer ? '.next' : profile === 'next_export' ? 'out' : profile === 'vite' ? 'dist' : String(advanced.outputDir || (form.detectedFramework === 'Vue' ? 'dist' : 'build')).trim()
   if (output && (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(output) || output.split('/').includes('..'))) throw new Error('Dossier de sortie invalide.')
   if (profile === 'npm_static' && !['dist', 'build'].includes(output)) throw new Error('Dossier de sortie autorisé : dist ou build.')
-  if (!isHtml && form.hasNpmLockfile === false) throw new Error('package-lock.json absent du dossier source.')
+  if (!isHtml && !isBackend && form.hasNpmLockfile === false) throw new Error('package-lock.json absent du dossier source.')
   const buildCommand = ['vite','npm_static','next_server','next_export'].includes(profile) ? String(advanced.buildCommand || '').trim() : ''
   if (buildCommand && !/^npm run [a-zA-Z][a-zA-Z0-9:_-]{0,63}$/.test(buildCommand)) throw new Error('Commande de build autorisée : npm run NOM.')
   const mode = (form.pipelineMode || 'devops').toUpperCase()
   if (!['DEVOPS', 'DEVSECOPS'].includes(mode)) throw new Error('Mode de pipeline invalide.')
   return {
     mode, branch: form.branch, root_directory: path,
-    build_method: isServer ? 'AUTO' : 'STATIC', runtime_type: isServer ? 'NODE' : 'STATIC',
+    build_method: isServer ? 'AUTO' : 'STATIC', runtime_type: isBackend ? (profile.startsWith('python_') ? 'PYTHON' : profile.startsWith('node_') ? 'NODE' : profile.startsWith('java_') ? 'JAVA' : 'PHP') : isServer ? 'NODE' : 'STATIC',
     dockerfile_path: 'Dockerfile', build_command: buildCommand,
-    start_command: isServer ? 'npm run start' : '', output_directory: output,
+    start_command: profile === 'next_server' ? 'npm run start' : '', output_directory: output,
     settings: { frontend_profile: profile },
     healthcheck_path: String(advanced.healthcheckPath || '/').trim(),
     auto_deploy: Boolean(form.autoDeploy), auto_deploy_branch: form.autoDeploy ? form.branch : '',
@@ -192,7 +193,7 @@ export async function saveRemoteProject(form, { onCreated = () => {} } = {}) {
     draft = result?.configuration
   }
   if (!draft?.id) throw new Error('Le backend n’a pas confirmé la configuration.')
-  if (form.frontendEnvTouched) {
+  if (form.frontendEnvTouched && !BACKEND_PROFILES.includes(form.frontendProfile || form.advancedBuild?.profile)) {
     await syncFrontendVariables(projectId, envId, form.frontendEnv || [], {
       isVite: form.detectedVite, applicationType: form.detectedKind, framework: form.detectedFramework, profile: form.frontendProfile || form.advancedBuild?.profile || (form.detectedFramework === 'Next.js' ? 'next_server' : form.detectedVite ? 'vite' : 'npm_static'),
     })

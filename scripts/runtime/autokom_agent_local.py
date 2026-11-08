@@ -26,6 +26,7 @@ from urllib.request import Request,build_opener,HTTPRedirectHandler
 _RUNTIME_DIR = str(Path(__file__).resolve().parent)
 if _RUNTIME_DIR not in sys.path:
     sys.path.insert(0, _RUNTIME_DIR)
+from autokom_backend_recipes import (BACKEND_PROFILES, BACKEND_RUNTIME, backend_recipe, validate_backend_source)
 from autokom_frontend_recipes import (ALL_PROFILES, STATIC_PROFILES, recipe as frontend_recipe,
     static_server_config, validate_profile_source)
 
@@ -337,7 +338,7 @@ def public_vite_build_args(doc):
 VITE_CONTEXT_EXCLUDES = frozenset({
     '.git', '.github', '.ssh', '.aws', '.npmrc', SOURCE_MARKER, '.env', '.env.local', '.env.production',
     '.env.development', 'node_modules', 'dist', 'build', 'out', '.next', '.nuxt',
-    '.turbo', '.vite', 'coverage', '.cache',
+    '.turbo', '.vite', 'coverage', '.cache', '.venv', 'venv', '__pycache__', '.pytest_cache', 'vendor', 'target', '.gradle', '.mvn/wrapper', 'bootstrap/cache',
 })
 
 
@@ -395,7 +396,7 @@ def build(doc):
         fail('Commande personnalisée non autorisée pour le runner Dockerfile actuel.')
     if cfg['method'] == 'STATIC' and profile not in STATIC_PROFILES:
         fail('Recette statique non autorisée.')
-    if cfg['method'] == 'AUTO' and profile != 'next_server':
+    if cfg['method'] == 'AUTO' and profile != 'next_server' and profile not in BACKEND_PROFILES:
         fail('La recette serveur automatique demandée est inconnue.')
     rid=doc['run_id']
     artifact_dir=Path(os.getenv('AUTOKOM_ARTIFACT_DIR','/var/lib/autokom/build-artifacts'))
@@ -454,13 +455,20 @@ def build(doc):
             'EXPOSE 8080\n'
         )
     else:
-        if cfg.get('port') != 8080 or cfg.get('runtime') != ('NODE' if profile == 'next_server' else 'STATIC'):
-            fail('Port et runtime frontend non conformes à la recette autorisée.')
-        try:
-            validate_profile_source(path, profile, cfg)
-            recipe, frontend_args = frontend_recipe(profile, cfg, doc)
-        except ValueError as exc:
-            fail(str(exc))
+        if profile in BACKEND_PROFILES:
+            try:
+                recipe, accompanying = backend_recipe(profile, path, cfg)
+                frontend_args = []
+            except (ValueError, OSError) as exc:
+                fail(str(exc))
+        else:
+            if cfg.get('port') != 8080 or cfg.get('runtime') != ('NODE' if profile == 'next_server' else 'STATIC'):
+                fail('Port et runtime frontend non conformes à la recette autorisée.')
+            try:
+                validate_profile_source(path, profile, cfg)
+                recipe, frontend_args = frontend_recipe(profile, cfg, doc)
+            except ValueError as exc:
+                fail(str(exc))
     stage('build','RUNNING')
     buildkit_preflight()
     with tempfile.NamedTemporaryFile(dir=artifact_dir,prefix='.building-',suffix='.tar',delete=False) as tmp:
@@ -475,7 +483,14 @@ def build(doc):
                 prepare_vite_build_context(path, trusted_context)
                 if profile == 'html':
                     protect_static_html_context(trusted_context)
-                if profile != 'vite':
+                if profile in BACKEND_PROFILES:
+                    # The generated Nginx/PHP config is always supplied by AUTOKOM.
+                    for name, value in accompanying.items():
+                        target = trusted_context / name
+                        if target.is_symlink() or target.is_file(): target.unlink()
+                        elif target.exists(): fail('Fichier réservé AUTOKOM dans le contexte.')
+                        target.write_text(value, encoding='utf-8')
+                if profile not in BACKEND_PROFILES and profile != 'vite':
                     # The only nginx configuration in the container comes from AUTOKOM.
                     conf = trusted_context / 'autokom-nginx.conf'
                     if conf.is_symlink() or conf.is_file():

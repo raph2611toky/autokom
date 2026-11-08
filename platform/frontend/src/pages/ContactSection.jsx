@@ -1,5 +1,6 @@
-import { useState } from 'react'
-import { ArrowUpRight, Copy, Mail, MessageSquareText } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import '../styles/copy-feedback.css'
+import { ArrowUpRight, Copy, Check, Mail, MessageSquareText } from 'lucide-react'
 
 // L'adresse publique de support se configure lors du déploiement du frontend.
 // Il n'y a pas de faux POST ni de simulation d'envoi au backend.
@@ -10,6 +11,9 @@ export default function ContactSection() {
   const [form, setForm] = useState({ name: '', email: '', subject: 'Question générale', message: '' })
   const [feedback, setFeedback] = useState('')
   const [pending, setPending] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => { if (!copied) return; const timer = window.setTimeout(() => setCopied(false), 3000); return () => window.clearTimeout(timer) }, [copied])
 
   function update(field, value) {
     setForm(previous => ({ ...previous, [field]: value }))
@@ -32,6 +36,7 @@ export default function ContactSection() {
     try {
       if (!navigator.clipboard?.writeText) throw new Error('clipboard_unavailable')
       await navigator.clipboard.writeText(`${subject}\n\n${body}`)
+      setCopied(true)
       setFeedback('Votre demande a été copiée. Aucun service d’envoi n’est encore configuré sur cette plateforme.')
     } catch {
       setFeedback('La copie automatique est indisponible. Sélectionnez votre texte pour le conserver. Aucun message n’a été envoyé.')
@@ -60,7 +65,7 @@ export default function ContactSection() {
               </div>
               <label className="lp-contact-field"><span>Sujet</span><select name="contact-subject" value={form.subject} onChange={e => update('subject', e.target.value)}><option>Question générale</option><option>Déploiement et intégration</option><option>Collaboration</option><option>Problème technique</option></select></label>
               <label className="lp-contact-field"><span>Votre message</span><textarea name="contact-message" rows={4} placeholder="Décrivez brièvement votre demande…" minLength={10} maxLength={4000} value={form.message} onChange={e => update('message', e.target.value)} required /></label>
-              <button className="lp-contact-submit" disabled={pending} type="submit">{canOpenEmail ? <Mail size={17} /> : <Copy size={17} />}{canOpenEmail ? 'Préparer un e-mail' : 'Copier ma demande'}<ArrowUpRight size={18} /></button>
+              <button className={`lp-contact-submit ak-copy-action ${copied ? 'ak-copy-success' : ''}`} disabled={pending} type="submit">{canOpenEmail ? <Mail size={17} /> : copied ? <Check size={17} /> : <Copy size={17} />}{canOpenEmail ? 'Préparer un e-mail' : copied ? 'Copié !' : 'Copier ma demande'}<ArrowUpRight size={18} /></button>
               {feedback ? <p role="status" className="lp-contact-feedback">{feedback}</p> : <p className="lp-contact-privacy">{canOpenEmail ? 'Le message s’ouvre dans votre application e-mail. Aucun envoi automatique.' : 'L’envoi direct sera disponible après configuration du contact. Aucun message n’est transmis automatiquement.'}</p>}
             </form>
           </div>

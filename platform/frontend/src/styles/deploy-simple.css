@@ -162,3 +162,20 @@
 @media(max-width:720px){.ak-project-settings-shortcuts{width:100%}.ak-project-settings-shortcuts .button-outline{flex:1 1 auto}}
 
 .ak-quick-deploy.ak-edit-mode .ak-simple-steps{grid-template-columns:repeat(2,minmax(0,1fr))}
+
+/* Source GitHub réellement invalide : alerte visuelle limitée à trois secondes. */
+.ak-source-edit .ak-source-invalid,
+.ak-source-edit input[aria-invalid="true"] {
+  border-color: #f06a79 !important;
+  box-shadow: 0 0 0 2px rgba(240,106,121,.15);
+}
+.ak-source-edit .ak-source-invalid { animation: ak-invalid-path-shake .5s ease-in-out 6; }
+@keyframes ak-invalid-path-shake {
+  0%,100% { transform: translateX(0); }
+  22%,66% { transform: translateX(-5px); }
+  44%,88% { transform: translateX(5px); }
+}
+.ak-backend-env-notice { font-size: .84rem; color: var(--ak-muted, #9da6b2); }
+@media (prefers-reduced-motion: reduce) {
+  .ak-source-edit .ak-source-invalid { animation: none; }
+}

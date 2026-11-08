@@ -50,6 +50,6 @@ class DeploymentConfigWriteSerializer(serializers.Serializer):
             if keys - {'node_version', 'python_version', 'java_version', 'php_version', 'package_manager', 'install_command', 'frontend_profile'}:
                 raise serializers.ValidationError({'settings': 'Paramètre non autorisé. Utiliser les variables d’environnement pour les autres valeurs.'})
             profile = attrs['settings'].get('frontend_profile')
-            if profile is not None and (not isinstance(profile, str) or profile not in {'vite', 'npm_static', 'next_export', 'next_server', 'html'}):
+            if profile is not None and (not isinstance(profile, str) or profile not in {'vite', 'npm_static', 'next_export', 'next_server', 'html', 'python_fastapi', 'python_flask', 'python_django', 'python_wsgi', 'node_express', 'node_nest', 'java_spring_maven', 'java_spring_gradle', 'php_plain', 'php_laravel', 'php_symfony'}):
                 raise serializers.ValidationError({'settings': 'Recette frontend inconnue.'})
         return attrs

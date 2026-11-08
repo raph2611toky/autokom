@@ -219,7 +219,7 @@ class GitHubDirectoriesAPIView(APIView):
                                 package = {
                                     'dependencies': {k: '*' for k in (doc.get('dependencies') or {}) if isinstance(k, str) and len(k) <= 100},
                                     'devDependencies': {k: '*' for k in (doc.get('devDependencies') or {}) if isinstance(k, str) and len(k) <= 100},
-                                    'scripts': {k: 'configured' for k in (doc.get('scripts') or {}) if k in ('build', 'test', 'start')},
+                                    'scripts': {k: 'configured' for k in (doc.get('scripts') or {}) if k in ('build', 'test', 'start', 'start:prod')},
                                 }
                     except (ValueError, TypeError, KeyError, binascii.Error):
                         package = None

@@ -12,6 +12,13 @@ def get_config(env, config_id):
 
 
 ALLOWED_STATIC_PROFILES = {'vite', 'npm_static', 'next_export', 'html'}
+BACKEND_RUNTIMES = {
+    **dict.fromkeys(('python_fastapi', 'python_flask', 'python_django', 'python_wsgi'), 'PYTHON'),
+    **dict.fromkeys(('node_express', 'node_nest'), 'NODE'),
+    **dict.fromkeys(('java_spring_maven', 'java_spring_gradle'), 'JAVA'),
+    **dict.fromkeys(('php_plain', 'php_laravel', 'php_symfony'), 'PHP'),
+}
+
 _NPM_SCRIPT = __import__('re').compile(r'^npm run [A-Za-z][A-Za-z0-9:_-]{0,63}$')
 
 
@@ -33,13 +40,20 @@ def check_configuration(cfg):
         if cfg.build_command and (profile == 'html' or not _NPM_SCRIPT.fullmatch(cfg.build_command)):
             issues['build_command'] = 'Commande de build non autorisée pour cette recette.'
     elif cfg.build_method == DeploymentConfig.BuildMethod.AUTO:
-        if (profile != 'next_server' or cfg.runtime_type != DeploymentConfig.RuntimeType.NODE or
-                cfg.internal_port != 8080 or cfg.output_directory not in ('', '.next')):
-            issues['build_method'] = 'La recette serveur automatique approuvée est Next.js sur le port privé 8080.'
-        if cfg.build_command and not _NPM_SCRIPT.fullmatch(cfg.build_command):
-            issues['build_command'] = 'Utilisez un script npm run NOM.'
-        if cfg.start_command not in ('', 'npm run start'):
-            issues['start_command'] = 'Démarrage Next.js pris en charge : npm run start.'
+        if profile == 'next_server':
+            if (cfg.runtime_type != DeploymentConfig.RuntimeType.NODE or
+                    cfg.internal_port != 8080 or cfg.output_directory not in ('', '.next')):
+                issues['build_method'] = 'La recette Next.js doit utiliser Node sur le port 8080.'
+            if cfg.build_command and not _NPM_SCRIPT.fullmatch(cfg.build_command):
+                issues['build_command'] = 'Utilisez un script npm run NOM.'
+            if cfg.start_command not in ('', 'npm run start'):
+                issues['start_command'] = 'Démarrage Next.js : npm run start.'
+        elif profile in BACKEND_RUNTIMES:
+            if (cfg.runtime_type != BACKEND_RUNTIMES[profile] or cfg.internal_port != 8080 or
+                    cfg.output_directory or cfg.build_command or cfg.start_command):
+                issues['build_method'] = 'Profil backend : port privé 8080 et recettes sans commandes libres obligatoires.'
+        else:
+            issues['build_method'] = 'Recette serveur non autorisée.'
     elif cfg.build_method == DeploymentConfig.BuildMethod.DOCKERFILE:
         if not cfg.dockerfile_path:
             issues['dockerfile_path'] = 'Indiquer le chemin du Dockerfile.'

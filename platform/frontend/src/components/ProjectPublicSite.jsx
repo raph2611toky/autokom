@@ -1,4 +1,5 @@
-import { ExternalLink, Globe2, Copy, Settings2 } from 'lucide-react'
+import { ExternalLink, Globe2, Settings2 } from 'lucide-react'
+import CopyButton from './CopyButton.jsx'
 import { publicSiteUrl, siteStateLabel } from '../services/sitePresentation.js'
 
 export default function ProjectPublicSite({ site, onManage, compact = false }) {
@@ -12,7 +13,7 @@ export default function ProjectPublicSite({ site, onManage, compact = false }) {
     <div className="ak-public-site-actions">
       {url && <>
         <a className="button-outline" href={url} target="_blank" rel="noopener noreferrer"><ExternalLink size={15}/> Voir le site</a>
-        <button className="button-outline" type="button" onClick={() => navigator.clipboard?.writeText(url)}><Copy size={15}/> Copier</button>
+        <CopyButton text={url}/>
       </>}
       {onManage && <button className="button-outline" type="button" onClick={onManage}><Settings2 size={15}/> Domaines</button>}
     </div>
