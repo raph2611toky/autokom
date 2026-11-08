@@ -37,19 +37,35 @@ class GitHubAuthConflict(APIException):
 
 
 def auth_callback_url() -> str:
+    """GitHub revient directement sur la SPA, jamais sur le backend pour l'auth client.
+
+    Compatibilité avec backend.env existant : l'ancien callback backend est
+    converti vers l'origine FRONTEND_URL. L'installation des dépôts continue
+    d'utiliser GITHUB_APP_CALLBACK_URL et n'est pas modifiée.
+    """
     from urllib.parse import urlsplit, urlunsplit
-    configured = getattr(settings, 'GITHUB_AUTH_CALLBACK_URL', '')
-    if configured:
-        callback = configured
-    else:
-        original = urlsplit(settings.GITHUB_APP_CALLBACK_URL)
-        callback = urlunsplit((original.scheme, original.netloc, '/api/auth/github/callback/', '', ''))
-    parts = urlsplit(callback)
-    if not (parts.scheme == 'https' or (parts.scheme == 'http' and parts.hostname in ('localhost', '127.0.0.1'))):
-        raise ValidationError({'github': 'Callback GitHub HTTPS requis.'})
-    if parts.username or parts.password or parts.fragment or parts.query or parts.path != '/api/auth/github/callback/':
-        raise ValidationError({'github': 'URL du callback GitHub invalide.'})
-    return callback
+    frontend = urlsplit(settings.FRONTEND_URL)
+    configured = urlsplit(getattr(settings, 'GITHUB_AUTH_CALLBACK_URL', '').strip())
+    if configured.scheme and configured.path not in ('/api/auth/github/callback/',
+                                                     '/auth/github/callback'):
+        raise ValidationError({'github': 'Chemin du callback GitHub non autorisé.'})
+    if configured.scheme and configured.path == '/auth/github/callback':
+        if (configured.scheme, configured.netloc) != (frontend.scheme, frontend.netloc):
+            raise ValidationError({'github': 'Callback client différent de FRONTEND_URL.'})
+    elif configured.scheme and configured.path == '/api/auth/github/callback/':
+        project_host = urlsplit(settings.GITHUB_APP_CALLBACK_URL)
+        if (configured.scheme, configured.netloc) != (project_host.scheme, project_host.netloc):
+            raise ValidationError({'github': 'Ancien callback backend inattendu.'})
+    elif configured.scheme or getattr(settings, 'GITHUB_AUTH_CALLBACK_URL', '').strip():
+        raise ValidationError({'github': 'Callback GitHub invalide.'})
+    if (not frontend.hostname or frontend.username or frontend.password or frontend.port not in (None, 443, 5173)
+            or frontend.path not in ('', '/') or frontend.query or frontend.fragment
+            or not (frontend.scheme == 'https' or
+                    (frontend.scheme == 'http' and frontend.hostname in ('localhost', '127.0.0.1')))):
+        raise ValidationError({'github': 'FRONTEND_URL doit être une origine HTTPS valide.'})
+    if configured.username or configured.password or configured.query or configured.fragment:
+        raise ValidationError({'github': 'Callback GitHub invalide (query/fragment interdits).'})
+    return urlunsplit((frontend.scheme, frontend.netloc, '/auth/github/callback', '', ''))
 
 
 def _require_config():
@@ -78,11 +94,12 @@ def start_oauth(intent: str, *, link_user=None) -> tuple[str, str]:
     params = {
         'client_id': settings.GITHUB_APP_CLIENT_ID, 'redirect_uri': auth_callback_url(),
         'state': raw_state, 'code_challenge': _challenge(verifier), 'code_challenge_method': 'S256',
+        'prompt': 'select_account',
     }
     return 'https://github.com/login/oauth/authorize?' + urlencode(params), browser_binding
 
 
-def consume_oauth_state(raw: str) -> tuple[str, str, User | None, str]:
+def consume_oauth_state(raw: str, *, browser_binding: str | None = None) -> tuple[str, str, User | None, str]:
     if not raw or len(raw) > 160:
         raise ValidationError({'state': 'Session GitHub expirée.'})
     with transaction.atomic():
@@ -91,6 +108,13 @@ def consume_oauth_state(raw: str) -> tuple[str, str, User | None, str]:
         ).first()
         if not state:
             raise ValidationError({'state': 'Session GitHub expirée ou déjà utilisée.'})
+        # La SPA doit présenter la preuve de possession du navigateur original.
+        # Contrôle avant consommation : une requête forgée ne peut pas brûler le state.
+        if browser_binding is not None and (
+            len(browser_binding) < 40 or len(browser_binding) > 256 or
+            not hmac.compare_digest(state.browser_binding_hash, token_digest(browser_binding))
+        ):
+            raise ValidationError({'state': 'Navigateur OAuth non reconnu.'})
         state.consumed_at = timezone.now()
         state.save(update_fields=['consumed_at'])
         return state.intent, enc_dec(state.pkce_verifier_ciphertext, 'd'), state.link_user, state.browser_binding_hash
@@ -117,14 +141,22 @@ def _github_request(method: str, url: str, *, token: str = '', payload: dict | N
         raise GitHubAuthUnavailable('Réponse GitHub incorrecte.') from exc
 
 
-def verified_identity(code: str, verifier: str) -> tuple[int, str, str, str]:
+def verified_identity(code: str, verifier: str, *, legacy_callback: bool = False) -> tuple[int, str, str, str]:
     _require_config()
     if not code or len(code) > 1024:
         raise ValidationError({'github': 'Code OAuth invalide.'})
+    # Un flux démarré AVANT la migration peut revenir sur l'ancien endpoint
+    # backend. Seule cette vue serveur peut sélectionner l'ancienne URI.
+    if legacy_callback:
+        from urllib.parse import urlsplit, urlunsplit
+        original = urlsplit(settings.GITHUB_APP_CALLBACK_URL)
+        redirect_uri = urlunsplit((original.scheme, original.netloc, '/api/auth/github/callback/', '', ''))
+    else:
+        redirect_uri = auth_callback_url()
     exchange = _github_request('POST', 'https://github.com/login/oauth/access_token', payload={
         'client_id': settings.GITHUB_APP_CLIENT_ID,
         'client_secret': settings.GITHUB_APP_CLIENT_SECRET,
-        'code': code, 'redirect_uri': auth_callback_url(), 'code_verifier': verifier,
+        'code': code, 'redirect_uri': redirect_uri, 'code_verifier': verifier,
     })
     token = exchange.get('access_token')
     if not token:
@@ -190,11 +222,9 @@ def finish_oauth(*, intent: str, link_user: User | None, github_id: int, github_
         # local juste parce que l'adresse e-mail est identique.
         if User.objects.filter(email__iexact=email).exists():
             return 'account_exists', None
-        # Ne pas créer implicitement un compte depuis le bouton « se connecter ».
-        # L'utilisateur doit explicitement choisir l'inscription GitHub.
-        if intent == 'login':
-            return 'not_registered', None
-
+        # Se connecter avec GitHub ou s'inscrire avec GitHub : provisionnement
+        # idempotent du compte si cet ID GitHub est nouveau et l'e-mail est libre.
+        # Un compte local existant n'est JAMAIS lié par simple correspondance d'e-mail.
         # Le GitHub App /user/emails a certifié l'e-mail principal. Mot de passe
         # imprévisible et inconnu de l'utilisateur; récupération par e-mail possible.
         user = register_client(email=email, full_name=full_name, password=secrets.token_urlsafe(64))

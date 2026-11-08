@@ -221,8 +221,8 @@ def _validate(kind,values):
                          and values.get('AUTOKOM_ENV_NAME', '').lower() != 'production')
             if (not (parts.scheme == 'https' or local_dev) or not parts.hostname or
                 parts.username or parts.password or parts.query or parts.fragment or
-                parts.path != '/api/auth/github/callback/'):
-                raise EnvError('GITHUB_AUTH_CALLBACK_URL doit être HTTPS (HTTP local réservé au développement).')
+                parts.path not in ('/api/auth/github/callback/', '/auth/github/callback')):
+                raise EnvError('GITHUB_AUTH_CALLBACK_URL doit viser le callback client HTTPS autorisé.')
     if kind=='cloudflare' and values.get('CLOUDFLARE_ZONE_ID') and not re.fullmatch(r'[a-fA-F0-9]{32}',values['CLOUDFLARE_ZONE_ID']):
         raise EnvError('Zone ID Cloudflare invalide (32 caractères hexadécimaux).')
 

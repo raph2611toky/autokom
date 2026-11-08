@@ -15,7 +15,9 @@ from rest_framework.exceptions import AuthenticationFailed
 from helpers.responses import api_success, api_error
 from apps.accounts.user.models import User
 from apps.accounts.user.serializers import LoginSerializer, UserSerializer, GitHubExchangeSerializer
-from apps.accounts.user.github_auth_service import consume_login_ticket
+from apps.accounts.user.github_auth_service import (
+    consume_login_ticket, consume_oauth_state, verified_identity, finish_oauth,
+)
 from apps.accounts.user.tokens import (
     issue_pair, rotate_refresh, decode_token, validate_active_session,
 )
@@ -141,3 +143,49 @@ class BrowserGitHubExchangeAPIView(APIView):
                           user_agent=request.headers.get('User-Agent', ''))
         User.objects.filter(pk=user.pk).update(last_login_at=timezone.now())
         return _session_result(request, user, pair, 'Connexion GitHub réussie.')
+
+
+@method_decorator(csrf_protect, name='dispatch')
+class BrowserGitHubCompleteAPIView(APIView):
+    """Callback OAuth reçu par React, code échangé côté serveur uniquement.
+
+    POST même origine + CSRF + state/PKCE liés au navigateur. Réponse : user et
+    cookies HttpOnly (aucun code OAuth, jeton GitHub ou JWT dans le JSON).
+    """
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    parser_classes = [JSONParser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'github_oauth'
+
+    def post(self, request):
+        from rest_framework.exceptions import ValidationError
+        if not isinstance(request.data, dict):
+            raise ValidationError({'github': 'Format de requête invalide.'})
+        code = request.data.get('code')
+        state = request.data.get('state')
+        binding = request.data.get('browser_binding')
+        if (not isinstance(code, str) or not 10 <= len(code) <= 1024 or
+            not isinstance(state, str) or not 30 <= len(state) <= 160 or
+            not isinstance(binding, str) or not 40 <= len(binding) <= 256):
+            raise ValidationError({'github': 'Réponse GitHub ou session navigateur invalide.'})
+        # Ne jamais écrire code/state/binding dans les logs applicatifs.
+        intent, verifier, link_user, binding_hash = consume_oauth_state(
+            state, browser_binding=binding,
+        )
+        github_id, login, email, name = verified_identity(code, verifier)
+        status, ticket = finish_oauth(
+            intent=intent, link_user=link_user, github_id=github_id,
+            github_login=login, email=email, full_name=name,
+            browser_binding_hash=binding_hash,
+        )
+        if status not in ('ok', 'created'):
+            return _uncache(api_success({'status': status}, 'Réponse GitHub vérifiée.'))
+        user = consume_login_ticket(ticket, binding)
+        pair = issue_pair(user, ip_address=request.META.get('REMOTE_ADDR') or None,
+                          user_agent=request.headers.get('User-Agent', ''))
+        User.objects.filter(pk=user.pk).update(last_login_at=timezone.now())
+        response = _session_result(request, user, pair, 'Authentification GitHub réussie.')
+        # Statut conservé pour l'animation du frontend.
+        response.data['data']['status'] = status
+        return response

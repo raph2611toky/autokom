@@ -17,7 +17,7 @@ class GitHubAppDiagnosticsTests(unittest.TestCase):
     def test_well_formed_config_announces_both_callbacks_without_secret(self):
         good, warnings, errors = diagnose(self.backend, self.frontend)
         self.assertFalse(errors)
-        self.assertTrue(any('api/auth/github/callback/' in x for x in good))
+        self.assertTrue(any('https://auto.ikom.mg/auth/github/callback' in x for x in good))
         self.assertTrue(any('api/projects/git/github/callback/' in x for x in good))
         self.assertNotIn(self.backend['GITHUB_APP_CLIENT_SECRET'], repr(good+warnings+errors))
 

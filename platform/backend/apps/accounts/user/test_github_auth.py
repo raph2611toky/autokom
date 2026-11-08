@@ -20,6 +20,7 @@ from apps.accounts.user.github_auth_service import auth_callback_url, start_oaut
     GITHUB_APP_CLIENT_SECRET='testing-only-not-a-real-secret',
     GITHUB_APP_CALLBACK_URL='https://backend.example.invalid/api/projects/git/github/callback/',
     GITHUB_AUTH_CALLBACK_URL='',
+    FRONTEND_URL='https://auto.example.invalid',
 )
 class GitHubSecureAuthTests(SimpleTestCase):
     def test_action_token_signed_encrypted_versioned_and_not_plaintext(self):
@@ -52,7 +53,8 @@ class GitHubSecureAuthTests(SimpleTestCase):
         params = parse_qs(parsed.query)
         self.assertEqual(parsed.netloc, 'github.com')
         self.assertEqual(params['code_challenge_method'], ['S256'])
-        self.assertEqual(params['redirect_uri'], ['https://backend.example.invalid/api/auth/github/callback/'])
+        self.assertEqual(params['prompt'], ['select_account'])
+        self.assertEqual(params['redirect_uri'], ['https://auto.example.invalid/auth/github/callback'])
         self.assertEqual(len(params['state'][0]) > 35, True)
         self.assertNotIn(params['state'][0], create.call_args.kwargs['state_hash'])
         self.assertNotIn('code_verifier', params)
@@ -60,7 +62,16 @@ class GitHubSecureAuthTests(SimpleTestCase):
         self.assertNotIn('testing-only-not-a-real-secret', url)
 
     def test_callback_is_not_project_callback(self):
-        self.assertEqual(auth_callback_url(), 'https://backend.example.invalid/api/auth/github/callback/')
+        self.assertEqual(auth_callback_url(), 'https://auto.example.invalid/auth/github/callback')
+    @override_settings(GITHUB_AUTH_CALLBACK_URL='https://backend.example.invalid/api/auth/github/callback/')
+    def test_backend_legacy_url_migrates_to_frontend(self):
+        self.assertEqual(auth_callback_url(), 'https://auto.example.invalid/auth/github/callback')
+
+    @override_settings(GITHUB_AUTH_CALLBACK_URL='https://evil.example.invalid/auth/github/callback')
+    def test_unexpected_callback_host_is_rejected(self):
+        from rest_framework.exceptions import ValidationError
+        with self.assertRaises(ValidationError):
+            auth_callback_url()
 
 
 from django.test import TestCase
@@ -100,13 +111,13 @@ class GitHubAuthDatabaseTests(TestCase):
         with self.assertRaises(ValidationError):
             consume_login_ticket(ticket, binding)
 
-    def test_login_does_not_create_an_unknown_account_implicitly(self):
+    def test_login_creates_github_account_when_verified_email_is_free(self):
         status, ticket = finish_oauth(intent='login', link_user=None, github_id=100401,
             browser_binding_hash='h' * 64, github_login='github-new-user',
             email='brand-new-login@example.invalid', full_name='New GitHub User')
-        self.assertEqual(status, 'not_registered')
-        self.assertIsNone(ticket)
-        self.assertFalse(User.objects.filter(email='brand-new-login@example.invalid').exists())
+        self.assertEqual(status, 'created')
+        self.assertIsNotNone(ticket)
+        self.assertTrue(User.objects.filter(email='brand-new-login@example.invalid').exists())
 
     def test_link_from_existing_account_then_login(self):
         user = register_client(email='link@example.invalid', full_name='Existing User',

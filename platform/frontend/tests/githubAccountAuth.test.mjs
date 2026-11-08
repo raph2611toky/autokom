@@ -26,10 +26,10 @@ test('inscription GitHub transmet signup et consomme le binding une seule fois',
     assert.equal(intent, 'signup')
     return { authorization_url: 'https://github.com/login/oauth/authorize', browser_binding: 'c'.repeat(50) }
   }, storage: store, redirect: () => {} })
-  assert.deepEqual(consumeGitHubAccountCallback('#status=created&ticket=temporary-ticket', store),
+  assert.deepEqual(consumeGitHubAccountCallback('', '#status=created&ticket=temporary-ticket', store),
     { status: 'created', ticket: 'temporary-ticket', browserBinding: 'c'.repeat(50) })
   assert.equal(store.getItem(GITHUB_BROWSER_BINDING_KEY), null)
-  assert.equal(consumeGitHubAccountCallback('#status=created&ticket=temporary-ticket', store).status, 'invalid')
+  assert.equal(consumeGitHubAccountCallback('', '#status=created&ticket=temporary-ticket', store).status, 'invalid')
 })
 test('destinations externes refusées, y compris sous-domaines et chemins trompeurs', () => {
   for (const url of ['https://github.com.evil.invalid/login/oauth/authorize',
@@ -40,9 +40,9 @@ test('destinations externes refusées, y compris sous-domaines et chemins trompe
 })
 test('rejet GitHub et erreur technique sont distincts sans exposer de ticket', () => {
   const store = storage()
-  assert.equal(consumeGitHubAccountCallback('#status=denied', store).status, 'denied')
-  assert.equal(consumeGitHubAccountCallback('#status=account_exists', store).status, 'account_exists')
-  assert.equal(consumeGitHubAccountCallback('#status=some-unknown-status', store).status, 'error')
+  assert.equal(consumeGitHubAccountCallback('', '#status=denied', store).status, 'denied')
+  assert.equal(consumeGitHubAccountCallback('', '#status=account_exists', store).status, 'account_exists')
+  assert.equal(consumeGitHubAccountCallback('', '#status=some-unknown-status', store).status, 'error')
 })
 
 test('liaison GitHub d’un compte existant : POST distinct du login', async () => {
@@ -51,10 +51,27 @@ test('liaison GitHub d’un compte existant : POST distinct du login', async () 
     assert.equal(intent, 'link')
     return { authorization_url: 'https://github.com/login/oauth/authorize', browser_binding: 'd'.repeat(50) }
   }, storage: store, redirect: () => {} })
-  assert.equal(consumeGitHubAccountCallback('#status=linked', store).status, 'linked')
+  assert.equal(consumeGitHubAccountCallback('', '#status=linked', store).status, 'linked')
   assert.equal(store.getItem(GITHUB_BROWSER_BINDING_KEY), null)
 })
 
 test('login GitHub sans compte distingue le cas non inscrit', () => {
-  assert.equal(consumeGitHubAccountCallback('#status=not_registered', storage()).status, 'not_registered')
+  assert.equal(consumeGitHubAccountCallback('', '#status=not_registered', storage()).status, 'not_registered')
+})
+
+test('callback direct GitHub : code et state retournés une seule fois au navigateur', async () => {
+  const store = storage()
+  await startGitHubAccountAuth('login', {start: async () => ({
+    authorization_url: 'https://github.com/login/oauth/authorize',
+    browser_binding: 'b'.repeat(50),
+  }), storage: store, redirect: () => {}})
+  const received = consumeGitHubAccountCallback('?code=' + 'c'.repeat(32) + '&state=' + 's'.repeat(54), '', store)
+  assert.deepEqual(received, {status:'pending', code:'c'.repeat(32), state:'s'.repeat(54), browserBinding:'b'.repeat(50)})
+  assert.equal(store.getItem(GITHUB_BROWSER_BINDING_KEY), null)
+  assert.equal(consumeGitHubAccountCallback('?code=' + 'c'.repeat(32) + '&state=' + 's'.repeat(54), '', store).status, 'invalid')
+})
+test('callback GitHub : erreur/refus ne transmet jamais de code', () => {
+  const store = storage()
+  assert.equal(consumeGitHubAccountCallback('?error=access_denied&state=abc', '', store).status, 'denied')
+  assert.equal(consumeGitHubAccountCallback('?error=invalid_scope&code=dangereux', '', store).status, 'error')
 })

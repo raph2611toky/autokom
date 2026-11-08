@@ -56,7 +56,7 @@ export async function ensureCsrf() {
   return csrfPromise
 }
 const SAFE = new Set(['GET', 'HEAD', 'OPTIONS'])
-const NO_RETRY = /^\/auth\/(?:browser\/(?:csrf|login|logout|refresh|github\/exchange)|login|token\/refresh|logout|register)\//
+const NO_RETRY = /^\/auth\/(?:browser\/(?:csrf|login|logout|refresh|github\/(?:exchange|complete))|login|token\/refresh|logout|register)\//
 
 async function execute(path, { method = 'GET', body, signal, headers = {} } = {}) {
   validatePath(path)

@@ -16,7 +16,7 @@ import Pricing from './pages/Pricing.jsx'
 import { API_AVAILABLE } from './config/runtime.js'
 import { useAuth } from './context/AuthContext.jsx'
 
-const ROUTES = ['/', '/login', '/register', '/deploy', '/sites', '/projects', '/pricing', '/verify-email', '/forgot-password', '/reset-password', '/integrations/github', '/auth/github/callback']
+const ROUTES = ['/', '/login', '/register', '/dashboard', '/deploy', '/sites', '/projects', '/pricing', '/verify-email', '/forgot-password', '/reset-password', '/integrations/github', '/auth/github/callback']
 
 function validRoute(path) {
   return ROUTES.includes(path) || /^\/(?:sites|projects)\/[^/]+$/.test(path) || /^\/projects\/[^/]+\/(?:settings|history|deployments\/[^/]+)$/.test(path)
@@ -64,7 +64,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (API_AVAILABLE && status === 'anonymous' && /^\/(?:deploy|projects|sites)(?:\/|$)/.test(route)) {
+    if (API_AVAILABLE && status === 'anonymous' && /^\/(?:dashboard|deploy|projects|sites)(?:\/|$)/.test(route)) {
       navigate('/login')
     }
   }, [route, status])
@@ -82,7 +82,7 @@ export default function App() {
   const toggleTheme = () => setTheme(current => current === 'dark' ? 'light' : 'dark')
   const commonProps = { navigate, theme, onToggleTheme: toggleTheme }
 
-  if (API_AVAILABLE && /^\/(?:deploy|projects|sites)(?:\/|$)/.test(route) && status !== 'authenticated') {
+  if (API_AVAILABLE && /^\/(?:dashboard|deploy|projects|sites)(?:\/|$)/.test(route) && status !== 'authenticated') {
     return <div className="app-shell"><main className="container workspace" role="status">Vérification de votre session…</main></div>
   }
 
@@ -106,9 +106,9 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Header route={route} {...commonProps} />
+      <Header route={route === '/dashboard' ? '/projects' : route} {...commonProps} />
       <main className="container workspace" id="main-content">
-        {route === '/pricing' ? <Pricing navigate={navigate} /> : route.startsWith('/sites') ? <Sites navigate={navigate} projectId={route === '/sites' ? null : projectFromPath(route)} /> : route.startsWith('/projects') ? <Projects navigate={navigate} projectId={route === '/projects' ? null : projectFromPath(route)} /> : <Deploy navigate={navigate} />}
+        {route === '/pricing' ? <Pricing navigate={navigate} /> : route === '/dashboard' ? <Projects navigate={navigate} /> : route.startsWith('/sites') ? <Sites navigate={navigate} projectId={route === '/sites' ? null : projectFromPath(route)} /> : route.startsWith('/projects') ? <Projects navigate={navigate} projectId={route === '/projects' ? null : projectFromPath(route)} /> : <Deploy navigate={navigate} />}
       </main>
       <footer className="container footer">
         <span>AUTOKOM · Déploiement et gestion des applications</span>

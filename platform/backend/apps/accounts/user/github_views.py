@@ -78,7 +78,7 @@ class GitHubLoginCallbackAPIView(APIView):
                 log.warning('AUTOKOM GitHub account OAuth : autorisation refusée par le fournisseur')
             else:
                 stage = 'identity'
-                github_id, login, email, name = verified_identity(request.query_params.get('code', ''), verifier)
+                github_id, login, email, name = verified_identity(request.query_params.get('code', ''), verifier, legacy_callback=True)
                 stage = 'database'
                 status, ticket = finish_oauth(intent=intent, link_user=link_user,
                     github_id=github_id, github_login=login, email=email, full_name=name,

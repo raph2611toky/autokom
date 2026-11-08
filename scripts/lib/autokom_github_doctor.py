@@ -42,19 +42,27 @@ def diagnose(backend: dict, frontend: dict) -> tuple[list[str], list[str], list[
         good.append('Client secret GitHub présent (non vérifié auprès du fournisseur).')
     if backend.get('GITHUB_APP_SLUG') and not re.fullmatch(r'[A-Za-z0-9-]+', backend['GITHUB_APP_SLUG']):
         errors.append('GITHUB_APP_SLUG invalide.')
-    callbacks = {
-        'dépôts': (backend.get('GITHUB_APP_CALLBACK_URL', ''), '/api/projects/git/github/callback/'),
-        'comptes': (backend.get('GITHUB_AUTH_CALLBACK_URL', '') or '', '/api/auth/github/callback/'),
-    }
-    project_url = callbacks['dépôts'][0]
-    if not callbacks['comptes'][0] and callback_ok(project_url, callbacks['dépôts'][1]):
-        origin = urlsplit(project_url)
-        callbacks['comptes'] = (f'{origin.scheme}://{origin.netloc}/api/auth/github/callback/', callbacks['comptes'][1])
-    for name, (url, path) in callbacks.items():
-        if not callback_ok(url, path):
-            errors.append(f'Callback GitHub {name} invalide ou manquant.')
-        else:
-            good.append(f'Callback {name} à enregistrer dans GitHub App : {url}')
+    project_url = backend.get('GITHUB_APP_CALLBACK_URL', '')
+    frontend_origin = backend.get('FRONTEND_URL', '').rstrip('/') or frontend.get('FRONTEND_URL', '').rstrip('/')
+    expected_login_url = frontend_origin + '/auth/github/callback'
+    legacy_login_url = backend.get('GITHUB_AUTH_CALLBACK_URL', '')
+    if not callback_ok(project_url, '/api/projects/git/github/callback/'):
+        errors.append('Callback GitHub des dépôts invalide.')
+    else:
+        good.append(f'Callback des dépôts (inchangé) : {project_url}')
+    if not callback_ok(expected_login_url, '/auth/github/callback'):
+        errors.append('FRONTEND_URL invalide pour le callback GitHub client.')
+    else:
+        good.append(f'NOUVEAU callback connexion à déclarer dans GitHub App : {expected_login_url}')
+    if legacy_login_url:
+        if (not callback_ok(legacy_login_url, '/api/auth/github/callback/') and
+                not callback_ok(legacy_login_url, '/auth/github/callback')):
+            errors.append('GITHUB_AUTH_CALLBACK_URL : callback client invalide.')
+        elif legacy_login_url != expected_login_url:
+            warnings.append('Ancien callback de connexion détecté : le backend utilise automatiquement le frontend.')
+    if backend.get('FRONTEND_URL') and frontend.get('FRONTEND_URL') and \
+            backend['FRONTEND_URL'].rstrip('/') != frontend['FRONTEND_URL'].rstrip('/'):
+        errors.append('FRONTEND_URL : divergence entre backend et frontend.')
     if backend.get('AUTOKOM_FIELD_ENCRYPTION_KEY') and not fernet_key_shape_ok(backend['AUTOKOM_FIELD_ENCRYPTION_KEY']):
         errors.append('AUTOKOM_FIELD_ENCRYPTION_KEY : format Fernet invalide.')
     elif backend.get('AUTOKOM_FIELD_ENCRYPTION_KEY'):
@@ -65,16 +73,13 @@ def diagnose(backend: dict, frontend: dict) -> tuple[list[str], list[str], list[
         warnings.append('VITE_AUTOKOM_API_ENABLED n’est pas activée.')
     if frontend.get('VITE_AUTOKOM_FRONTEND_ONLY', '').lower() != 'false':
         warnings.append('VITE_AUTOKOM_FRONTEND_ONLY doit être false pour la production.')
-    if frontend.get('FRONTEND_URL') and backend.get('FRONTEND_URL') and \
-        frontend['FRONTEND_URL'].rstrip('/') != backend['FRONTEND_URL'].rstrip('/'):
-        errors.append('FRONTEND_URL : divergence entre backend et frontend.')
-    if frontend.get('BACKEND_URL') and callback_ok(project_url, callbacks['dépôts'][1]):
+    if frontend.get('BACKEND_URL') and callback_ok(project_url, '/api/projects/git/github/callback/'):
         from urllib.parse import urlsplit as split
         if split(frontend['BACKEND_URL']).netloc != split(project_url).netloc:
             warnings.append('BACKEND_URL diffère de l’hôte du callback GitHub.')
     if not backend.get('GITHUB_WEBHOOK_SECRET'):
         warnings.append('Webhook GitHub non configuré (nécessaire pour le déploiement sur push).')
-    warnings.append('L’enregistrement effectif des deux callbacks et les permissions GitHub ne peuvent être vérifiés localement.')
+    warnings.append('Ajouter le nouveau callback frontend dans GitHub App > General ; désactiver le wildcard. L’enregistrement distant ne peut pas être validé localement.')
     return good, warnings, errors
 
 

@@ -1222,10 +1222,15 @@ def main(argv=None):
     log_p.add_argument('--lines', type=int, default=80)
     log_p.add_argument('--source', choices=['service', 'setup', 'deploy'], default='service',
                        help='Service Gunicorn ou journal détaillé de setup/deploy')
+    github_p = sub.add_parser('github', help='Activer la connexion et inscription GitHub dans le frontend')
+    github_p.add_argument('github_args', nargs=argparse.REMAINDER)
     for env_kind in ('backend', 'frontend'):
         env_p = sub.add_parser(env_kind, help='Configuration '+env_kind+' : env show/setup/edit/delete/sync-runner-key', add_help=False)
         env_p.add_argument('backend_args', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    if args.action == 'github':
+        from autokom_github_activate import main as github_main
+        return github_main(args.github_args)
     if args.action in ('backend','frontend'):
         from autokom_env_manager import main as env_main, EnvError
         if args.action == 'backend' and args.backend_args[:2] == ['github', 'doctor']:

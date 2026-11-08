@@ -30,17 +30,35 @@ export async function startGitHubAccountAuth(intent, {
   redirect(href)
 }
 
-export function consumeGitHubAccountCallback(hash, storage) {
-  const params = new URLSearchParams(String(hash || '').replace(/^#/, ''))
-  const status = params.get('status') || 'error'
-  const ticket = params.get('ticket') || ''
-  const browserBinding = storage?.getItem(GITHUB_BROWSER_BINDING_KEY) || ''
+/** Le callback arrive avec ?code=&state= dans la barre d'adresse.
+ * On récupère la preuve navigateur avant de nettoyer l'URL. Le mode legacy
+ * #status=ticket reste temporairement toléré pour les authentifications en vol.
+ */
+export function consumeGitHubAccountCallback(search, hash, storage) {
+  const binding = storage?.getItem(GITHUB_BROWSER_BINDING_KEY) || ''
   storage?.removeItem(GITHUB_BROWSER_BINDING_KEY)
+  const query = new URLSearchParams(String(search || '').replace(/^\?/, ''))
+  if (query.has('error')) {
+    return { status: query.get('error') === 'access_denied' ? 'denied' : 'error',
+      code: '', state: '', browserBinding: '' }
+  }
+  if (query.has('code') || query.has('state')) {
+    const code = query.get('code') || ''
+    const state = query.get('state') || ''
+    if (code.length < 10 || code.length > 1024 || state.length < 30 || state.length > 160 ||
+        binding.length < 40 || binding.length > 256) {
+      return { status: 'invalid', code: '', state: '', browserBinding: '' }
+    }
+    return { status: 'pending', code, state, browserBinding: binding }
+  }
+  const params = new URLSearchParams(String(hash || '').replace(/^#/, ''))
+  const status = params.get('status') || 'invalid'
+  const ticket = params.get('ticket') || ''
   if (!['ok', 'created', 'linked', 'denied', 'error', 'account_exists', 'already_linked', 'not_registered'].includes(status)) {
     return { status: 'error', ticket: '', browserBinding: '' }
   }
-  if ((status === 'ok' || status === 'created') && (!ticket || ticket.length > 256 || browserBinding.length < 40)) {
+  if ((status === 'ok' || status === 'created') && (!ticket || ticket.length > 256 || binding.length < 40)) {
     return { status: 'invalid', ticket: '', browserBinding: '' }
   }
-  return { status, ticket: status === 'ok' || status === 'created' ? ticket : '', browserBinding }
+  return { status, ticket: status === 'ok' || status === 'created' ? ticket : '', browserBinding: binding }
 }

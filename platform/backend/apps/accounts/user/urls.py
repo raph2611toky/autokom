@@ -8,6 +8,7 @@ urlpatterns = [
     path('browser/refresh/', browser_views.BrowserRefreshAPIView.as_view(), name='browser-refresh'),
     path('browser/logout/', browser_views.BrowserLogoutAPIView.as_view(), name='browser-logout'),
     path('browser/github/exchange/', browser_views.BrowserGitHubExchangeAPIView.as_view(), name='browser-github-exchange'),
+    path('browser/github/complete/', browser_views.BrowserGitHubCompleteAPIView.as_view(), name='browser-github-complete'),
     path('github/start/', github_views.GitHubLoginStartAPIView.as_view(), name='github-login-start'),
     path('github/link/start/', github_views.GitHubLinkStartAPIView.as_view(), name='github-link-start'),
     path('github/callback/', github_views.GitHubLoginCallbackAPIView.as_view(), name='github-login-callback'),
