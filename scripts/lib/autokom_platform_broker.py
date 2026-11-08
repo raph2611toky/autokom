@@ -7,7 +7,7 @@ Jenkins URL/path, container mount paths or an arbitrary executable.
 """
 from __future__ import annotations
 
-from autokom_nginx_bind_policy import https_listens, tls_detected
+from autokom_nginx_bind_policy import https_listens, tls_detected, addresses as https_bind_addresses, BindPolicyError
 
 import fcntl
 import http.client
@@ -838,39 +838,116 @@ def _issue_customer_certificate(host, *, managed):
     return method
 
 
-def _verify_customer_https(host, healthcheck):
-    """Verify SNI, CA trust and the REAL customer response.
+def _customer_https_probe_address():
+    """Probe the actual ingress NIC, not an unrelated loopback 443 listener.
 
-    TLS handshake failures are fatal.  HTTP 502/503/504 may be temporary during
-    container startup, so retry briefly; persistent unavailability blocks the
-    publication, rather than incorrectly recording a healthy release.
+    With GCP's address partition, Nginx accepts public HTTPS on the private
+    ingress NIC; an independent loopback virtual server can reject SNI.  The
+    persisted root-owned bind policy is the authority for the relevant socket.
+    When no policy was configured, legacy Nginx listens on wildcard:443 and
+    loopback remains appropriate.
+    """
+    try:
+        addresses = https_bind_addresses()
+    except (BindPolicyError, OSError, ValueError) as exc:
+        raise BrokerError('AUTOKOM_HTTPS_BIND_POLICY_INVALID: Politique d’écoute HTTPS non fiable.') from exc
+    return addresses[0] if addresses else '127.0.0.1'
+
+
+def _customer_https_probe_once(host, healthcheck, address):
+    """Return a real HTTPS response with CA and hostname verification enabled."""
+    context = ssl.create_default_context()
+    with socket.create_connection((address, 443), timeout=6) as raw:
+        with context.wrap_socket(raw, server_hostname=host) as connection:
+            connection.settimeout(6)
+            connection.sendall(('GET ' + healthcheck + ' HTTP/1.1\r\nHost: ' + host +
+                                '\r\nConnection: close\r\n\r\n').encode('ascii'))
+            response = http.client.HTTPResponse(connection)
+            response.begin()
+            status = response.status
+            response.close()
+            return status
+
+
+def _customer_https_failure_category(exc):
+    """Fixed categories only; never print exception strings or certificates."""
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return 'certificate-invalid'
+    if isinstance(exc, ssl.SSLError):
+        reason = str(getattr(exc, 'reason', '') or '').upper()
+        if 'UNRECOGNIZED_NAME' in reason:
+            return 'sni-unrecognized'
+        if 'WRONG_VERSION' in reason or 'UNKNOWN_PROTOCOL' in reason:
+            return 'tls-protocol'
+        return 'tls-handshake'
+    if isinstance(exc, ConnectionRefusedError):
+        return 'listener-refused'
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return 'connect-timeout'
+    if isinstance(exc, UnicodeEncodeError):
+        return 'request-encoding'
+    if isinstance(exc, http.client.HTTPException):
+        return 'http-protocol'
+    return 'connect-failed'
+
+
+def _verify_customer_https(host, healthcheck):
+    """Prove the customer HTTPS vhost works on the REAL ingress listener.
+
+    HTTPS must be validated with the requested hostname in SNI and certificate
+    verification enabled. Transient reload/502 errors can retry. No insecure
+    SSL context, HTTP-only success, or loopback fallback can mark success on a
+    host with a configured production ingress interface.
     """
     valid_hostname(host)
     if (not isinstance(healthcheck, str) or not healthcheck.startswith('/')
             or any(ch in healthcheck for ch in ('\r', '\n', '#', '%', '\\'))
             or len(healthcheck) > 128):
         raise BrokerError('AUTOKOM_HTTPS_HEALTHCHECK_INVALID: Chemin de validation refusé.')
+    address = _customer_https_probe_address()
     last_status = 0
-    for attempt in range(4):
+    last_problem = None
+    for attempt in range(5):
         try:
-            context = ssl.create_default_context()
-            with socket.create_connection(('127.0.0.1', 443), timeout=6) as raw:
-                with context.wrap_socket(raw, server_hostname=host) as connection:
-                    connection.settimeout(6)
-                    connection.sendall(('GET ' + healthcheck + ' HTTP/1.1\r\nHost: ' + host +
-                                        '\r\nConnection: close\r\n\r\n').encode('ascii'))
-                    response = http.client.HTTPResponse(connection)
-                    response.begin()
-                    last_status = response.status
-                    response.close()
+            last_status = _customer_https_probe_once(host, healthcheck, address)
+            last_problem = None
         except (ssl.SSLError, OSError, http.client.HTTPException, UnicodeEncodeError) as exc:
-            raise BrokerError('AUTOKOM_HTTPS_SNI_FAILED: TLS/SNI ou connexion HTTPS non validée.') from exc
+            last_problem = _customer_https_failure_category(exc)
+            logger.warning('AUTOKOM_HTTPS_PROBE host=%s interface=%s result=%s attempt=%d',
+                           host, 'ingress' if address != '127.0.0.1' else 'loopback',
+                           last_problem, attempt + 1)
+            # A permanently invalid certificate must not be ignored or retried.
+            if last_problem == 'certificate-invalid':
+                break
+            if attempt < 4:
+                time.sleep(1)
+            continue
         if 200 <= last_status < 400:
-            logger.info('AUTOKOM_HTTPS_PROXY_VERIFIED host=%s status=%d', host, last_status)
+            logger.info('AUTOKOM_HTTPS_PROXY_VERIFIED host=%s interface=%s status=%d',
+                        host, 'ingress' if address != '127.0.0.1' else 'loopback', last_status)
             return
-        if last_status not in (502, 503, 504) or attempt == 3:
+        logger.warning('AUTOKOM_HTTPS_PROBE host=%s interface=%s result=http-%d attempt=%d',
+                       host, 'ingress' if address != '127.0.0.1' else 'loopback',
+                       last_status, attempt + 1)
+        if last_status not in (502, 503, 504):
             break
-        time.sleep(1)
+        if attempt < 4:
+            time.sleep(1)
+    if last_problem is not None:
+        # An optional loopback comparison is diagnostic only, NEVER a pass.
+        if address != '127.0.0.1':
+            try:
+                alternate = _customer_https_probe_once(host, healthcheck, '127.0.0.1')
+                logger.warning('AUTOKOM_HTTPS_PROBE host=%s interface=loopback '
+                               'result=http-%d diagnostic-only=true', host, alternate)
+            except (ssl.SSLError, OSError, http.client.HTTPException, UnicodeEncodeError) as exc:
+                logger.warning('AUTOKOM_HTTPS_PROBE host=%s interface=loopback '
+                               'result=%s diagnostic-only=true', host,
+                               _customer_https_failure_category(exc))
+        if last_problem == 'certificate-invalid':
+            raise BrokerError('AUTOKOM_HTTPS_CERT_INVALID: Chaîne TLS ou nom DNS du certificat invalide.')
+        raise BrokerError('AUTOKOM_HTTPS_SNI_FAILED: Liaison TLS/SNI sur interface publique privée non validée '
+                          '(' + last_problem + ').')
     raise BrokerError('AUTOKOM_HTTPS_UPSTREAM_FAILED: '
                       'Le reverse proxy HTTPS retourne HTTP ' + str(last_status) + '.')
 
