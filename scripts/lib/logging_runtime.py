@@ -291,15 +291,51 @@ def docker_volume_path():
     return mount
 
 
+def native_failure_summary():
+    """Expose actionable unit states without copying journals or credentials to stdout."""
+    from logging_health import http_status
+    sections = []
+    for unit in UNITS:
+        state = cmd('systemctl', 'show', unit+'.service',
+                    '-p', 'ActiveState', '-p', 'SubState', '-p', 'ExecMainStatus',
+                    '--no-pager', check=False)
+        pairs = {}
+        for line in state.stdout.splitlines():
+            if '=' in line:
+                key, value = line.split('=', 1)
+                if key in ('ActiveState', 'SubState', 'ExecMainStatus'):
+                    pairs[key] = value
+        detail = http_status(unit)['detail']
+        sections.append(f"{unit}: {pairs.get('ActiveState','unknown')}/"
+                        f"{pairs.get('SubState','unknown')}, exit={pairs.get('ExecMainStatus','?')}, "
+                        f"API={detail}")
+    return '; '.join(sections)
+
+
 def wait_ready():
+    """Wait for verified endpoints; one safe retry of failed *managed* units."""
     from logging_health import http_status
     from tool_banner import Activity
-    until=time.monotonic()+75
+    until = time.monotonic() + 60
+    retried = set()
     with Activity('Attente de disponibilité Loki et Alloy'):
-        while time.monotonic()<until:
-            if all(http_status(item)['ok'] for item in UNITS):return
+        while time.monotonic() < until:
+            if all(http_status(item)['ok'] for item in UNITS):
+                return
+            for unit in UNITS:
+                status = cmd('systemctl', 'is-failed', '--quiet', unit,
+                             check=False).returncode
+                if status == 0 and unit not in retried:
+                    # Retrying is limited to a single explicitly managed unit.
+                    if not (NATIVE / '.autokom-installed').is_file():
+                        break
+                    retried.add(unit)
+                    cmd('systemctl', 'reset-failed', unit, check=False)
+                    cmd('systemctl', 'start', unit, check=False)
             time.sleep(3)
-    raise RuntimeErrorSafe('Endpoints Loki/Alloy inaccessibles à 127.0.0.1; aucune suppression lancée')
+    raise RuntimeErrorSafe('Loki/Alloy non prêts après démarrage et reprise ciblée : '
+                           + native_failure_summary()
+                           + '. Logs précis : journalctl -u loki -u alloy -n 80 --no-pager')
 
 
 def require_confirm(source,target):
@@ -318,7 +354,12 @@ def migrate_to_native(backend):
     previous=detected()
     if previous=='mixed':raise RuntimeErrorSafe('Modes Docker et systemd simultanés : intervention manuelle')
     if previous=='systemd':
-        if not native_ready():raise RuntimeErrorSafe('Services systemd déjà présents mais indisponibles : diagnostic nécessaire')
+        if not native_ready():
+            if not (NATIVE/'.autokom-installed').is_file():
+                raise RuntimeErrorSafe('Services systemd non gérés : réparation refusée')
+            for unit in UNITS:
+                cmd('systemctl', 'enable', '--now', unit, check=False)
+            wait_ready()
         from logging_stack import provision_grafana
         from logging_monitoring import apply as apply_monitoring
         changed=provision_grafana();apply_monitoring()
@@ -334,7 +375,11 @@ def migrate_to_native(backend):
         validate_managed(read_manifest())
     backup=new_backup()
     backup_configs(backup)
-    install_vendor_packages()
+    # A failed first installation has already downloaded and pinned packages.
+    # Avoid APT work on every repair attempt when binaries and AUTOKOM marker exist.
+    if not ((NATIVE/'.autokom-installed').is_file()
+            and shutil.which('loki') and shutil.which('alloy')):
+        install_vendor_packages()
     prepare_native()
     if previous=='docker':
         # Stop before copying Loki TSDB to avoid inconsistent filesystem state.

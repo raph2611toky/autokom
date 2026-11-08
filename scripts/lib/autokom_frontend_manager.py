@@ -7,7 +7,7 @@ Ne touche ni aux vhosts backend, ni à BIND9, Cloudflare, Jenkins ou Docker.
 """
 from __future__ import annotations
 
-from autokom_nginx_bind_policy import tls_detected
+from autokom_nginx_bind_policy import tls_detected, addresses, https_listens
 
 import argparse
 import fcntl
@@ -16,6 +16,7 @@ import json
 import ipaddress
 import os
 import socket
+import ssl
 import time
 from pathlib import Path
 import pwd
@@ -45,6 +46,7 @@ DEPLOY_LOCK = Path('/run/lock/autokom-frontend-deploy.lock')
 FRONTEND_LOGS = Path('/var/log/autokom/frontend')
 BUILDER = 'autokom-frontend-builder'
 VHOST = Path('/etc/nginx/sites-available/autokom-frontend.conf')
+ACME_WEBROOT = Path('/var/www/autokom-acme')
 MARKER = '# MANAGED BY AUTOKOM FRONTEND'
 RULES = ROOT / 'pipelines/autokom-frontend/semgrep-rules.yml'
 NODE_PLAYBOOK = ROOT / 'ansible/playbooks/frontend-node.yml'
@@ -278,7 +280,7 @@ def nginx_release_guard(config):
 
 def nginx_config(front, back, port):
     # API Django directement via loopback, et non via une IP Cloudflare.
-    return nginx_release_guard(f'''{MARKER}
+    config = nginx_release_guard(f'''{MARKER}
 server {{
     listen 80;
     listen [::]:80;
@@ -328,7 +330,146 @@ server {{
     location ~ /\\. {{ deny all; }}
 }}
 ''')
+    if addresses():
+        # Certbot webroot only in the separated GCP HTTPS bind mode.
+        # This block must exist before Certbot checks HTTP-01.
+        acme = ("    location ^~ /.well-known/acme-challenge/ {\n"
+                f"        root {ACME_WEBROOT};\n"
+                "        default_type text/plain;\n"
+                "        try_files $uri =404;\n"
+                "    }\n")
+        marker = '    location = /__autokom/health {'
+        if config.count(marker) != 1:
+            raise FrontendError('Point ACME frontend ambigu')
+        config = config.replace(marker, acme + marker, 1)
+    return config
 
+
+
+def tls_nginx_config(front, back, port):
+    """Generate exact-address HTTPS on GCP; do not let Certbot edit listeners."""
+    if not addresses():
+        raise FrontendError('La politique HTTPS dédiée est absente : lancer nginx repair --check.')
+    html = nginx_config(front, back, port)
+    prefix = '    listen 80;\n    listen [::]:80;\n'
+    if html.count(prefix) != 1:
+        raise FrontendError('Template Nginx frontend inattendu')
+    cert = f'/etc/letsencrypt/live/{front}'
+    tls = html.replace(prefix, (
+        https_listens() +
+        f'    ssl_certificate {cert}/fullchain.pem;\n'
+        f'    ssl_certificate_key {cert}/privkey.pem;\n'
+        '    ssl_protocols TLSv1.2 TLSv1.3;\n'), 1)
+    http = (f'{MARKER}\nserver {{\n'
+            '    listen 80;\n    listen [::]:80;\n'
+            f'    server_name {front};\n'
+            '    location ^~ /.well-known/acme-challenge/ {\n'
+            f'        root {ACME_WEBROOT};\n'
+            '        default_type text/plain;\n'
+            '        try_files $uri =404;\n'
+            '    }\n'
+            '    location / { return 308 https://$host$request_uri; }\n'
+            '}\n')
+    return http + '\n' + tls
+
+
+def prepare_acme_webroot():
+    """Ensure only the public ACME token path, never change other webroots."""
+    for p in (ACME_WEBROOT, ACME_WEBROOT / '.well-known',
+              ACME_WEBROOT / '.well-known/acme-challenge'):
+        if p.is_symlink():
+            raise FrontendError('Webroot ACME symbolique interdit')
+        p.mkdir(parents=True, exist_ok=True)
+        if not p.is_dir():
+            raise FrontendError('Webroot ACME non valide')
+        p.chmod(0o755)
+
+
+
+def verify_acme_http(front):
+    """Probe a real token through the targeted Nginx vhost BEFORE contacting CA.
+
+    A valid nginx -t does not prove the challenge location serves the file.
+    This catches the reported HTTP-01 404 without burning a Let's Encrypt retry.
+    """
+    import urllib.request
+    import urllib.error
+    prepare_acme_webroot()
+    challenge = ACME_WEBROOT / '.well-known/acme-challenge'
+    token = 'autokom-preflight-' + os.urandom(12).hex()
+    target = challenge / token
+    content = ('autokom-acme-' + os.urandom(12).hex()).encode('ascii')
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o644)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(content)
+        req = urllib.request.Request('http://127.0.0.1/.well-known/acme-challenge/' + token,
+                                     headers={'Host': front, 'User-Agent': 'AUTOKOM-ACME-Preflight/1'})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(req, timeout=6) as result:
+                observed = result.read(1024)
+                status = result.status
+        except urllib.error.HTTPError as exc:
+            raise FrontendError(f'ACME HTTP-01 : HTTP {exc.code} sur {front} avant Certbot ; '
+                                'le vhost Nginx ne sert pas le challenge.') from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise FrontendError('ACME HTTP-01 : port 80 Nginx inaccessible en local ; '
+                                'aucune demande de certificat effectuée.') from exc
+        if status != 200 or observed != content:
+            raise FrontendError('ACME HTTP-01 : mauvaise réponse sur le vhost '+front+
+                                ' ; Certbot non lancé.')
+        print('  ✓ Challenge ACME HTTP-01 validé en local pour ' + front)
+    finally:
+        target.unlink(missing_ok=True)
+
+
+def verify_frontend_tls(front, *, attempts=8):
+    """Verify SNI and the real HTTPS socket, not only nginx -t/reload."""
+    context = ssl.create_default_context()
+    last = 'TLS indisponible'
+    for attempt in range(attempts):
+        try:
+            with socket.create_connection(('127.0.0.1', 443), timeout=3) as raw:
+                with context.wrap_socket(raw, server_hostname=front) as conn:
+                    conn.settimeout(3)
+                    conn.sendall((f'GET /__autokom/health HTTP/1.1\r\n'
+                                  f'Host: {front}\r\nConnection: close\r\n\r\n').encode('ascii'))
+                    header = conn.recv(4096).decode('latin1', 'replace')
+                    if header.startswith('HTTP/1.1 200 ') or header.startswith('HTTP/1.0 200 '):
+                        return
+                    last = 'réponse HTTPS non conforme'
+        except (OSError, ssl.SSLError, ValueError):
+            last = 'connexion HTTPS/SNI refusée'
+        if attempt < attempts - 1:
+            time.sleep(1)
+    raise FrontendError('Le frontend HTTPS a échoué : ' + last)
+
+
+def publish_tls_vhost(front, back, port):
+    """Validate, reload, probe and rollback the *managed* frontend vhost."""
+    before = VHOST.read_text(encoding='utf-8')
+    after = tls_nginx_config(front, back, port)
+    if before == after:
+        verify_frontend_tls(front)
+        return
+    VHOST.write_text(after, encoding='utf-8')
+    VHOST.chmod(0o644)
+    try:
+        run(['nginx', '-t'], timeout=20)
+        run(['systemctl', 'reload', 'nginx'], timeout=30)
+        verify_frontend_tls(front)
+    except FrontendError as issue:
+        VHOST.write_text(before, encoding='utf-8')
+        VHOST.chmod(0o644)
+        try:
+            run(['nginx', '-t'], timeout=20)
+            run(['systemctl', 'reload', 'nginx'], timeout=30)
+        except FrontendError as rollback_error:
+            raise FrontendError('HTTPS frontend non validé ; restauration Nginx échouée : '
+                                'intervention requise, ne pas déployer.') from rollback_error
+        raise FrontendError('HTTPS frontend non validé : ancien vhost restauré ; '
+                            'examiner les journaux Nginx et Certbot.') from issue
 
 def builder_access(flag, path):
     """Check effective rights with the isolated Unix build account (not root)."""
@@ -466,7 +607,14 @@ def acme_email(explicit=None):
 
 def certbot_command(front, email):
     """Arguments non-interactifs, y compris si aucun e-mail n'est fourni."""
-    cmd = ['certbot', '--nginx', '--non-interactive', '--agree-tos', '--redirect']
+    if addresses():
+        # No nginx plugin: it would recreate wildcard listen 443 ssl and collide
+        # with an existing process bound to the VPN IP on the same port.
+        cmd = ['certbot', 'certonly', '--webroot', '-w', str(ACME_WEBROOT),
+               '--non-interactive', '--agree-tos', '--keep-until-expiring']
+    else:
+        # Legacy deployments without the repaired HTTPS bind policy.
+        cmd = ['certbot', '--nginx', '--non-interactive', '--agree-tos', '--redirect']
     if email:
         cmd.extend(['--email', email])
     else:
@@ -692,7 +840,11 @@ def setup(args):
             if managed_certificate_installed(front):
                 print('  ✓ Certificat TLS déjà installé : aucune nouvelle demande ACME.')
             else:
+                if addresses():
+                    verify_acme_http(front)
                 run_live(certbot_command(front, email), label='Certificat HTTPS Let’s Encrypt', timeout=300)
+                if addresses():
+                    publish_tls_vhost(front, back, backend_port())
     save_state({'domain': front, 'backend_domain': back, 'nginx_mode': args.nginx_mode,
                 'tls_mode': args.tls_mode, 'releases': previous.get('releases', []) if previous else [],
                 'active': previous.get('active') if previous else None})

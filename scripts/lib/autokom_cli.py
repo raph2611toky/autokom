@@ -660,6 +660,8 @@ Une phase Jenkins interrompue reste à terminer, même si le paquet est install�
     i.add_argument('--backend', choices=('loki','opensearch','both'), help='Pour logs : installer un backend ou les deux (défaut : both)')
     i.add_argument('--runtime',choices=('docker','systemd'), help='Pour Loki/Alloy : Docker Compose ou services systemd')
     subcommand('status', help='État synthétique des composants', epilog='Exemple : autokom status')
+    subcommand('recover', help='Réparer Loki/Alloy, intégrer Grafana et activer le frontend HTTPS',
+               epilog='Exemple : sudo autokom recover --check puis --apply')
     subcommand('check', help='Audit complet (équivalent script verify/stack.py)', epilog='Exemple : sudo autokom check')
     subcommand('config', help='Voir les ports, URLs et domaines, sans secrets', epilog='Exemple : autokom config')
     c = subcommand('configure', help='Configuration interactive ciblée (expert)',
@@ -768,6 +770,7 @@ def main(argv=None):
             (cmd=='domains' and '--apply' in arguments) or
             (cmd=='runtime' and '--apply' in arguments) or
             (cmd in ('update','configure')) or
+            (cmd=='recover' and '--apply' in arguments) or
             (cmd=='app' and len(arguments)>1 and arguments[1] in ('setup','deploy') and '--check' not in arguments) or
             (cmd=='install' and '--check' not in arguments) or
             (cmd=='logs' and ('--apply' in arguments or (len(arguments)>1 and arguments[1]=='use'))) or
@@ -789,6 +792,10 @@ def main(argv=None):
         from autokom_domain_migration import main as domains_main, MigrationError
         try: return domains_main(arguments[1:])
         except MigrationError as exc: raise CLIError(str(exc)) from exc
+    if arguments and arguments[0] == 'recover':
+        from autokom_recover import main as recover_main, RecoverError
+        try:return recover_main(arguments[1:])
+        except RecoverError as exc:raise CLIError(str(exc)) from exc
     if arguments and arguments[0] == 'app':
         from autokom_app_manager import main as app_main, AppError
         try:
