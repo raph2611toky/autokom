@@ -3,6 +3,7 @@ import { cleanCustomerLog, phaseTitles, publicationLabel } from './deploymentPre
 
 const STAGE = /^AUTOKOM_STAGE:(source|sast|sca|build|release|health):(RUNNING|SUCCESS|FAILED|SKIPPED)$/
 const TECH = /^AUTOKOM_TECH:(source|sast|sca|build|release|health):([\s\S]{1,800})$/
+const DETAIL = /^AUTOKOM_TRACE:(source|sast|sca|build|release|health):(broker|docker|application|pipeline):([^\r\n]{1,700})$/
 
 export function technicalTimeline(messages) {
   let current = 'source'
@@ -13,6 +14,10 @@ export function technicalTimeline(messages) {
       current = stage[1]
       const description = `${phaseTitles[current]} : ${publicationLabel(stage[2])[0]}`
       return [{...item, stage_key:current, display:description}]
+    }
+    if (item.level === 'DETAIL') {
+      const trace = DETAIL.exec(item.message)
+      return trace ? [{...item, stage_key:trace[1], channel:trace[2], display:trace[3], isDetail:true}] : []
     }
     if (item.level === 'TECH') {
       const raw = TECH.exec(item.message)

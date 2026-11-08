@@ -1,5 +1,6 @@
 """Client APIs. One HTTP method per APIView, guarded by object-level access."""
 from django.utils import timezone
+from django.http import HttpResponse
 from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework.parsers import JSONParser
@@ -122,7 +123,7 @@ class DeploymentLogsAPIView(APIView):
                 raise ValidationError({'mode': 'Mode de journal non pris en charge.'})
             qs = DeploymentLogEntry.objects.filter(deployment=run, sequence__gt=after)
             if mode == 'simple':
-                qs = qs.exclude(level='TECH')
+                qs = qs.exclude(level='DETAIL')
             qs = qs.order_by('sequence')
             entries = list(qs[:100])
             return api_success({'logs': DeploymentLogSerializer(entries, many=True).data,
@@ -131,6 +132,30 @@ class DeploymentLogsAPIView(APIView):
         except Exception as exc:
             return handle_error(exc, 'deployment_logs')
 
+
+class DeploymentLogDownloadAPIView(APIView):
+    """Download only the same pre-filtered, project-scoped journal visible to the user."""
+    permission_classes = [IsClientUser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'deploy_logs'
+
+    def get(self, request, project_id, environment_id, run_id):
+        try:
+            run = accessible_run(request.user, project_id, environment_id, run_id)
+            lines = [f'AUTOKOM · Journal de publication {str(run.pk)[:8]}',
+                     'Contenu filtré pour le propriétaire du projet · aucune console Jenkins brute', '']
+            for entry in DeploymentLogEntry.objects.filter(deployment=run).order_by('sequence')[:10000]:
+                # Every stored message passed through server-side sanitization first.
+                message = entry.message.replace('\r', '').replace('\n', ' ')[:800]
+                lines.append(f'{entry.created_at.isoformat()} [{entry.level}] {message}')
+            content = '\n'.join(lines) + '\n'
+            response = HttpResponse(content, content_type='text/plain; charset=utf-8')
+            response['Content-Disposition'] = 'attachment; filename="autokom-publication-' + str(run.pk)[:8] + '.log"'
+            response['Cache-Control'] = 'no-store, private'
+            response['X-Content-Type-Options'] = 'nosniff'
+            return response
+        except Exception as exc:
+            return handle_error(exc, 'deployment_log_download')
 
 class DeploymentCancelAPIView(APIView):
     parser_classes = [JSONParser]

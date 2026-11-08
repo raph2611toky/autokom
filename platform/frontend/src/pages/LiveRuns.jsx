@@ -30,7 +30,7 @@ function RunDetails({ navigate, projectId, runId }) {
   const [projectInfo,setProjectInfo] = useState(null)
   const [run,setRun] = useState(null)
   const [messages,setMessages] = useState([])
-  const [logMode,setLogMode] = useState('technical')
+  const [logMode,setLogMode] = useState('simple')
   const [stageFilter,setStageFilter] = useState('all')
   const [more,setMore] = useState(false)
   const [loading,setLoading] = useState(true)
@@ -100,8 +100,7 @@ function RunDetails({ navigate, projectId, runId }) {
   if (loading) return <section className="ak-workspace-empty" role="status"><LoaderCircle className="ak-spin" size={20}/> Chargement de la publication…</section>
   if (!run || !projectInfo) return <section className="ak-workspace-empty"><h1>Publication introuvable</h1>{error && <p role="alert">{error}</p>}<button className="button-outline" onClick={() => navigate(`/projects/${projectId}`)}>Revenir au projet</button></section>
   const sortedStages = [...(run.stages || [])].sort((a,b) => (a.position || phaseOrder.indexOf(a.stage_key)) - (b.position || phaseOrder.indexOf(b.stage_key)))
-  const safeMessages = messages.map(item => ({ ...item, safe:cleanCustomerLog(item.message) })).filter(item => item.safe && item.level !== 'TECH')
-  const technicalMessages = technicalTimeline(messages)
+  const logLines = technicalTimeline(messages)
     .filter(item => stageFilter === 'all' || item.stage_key === stageFilter)
   const selectMode = next => { if (next !== logMode) { setStageFilter('all'); setLogMode(next) } }
   return <>
@@ -129,18 +128,22 @@ function RunDetails({ navigate, projectId, runId }) {
           <button type="button" className={logMode==='simple'?'active':''} aria-pressed={logMode==='simple'} onClick={() => selectMode('simple')}><ListChecks size={15}/> Synthèse</button>
         </div>
       </div>
-      {logMode === 'technical' ? <>
-        <div className="ak-log-filter"><label htmlFor="ak-stage-filter">Filtrer par étape</label><select id="ak-stage-filter" value={stageFilter} onChange={event=>setStageFilter(event.target.value)}>
+      <div className="ak-log-filter">
+        <label htmlFor="ak-stage-filter">Filtrer par étape</label>
+        <select id="ak-stage-filter" value={stageFilter} onChange={event=>setStageFilter(event.target.value)}>
           <option value="all">Toutes les étapes</option>
           {phaseOrder.map(key => <option key={key} value={key}>{phaseTitles[key]}</option>)}
-        </select><span>Seules les lignes de diagnostic autorisées sont affichées.</span></div>
-        <div className="ak-log-console" role="log" aria-label="Journal technique de la publication" aria-live="off">
-          {technicalMessages.length ? technicalMessages.map(row => <div key={row.sequence} className="ak-log-console-line"><time>{dateTime(row.created_at)}</time><span className="ak-log-stage-label">{phaseTitles[row.stage_key] || 'Préparation'}</span><code>{row.display}</code></div>) :
-            <p className="ak-log-console-empty">{run.status === 'FAILED' ? 'Cette ancienne publication ne contient pas de diagnostic technique conservé. Les nouvelles publications disposeront de journaux détaillés ; contactez l’assistance pour cet historique.' : 'Aucun diagnostic technique disponible pour cette étape.'}</p>}
-        </div>
-      </> : <>
-        {safeMessages.length ? <ol className="ak-run-log-list">{safeMessages.map(row => <li key={row.sequence}><time>{dateTime(row.created_at)}</time><span>{row.safe}</span></li>)}</ol> : <p className="ak-deployment-hint">Aucune information disponible pour le moment.</p>}
-      </>}
+        </select>
+        <span>{logMode === 'technical' ? 'Journal enrichi, filtré par projet et sans secrets.' : 'Même chronologie que l’ancien journal technique.'}</span>
+        <a className="button-outline ak-log-download" download href={`/api/projects/${projectId}/environments/${projectInfo.environment.id}/deployments/${runId}/logs/download/`}><FileText size={15}/> Télécharger .log</a>
+      </div>
+      <div className={`ak-log-console ${logMode==='technical'?'ak-log-console-detailed':''}`} role="log" aria-label={logMode==='technical'?'Journal technique de la publication':'Synthèse de la publication'} aria-live="off">
+        {logLines.length ? logLines.map(row => <div key={row.sequence} className={`ak-log-console-line ${row.isDetail?'ak-log-diagnostic':''}`}>
+          <time>{dateTime(row.created_at)}</time>
+          <span className="ak-log-stage-label">{row.channel ? `${phaseTitles[row.stage_key] || 'Préparation'} · ${row.channel}` : phaseTitles[row.stage_key] || 'Préparation'}</span>
+          <code>{row.display}</code>
+        </div>) : <p className="ak-log-console-empty">{run.status === 'FAILED' ? 'Cette exécution ne possède pas de diagnostic détaillé conservé. Les prochaines publications préserveront une analyse de démarrage.' : 'Aucune information disponible pour cette étape.'}</p>}
+      </div>
       {more && <button className="button-outline ak-run-loadmore" disabled={busy} onClick={loadMore}>{busy ? <LoaderCircle size={16} className="ak-spin"/> : <ArrowRight size={16}/>} Charger davantage de lignes</button>}
     </section>
     <details className="ak-workspace-sheet ak-project-config-fold"><summary className="ak-workspace-sheet-heading ak-project-config-summary"><h2>Configuration utilisée</h2><span className="ak-project-config-suffix"><GitBranch size={18}/></span></summary>

@@ -25,7 +25,7 @@ def add_log(run, line, level='INFO'):
     line = redact(line)
     # Markers are informational only. Never use customer-originated log text as
     # proof that a security scan or deployment has passed.
-    if not line.startswith(('AUTOKOM_LOG:', 'AUTOKOM_STAGE:', 'AUTOKOM_TECH:')) and level != 'ERROR':
+    if not line.startswith(('AUTOKOM_LOG:', 'AUTOKOM_STAGE:', 'AUTOKOM_TECH:', 'AUTOKOM_TRACE:')) and level != 'ERROR':
         return
     # Serialize sequence allocation per deployment across multiple workers.
     # Prevents duplicate sequence IDs during overlapping log polling.
@@ -261,6 +261,24 @@ def poll_one(client, run_id):
             except Exception as exc:
                 code=getattr(exc, 'safe_code', None)
                 safe_code = code if isinstance(code,str) and re.fullmatch(r'AUTOKOM_[A-Z0-9_]{3,80}',code) else 'AUTOKOM_PUBLISH_FAILED'
+                add_log(run, 'AUTOKOM_TRACE:release:broker:Échec de publication · '+safe_code, level='DETAIL')
+                try:
+                    diagnostic=request_control('runtime.diagnostics', {
+                        'run_id':str(run.pk), 'environment_id':str(run.environment_id),
+                    },timeout=12)
+                    if diagnostic.get('available'):
+                        status=str(diagnostic.get('container_status','unknown'))
+                        if status not in {'running','exited','restarting','dead','created','paused','unknown','unavailable'}:
+                            status='unknown'
+                        exit_code=diagnostic.get('exit_code')
+                        add_log(run, 'AUTOKOM_TRACE:release:docker:État='+status+' · code de sortie='+(
+                            str(exit_code) if type(exit_code) is int else 'inconnu')+
+                            ' · OOM='+('oui' if diagnostic.get('oom_killed') else 'non'), level='DETAIL')
+                        for line in diagnostic.get('lines', [])[:24]:
+                            if isinstance(line,str) and len(line)<=260:
+                                add_log(run, 'AUTOKOM_TRACE:release:application:'+line, level='DETAIL')
+                except Exception:
+                    logger.warning('Diagnostic conteneur indisponible pour %s',run.pk)
                 add_log(run, 'AUTOKOM_TECH:release:Échec lors de la publication ; code='+safe_code, level='TECH')
                 try:
                     request_control('runtime.rollback', {

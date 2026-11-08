@@ -41,7 +41,7 @@ class TechnicalLogContractTests(unittest.TestCase):
         views = (FILE.parent/'views.py').read_text()
         self.assertIn('accessible_run(request.user, project_id, environment_id, run_id)', views)
         self.assertIn("mode == 'simple'", views)
-        self.assertIn("qs.exclude(level='TECH')", views)
+        self.assertIn("qs.exclude(level='DETAIL')", views)
         self.assertIn("mode not in ('technical', 'simple')", views)
     def test_worker_keeps_only_approved_stream_and_stage_is_scoped(self):
         worker = (FILE.parent/'worker.py').read_text()

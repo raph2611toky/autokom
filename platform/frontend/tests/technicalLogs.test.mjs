@@ -7,7 +7,7 @@ const proj='11111111-1111-4111-8111-111111111111'
 const env='22222222-2222-4222-8222-222222222222'
 const run='33333333-3333-4333-8333-333333333333'
 
-test('technical mode is the default and only supported modes are sent to Django', async () => {
+test('technical and summary modes are both available with authorized Django endpoints', async () => {
   const old=globalThis.fetch
   const calls=[]
   globalThis.fetch=async path=>{
@@ -24,7 +24,7 @@ test('technical mode is the default and only supported modes are sent to Django'
 })
 test('journal UI has two modes and stage filtering but no direct Jenkins API', () => {
   const view=readFileSync(new URL('../src/pages/LiveRuns.jsx',import.meta.url),'utf8')
-  assert.match(view,/useState\('technical'\)/)
+  assert.match(view,/useState\('simple'\)/)
   assert.match(view,/Technique<\/button>/)
   assert.match(view,/Synthèse<\/button>/)
   assert.match(view,/Filtrer par étape/)

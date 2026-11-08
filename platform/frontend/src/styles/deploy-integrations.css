@@ -215,3 +215,10 @@
 .ak-gh-permission-handoff { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin:12px 0; padding:12px; border:1px solid var(--border, #39404c); border-radius:8px; }
 .ak-gh-permission-handoff span { flex:1; min-width:190px; }
 .ak-gh-install-action { display:inline-flex; align-items:center; gap:8px; text-decoration:none; }
+
+/* Journal détaillé : affichage de type fichier, sans console administrateur. */
+.ak-log-download { display:inline-flex; align-items:center; gap:7px; text-decoration:none; margin-left:auto; }
+.ak-log-console-detailed { border-left-color:var(--ak-focus); min-height:230px; max-height:640px; }
+.ak-log-diagnostic { background:var(--ak-surface); }
+.ak-log-diagnostic .ak-log-stage-label { color:var(--ak-focus); }
+@media(max-width:650px){.ak-log-download{width:100%;justify-content:center;margin-left:0;} }

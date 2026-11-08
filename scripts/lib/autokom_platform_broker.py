@@ -35,6 +35,7 @@ import base64
 import urllib.request
 import threading
 import autokom_internal_ingress as ingress
+from autokom_customer_diagnostics import capture as capture_customer_diagnostics, read as read_customer_diagnostics
 
 logger = logging.getLogger('autokom.runtime.broker')
 SOCKET = Path('/run/autokom/platform-control.sock')
@@ -363,7 +364,7 @@ def _docker_deploy_inner(params):
                     if 200<=resp.status<400:break
             except Exception:pass
             time.sleep(2)
-        else:raise BrokerError('L’application ne répond pas à son healthcheck. Ancienne version conservée.')
+        else:raise BrokerError('AUTOKOM_CONTAINER_HEALTHCHECK_FAILED: Application non disponible sur son port interne. Ancienne version conservée.')
         previous=_load_state(environment)
         doc={'environment_id':environment,'run_id':rid,'port':external_port,'name':name,'network':network,'healthcheck':health,**relay}
         # Persist previous BEFORE current so a failed snapshot cannot corrupt the active state.
@@ -381,6 +382,11 @@ def _docker_deploy_inner(params):
             raise
         return {'port':external_port,'container':name,'previous':previous.get('name') if previous else None}
     except Exception:
+        # Snapshot the failed run BEFORE docker rm -f destroys its evidence.
+        try:
+            capture_customer_diagnostics(STATE, environment, rid, name, failure='container_start_or_health')
+        except Exception:
+            logger.warning('AUTOKOM_CUSTOMER_DIAGNOSTIC_CAPTURE_FAILED run=%s', rid)
         if relay is not None:
             try:
                 ingress.remove(name, execute=run, available=PROXY, enabled=ENABLED)
@@ -1236,6 +1242,10 @@ def handle(action,params):
     if action=='runtime.status':
         env=valid_id(params.get('environment_id'))
         return {'runtime':_load_state(env)}
+    if action=='runtime.diagnostics':
+        env = valid_id(params.get('environment_id'))
+        rid = valid_id(params.get('run_id'))
+        return read_customer_diagnostics(STATE, env, rid)
     if action=='runtime.logs':
         env=valid_id(params.get('environment_id'))
         state=_load_state(env)
