@@ -9,6 +9,7 @@ import {
 import ThemeToggle from '../components/ThemeToggle.jsx'
 import { useAuth } from '../context/AuthContext.jsx'
 import ContactSection from './ContactSection.jsx'
+import CookieConsent from '../components/CookieConsent.jsx'
 import { PRICING_PLANS, formatAr, rememberPlan } from '../config/pricing.js'
 import { AUTOKOM_MARK_OUTLINE } from '../config/brandOutline.js'
 import '../styles/landing.css'
@@ -434,8 +435,9 @@ export default function Landing({ navigate, theme, onToggleTheme }) {
           <div className="lp-footer-links"><span>EXPLORER</span><a href="#fonctionnement">Fonctionnement</a><a href="#fonctionnalites">Fonctionnalités</a><a href="#tarifs">Tarifs</a><a href="#securite">Sécurité</a><a href="#contact">Nous contacter</a></div>
           <div className="lp-footer-links"><span>PLATEFORME</span><button type="button" onClick={() => navigate('/login')}>Connexion</button><button type="button" onClick={() => navigate('/register')}>Inscription</button><button type="button" onClick={() => navigate('/deploy')}>Configurer un projet</button><button type="button" onClick={replayIntro}>Revoir l’animation d’accueil</button></div>
         </div>
-        <div className="lp-container lp-footer-bottom"><span>© {new Date().getFullYear()} AUTOKOM. Tous droits réservés.</span><span>PLATEFORME DE DÉPLOIEMENT • DEVOPS / DEVSECOPS</span></div>
+        <div className="lp-container lp-footer-bottom"><span>© {new Date().getFullYear()} AUTOKOM. Tous droits réservés.</span><button type="button" className="lp-cookie-footer-button" onClick={() => window.dispatchEvent(new Event('autokom:cookie-open'))}>Préférences cookies</button><span>PLATEFORME DE DÉPLOIEMENT • DEVOPS / DEVSECOPS</span></div>
       </footer>
+      <CookieConsent visible={introState === 'done'} />
     </div>
   )
 }

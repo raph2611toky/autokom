@@ -127,7 +127,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_CLASSES': ['rest_framework.throttling.AnonRateThrottle'],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '60/hour', 'login': '10/hour', 'registration': '5/hour',
-        'reset': '6/hour', 'refresh': '60/hour', 'github_oauth': '20/hour', 'github_browse': '30/min',
+        'reset': '6/hour', 'refresh': '60/hour', 'github_oauth': '20/hour', 'github_browse': '30/min', 'contact': '4/hour',
     },
 }
 SWAGGER_SETTINGS = {
@@ -167,6 +167,8 @@ EMAIL_USE_TLS = env_bool('EMAIL_USE_TLS', True)
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'AUTOKOM <no-reply@example.invalid>')
+EMAIL_SUPPORT = os.getenv('EMAIL_SUPPORT', '').strip()
+EMAIL_TIMEOUT = 10  # Envoi public : ne pas laisser les workers Gunicorn suspendus indéfiniment.
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173').rstrip('/')
 
 CLIENT_JWT_SIGNING_KEY = os.getenv('CLIENT_JWT_SIGNING_KEY', '')
