@@ -13,7 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts/lib'))
 import autokom_recover as rec
 import autokom_frontend_manager as fm
 import autokom_cli
+import autokom_control_recovery as ctrl
 import logging_runtime as lr
+from autokom_runtime_integrity import Integrity
+integrity_ok = Integrity(True, True, True, True, True)
 
 class ACMEPreflightTests(unittest.TestCase):
     def test_success_creates_private_random_token_and_removes_it(self):
@@ -50,6 +53,8 @@ class RecoverFlowTests(unittest.TestCase):
         with patch.object(rec,'logging_target',return_value=('systemd','loki')), \
              patch.object(rec,'frontend_targets',return_value=('auto.ikom.mg','backend.auto.ikom.mg')), \
              patch('autokom_app_manager.verify_health',return_value=True), \
+             patch('autokom_runtime_integrity.inspect',return_value=integrity_ok), \
+             patch.object(ctrl,'inspect',return_value=ctrl.Health('active','active','ok',True)), \
              patch('logging_stack.install_complete',return_value=False), \
              patch.object(rec,'ready_frontend',return_value=False), \
              patch('logging_runtime.apply',side_effect=AssertionError('mutation')), \
@@ -61,6 +66,8 @@ class RecoverFlowTests(unittest.TestCase):
         with patch.object(rec,'logging_target',return_value=('systemd','loki')), \
              patch.object(rec,'frontend_targets',return_value=('auto.ikom.mg','backend.auto.ikom.mg')), \
              patch('autokom_app_manager.verify_health',return_value=True), \
+             patch('autokom_runtime_integrity.inspect',return_value=integrity_ok), \
+             patch.object(ctrl,'inspect',return_value=ctrl.Health('active','active','ok',True)), \
              patch('logging_stack.install_complete',side_effect=[False,True]), \
              patch.object(rec,'ready_frontend',side_effect=[False,False,True]), \
              patch('logging_runtime.apply') as native, \
@@ -79,6 +86,8 @@ class RecoverFlowTests(unittest.TestCase):
         with patch.object(rec,'logging_target',return_value=('systemd','loki')), \
              patch.object(rec,'frontend_targets',return_value=('auto.ikom.mg','backend.auto.ikom.mg')), \
              patch('autokom_app_manager.verify_health',return_value=True), \
+             patch('autokom_runtime_integrity.inspect',return_value=integrity_ok), \
+             patch.object(ctrl,'inspect',return_value=ctrl.Health('active','active','ok',True)), \
              patch('logging_stack.install_complete',return_value=False), \
              patch.object(rec,'ready_frontend',side_effect=[False,False,True]), \
              patch('logging_runtime.apply',side_effect=lr.RuntimeErrorSafe('Loki fail')), \

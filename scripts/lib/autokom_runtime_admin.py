@@ -405,30 +405,17 @@ except (OSError,ValueError,KeyError,TypeError):
     except (BuildkitError, OSError, KeyError) as exc:
         raise SetupError('BuildKit rootless non opérationnel : ' + str(exc)) from exc
     print('  ✓ BuildKit rootless accessible par Jenkins : socket, worker et RUN validés.')
-    # DevSecOps stages must actually be executable as the isolated builder.
-    # No customer code is scanned in doctor and no privilege is broadened.
-    import shutil
+    # Verify the real agent environment, not root's executable search path.
+    from autokom_runtime_integrity import inspect as integrity_inspect
+    security = integrity_inspect()
     checks=[]
-    for tool in ('semgrep','trivy'):
-        binary=shutil.which(tool)
-        if not binary:
-            checks.append(tool+' absent')
-            continue
-        try:
-            probe=subprocess.run(['runuser','-u','autokom-builder','--',binary,'--version'],
-                                 capture_output=True,timeout=12)
-            if probe.returncode: checks.append(tool+' non exécutable par le builder')
-        except (OSError,subprocess.TimeoutExpired):
-            checks.append(tool+' inaccessible')
-    rules=Path('/usr/local/share/autokom-security/client-semgrep-rules.yml')
-    if not rules.is_file():
-        checks.append('règles Semgrep absentes')
-    else:
-        probe=subprocess.run(['runuser','-u','autokom-builder','--','test','-r',str(rules)],
-                             capture_output=True,timeout=8)
-        if probe.returncode: checks.append('règles Semgrep illisibles')
+    if not security.semgrep: checks.append('semgrep non exécutable par le builder')
+    if not security.trivy: checks.append('trivy non exécutable par le builder')
+    if not security.rules: checks.append('règles Semgrep absentes ou illisibles')
     if checks:
-        print('  ! DevSecOps indisponible : '+', '.join(checks)+'. Corriger les scanners avant de choisir ce mode.')
+        print('  ✗ DevSecOps indisponible : '+', '.join(checks))
+        print('  › Réparation automatique : sudo autokom runtime reconcile --apply')
+        failures.append('DevSecOps')
     else:
         print('  ✓ DevSecOps : Semgrep, Trivy et règles approuvées accessibles au builder isolé.')
     # Verify the automatic repair mechanism, not only the Docker/Jenkins path.
@@ -497,7 +484,7 @@ def main(argv=None):
     group=agent.add_mutually_exclusive_group()
     group.add_argument('--check',action='store_true')
     group.add_argument('--apply',action='store_true')
-    repair = sub.add_parser('reconcile', help='Réparer le broker et le worker sans modifier les autres services')
+    repair = sub.add_parser('reconcile', help='Réparer broker/worker, scanners DevSecOps et surveillance DNS/HTTPS')
     repair_mode = repair.add_mutually_exclusive_group(required=True)
     repair_mode.add_argument('--check', action='store_true')
     repair_mode.add_argument('--apply', action='store_true')
@@ -518,12 +505,24 @@ def main(argv=None):
         return 0
     if os.geteuid():raise SetupError('Utiliser sudo autokom runtime '+opts.action)
     if opts.action=='reconcile':
-        from autokom_control_recovery import reconcile, ControlRecoveryError
+        from autokom_control_recovery import reconcile as control_reconcile, ControlRecoveryError
+        from autokom_runtime_integrity import reconcile as integrity_reconcile, IntegrityError
+        failures=[]
         try:
-            state = reconcile(apply=opts.apply)
+            control = control_reconcile(apply=opts.apply)
+            if not control.ready and opts.apply:
+                failures.append('Broker / worker non prêts')
         except ControlRecoveryError as exc:
-            raise SetupError(str(exc)) from exc
-        return 0 if (state.ready or opts.check) else 1
+            failures.append(str(exc))
+        try:
+            integrity = integrity_reconcile(apply=opts.apply)
+            if not integrity.ready and opts.apply:
+                failures.append('Scanners ou domaines non prêts')
+        except IntegrityError as exc:
+            failures.append(str(exc))
+        if failures:
+            raise SetupError('; '.join(failures))
+        return 0
     if opts.action=='jenkins-token':
         from autokom_jenkins_token import main as token_main, JenkinsTokenError
         try: return token_main(apply_mode=opts.apply)

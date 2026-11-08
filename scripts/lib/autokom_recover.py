@@ -107,12 +107,15 @@ def run(*, apply=False):
     logs_ok = install_complete(backend, mode)
     ui_ok = ready_frontend(front)
     control_ok = control_inspect().ready
+    from autokom_runtime_integrity import inspect as integrity_inspect, reconcile as integrity_reconcile
+    integrity_ok = integrity_inspect().ready
 
     print('  AUTOKOM / REPRISE AUTOMATIQUE · '+('APPLICATION' if apply else 'SIMULATION'))
     print('  Backend Django : '+('✓ prêt' if api_ok else '! à réparer avec app deploy'))
     print(f"  Journaux : {'✓ prêts' if logs_ok else '+ remise en service'} ({backend}, {mode})")
     print('  Frontend : '+('✓ publié et HTTPS vérifié' if ui_ok else '+ TLS / build / publication à finaliser'))
     print('  Déploiements : '+('✓ broker et worker accessibles' if control_ok else '+ broker/socket/worker à réconcilier'))
+    print('  Sécurité & domaines : '+('✓ scanners et reconciler opérationnels' if integrity_ok else '+ intégration DevSecOps / DNS-HTTPS à réparer'))
     print('  Domaine : https://' + front + ' → https://' + back)
     print('  Politique : aucun effacement MySQL, aucun changement UFW, aucun basculement implicite Docker ↔ systemd')
     if not apply:
@@ -144,6 +147,16 @@ def run(*, apply=False):
             print('  ✗ '+failures[-1])
     elif not api_ok:
         failures.append('Déploiements : API Django indisponible, contrôle non relancé')
+
+    if not integrity_ok:
+        try:
+            print('  › Runtime : réparation des scanners et du reconciler de domaines')
+            integrity_ok = integrity_reconcile(apply=True).ready
+            if not integrity_ok:
+                raise RecoverError('Scanners ou réconciliation DNS/HTTPS non validés')
+        except Exception as exc:
+            failures.append('Automatisation : '+str(exc))
+            print('  ✗ '+failures[-1])
 
     if not logs_ok:
         try:
@@ -199,7 +212,8 @@ def run(*, apply=False):
     print('  AUTOKOM / BILAN : Django='+('OK' if api_ok else 'ERREUR')+
           ' · Journaux='+('OK' if logs_ok else 'ERREUR')+
           ' · Frontend='+('OK' if ui_ok else 'ERREUR')+
-          ' · Déploiements='+('OK' if control_ok else 'ERREUR'))
+          ' · Déploiements='+('OK' if control_ok else 'ERREUR')+
+          ' · Automatisation='+('OK' if integrity_ok else 'ERREUR'))
     if failures:
         raise RecoverError('; '.join(failures))
     return 0
