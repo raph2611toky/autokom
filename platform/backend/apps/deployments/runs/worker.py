@@ -1,6 +1,7 @@
 """DB-backed worker. Runs in a separate systemd service, NEVER inside HTTP views."""
 import logging
 import re
+import time
 from django.db import transaction
 from django.utils import timezone
 from django.db.models import Max, Q
@@ -10,6 +11,8 @@ from apps.deployments.runs.autokom_socket import AutokomControlUnavailable
 from apps.deployments.runs.console_stream import consume_diagnostic_chunk
 
 logger = logging.getLogger('autokom.deployments')
+_NEXT_GITHUB_HEAD_CHECK = 0.0
+_GITHUB_HEAD_CHECK_OFFSET = 0
 SECRETS = re.compile(r'(?i)((?:authorization\s*:\s*bearer|password|token|secret|api[_-]?key)\s*[=:]\s*)(\S+)')
 BEARER = re.compile(r'(?i)\b(?:gh[us]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xsmtpsib-[^\s]+)\b')
 
@@ -434,6 +437,22 @@ def register_release(run):
 
 def run_tick():
     from datetime import timedelta
+    from apps.deployments.runs.push_reconcile import reconcile_received_pushes, reconcile_branch_heads
+    global _NEXT_GITHUB_HEAD_CHECK, _GITHUB_HEAD_CHECK_OFFSET
+    # Retry HMAC-verified events on each tick (database only).
+    reconcile_received_pushes(limit=12)
+    # The remote GitHub API can be slow. Never block polling or dispatch of an
+    # active CI job while checking for missing webhook deliveries. Only check
+    # a small batch during idle periods; runs are still validated/queued with
+    # the ordinary AUTOKOM entitlement and source authorization rules.
+    busy = DeploymentRun.objects.filter(status__in=['QUEUED', 'RUNNING']).exists()
+    if not busy and time.monotonic() >= _NEXT_GITHUB_HEAD_CHECK:
+        _NEXT_GITHUB_HEAD_CHECK = time.monotonic() + 90
+        try:
+            head_status = reconcile_branch_heads(offset=_GITHUB_HEAD_CHECK_OFFSET, limit=3)
+            _GITHUB_HEAD_CHECK_OFFSET = head_status['next_offset']
+        except Exception as exc:
+            logger.warning('GitHub HEAD reconciliation unavailable (%s); retry scheduled.', type(exc).__name__)
     # A network failure after POST may have left an unknown Jenkins queue ID.
     # Never retry blindly (could create a second production deployment).
     DeploymentRun.objects.filter(status='RUNNING', external_run_id='',

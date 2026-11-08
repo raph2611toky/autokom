@@ -145,44 +145,108 @@ def queue_manual(user, project_id, environment_id, *, idempotency_key=None):
 
 @transaction.atomic
 def queue_verified_push(event):
-    """Webhook signé en amont; un seul enregistrement par livraison GitHub."""
+    """Schedule a signed GitHub push, preserving valid events while a run is busy.
+
+    Every decision is recorded on the event for operational diagnosis. Replays
+    use the delivery/environment idempotency key. Non-matching installations,
+    repositories and branches are never used to authorize a deployment.
+    """
     from apps.projects.project.models import Project
     from apps.projects.environments.models import Environment
+
     event = GitWebhookEvent.objects.select_for_update().get(pk=event.pk)
     if event.status != GitWebhookEvent.Status.RECEIVED or not event.signature_verified:
         return 0
     if (event.event_type != 'push' or not SHA_RE.fullmatch(event.commit_sha or '') or
             event.commit_sha == '0' * 40):
         event.status = GitWebhookEvent.Status.IGNORED
+        event.error_message = 'IGNORED_INVALID_PUSH_OR_BRANCH_DELETION'
         event.processed_at = timezone.now()
-        event.save(update_fields=['status','processed_at'])
+        event.save(update_fields=['status', 'error_message', 'processed_at'])
         return 0
+
+    # Drop stale deliveries if a newer delivery for this very same GitHub
+    # installation/repository/branch is already recorded. The independent
+    # GitHub-HEAD reconciliation also protects against out-of-order webhooks.
+    newer = GitWebhookEvent.objects.filter(
+        connection=event.connection, repository_external_id=event.repository_external_id,
+        branch=event.branch, event_type='push', signature_verified=True,
+        received_at__gt=event.received_at,
+    ).exclude(commit_sha='0' * 40).exists()
+    if newer:
+        event.status = GitWebhookEvent.Status.IGNORED
+        event.error_message = 'SUPERSEDED_BY_NEWER_DELIVERY'
+        event.processed_at = timezone.now()
+        event.save(update_fields=['status', 'error_message', 'processed_at'])
+        return 0
+
     created = 0
-    projects = Project.objects.filter(git_connection=event.connection, status=Project.Status.ACTIVE,
-                                     repository_external_id=event.repository_external_id,
-                                     repository_name=event.repository_full_name)
+    eligible = 0
+    matched_projects = 0
+    active_environments = 0
+    last_skip_reason = 'NO_MATCHING_AUTO_DEPLOY_CONFIGURATION'
+    deferred = False
+    blocked = False
+    projects = Project.objects.filter(
+        git_connection=event.connection, status=Project.Status.ACTIVE,
+        repository_external_id=event.repository_external_id,
+        repository_name=event.repository_full_name,
+    )
     for project in projects:
+        matched_projects += 1
         for env in Environment.objects.filter(project=project, is_active=True):
+            active_environments += 1
             cfg = DeploymentConfig.objects.filter(environment=env, is_draft=False).order_by('-version').first()
-            if not cfg or not cfg.auto_deploy or (cfg.auto_deploy_branch or cfg.branch) != event.branch:
+            if not cfg:
+                last_skip_reason = 'NO_FINALIZED_CONFIGURATION'
                 continue
-            if DeploymentRun.objects.filter(environment=env, status__in=['QUEUED','RUNNING']).exists():
-                continue  # Next webhook gets its own delivery; no destructive interruption.
+            if not cfg.auto_deploy:
+                last_skip_reason = 'AUTO_DEPLOY_DISABLED'
+                continue
+            if (cfg.auto_deploy_branch or cfg.branch) != event.branch:
+                last_skip_reason = 'BRANCH_MISMATCH'
+                continue
+            eligible += 1
+            idem = f'push:{event.id}:{env.id}'
+            if DeploymentRun.objects.filter(idempotency_key=idem).exists():
+                continue
+            latest = DeploymentRun.objects.filter(environment=env).order_by('-created_at').first()
+            if latest and latest.commit_sha.lower() == event.commit_sha.lower():
+                # A manual/polled deployment may already have processed this
+                # exact revision; do not create a second publication.
+                continue
+            if DeploymentRun.objects.filter(environment=env, status__in=['QUEUED', 'RUNNING']).exists():
+                deferred = True
+                continue
             try:
                 checked_cfg, resources = plan_deployment(env)
                 ensure_runner_ready()
             except (APIException, ValidationError):
-                continue  # No entitlement / capacity / runner. No privilege escalation.
-            idem = f'push:{event.id}:{env.id}'
-            if DeploymentRun.objects.filter(idempotency_key=idem).exists():
+                blocked = True
                 continue
             _create_run(env, checked_cfg, resources, actor=None,
                         trigger=DeploymentRun.Trigger.GIT_PUSH,
                         sha=event.commit_sha.lower(), idem=idem, event=event)
             created += 1
-    event.status = GitWebhookEvent.Status.HANDLED if created else GitWebhookEvent.Status.IGNORED
-    event.processed_at = timezone.now()
-    event.save(update_fields=['status', 'processed_at'])
+
+    if deferred:
+        # Keep it durable: the worker retries after the active build finishes.
+        event.status = GitWebhookEvent.Status.RECEIVED
+        event.error_message = 'DEFERRED_ACTIVE_DEPLOYMENT'
+        event.processed_at = None
+    elif blocked:
+        event.status = GitWebhookEvent.Status.FAILED
+        event.error_message = 'DEPLOYMENT_PREFLIGHT_REJECTED'
+        event.processed_at = timezone.now()
+    else:
+        event.status = GitWebhookEvent.Status.HANDLED if eligible else GitWebhookEvent.Status.IGNORED
+        if not matched_projects:
+            last_skip_reason = 'PROJECT_NOT_LINKED_TO_INSTALLATION'
+        elif not active_environments:
+            last_skip_reason = 'NO_ACTIVE_ENVIRONMENT'
+        event.error_message = '' if eligible else last_skip_reason
+        event.processed_at = timezone.now()
+    event.save(update_fields=['status', 'error_message', 'processed_at'])
     return created
 
 

@@ -287,24 +287,46 @@ class GitHubWebhookAPIView(APIView):
                 raise ValidationError('Webhook JSON invalide.')
             installation_id = (payload.get('installation') or {}).get('id')
             if not isinstance(installation_id, int):
-                return api_success({'accepted': True, 'recorded': 0}, 'Événement GitHub ignoré (installation absente).')
+                log.warning('AUTOKOM webhook: no installation ID in signed GitHub event (%s)', event_type)
+                return api_success({'accepted': True, 'recorded': 0, 'queued': 0,
+                                    'reason': 'INSTALLATION_MISSING'},
+                                   'Événement reçu sans installation GitHub : aucune publication.')
             repo = payload.get('repository') or {}
             ref = str(payload.get('ref') or '')
             recorded = 0
+            queued = 0
+            matched = 0
+            deferred = 0
+            ignored = 0
             from apps.deployments.runs.services import queue_verified_push
             for conn in GitConnection.objects.filter(provider='GITHUB', installation_id=installation_id, is_active=True):
-                event, created = GitWebhookEvent.objects.get_or_create(connection=conn, external_event_id=delivery_id, defaults={
+                matched += 1
+                event, created = GitWebhookEvent.objects.get_or_create(
+                    connection=conn, external_event_id=delivery_id, defaults={
                     'repository_external_id': str(repo.get('id') or ''),
                     'repository_full_name': str(repo.get('full_name') or '')[:300],
                     'event_type': event_type, 'branch': ref.replace('refs/heads/', '', 1)[:255],
                     'commit_sha': str(payload.get('after') or '')[:64],
                     'signature_verified': True,
-                    'status': 'RECEIVED' if event_type == 'push' else 'IGNORED',
+                    'status': 'RECEIVED' if event_type == 'push' and ref.startswith('refs/heads/') else 'IGNORED',
+                    'error_message': '' if event_type == 'push' and ref.startswith('refs/heads/') else 'NON_BRANCH_PUSH',
                 })
                 recorded += int(created)
-                # Queue only after HMAC verification; durable idempotent DB operations, no Jenkins call here.
+                # HMAC verification precedes all database operations. A replay
+                # of one X-GitHub-Delivery can never create a second run.
                 if event_type == 'push' and event.status == GitWebhookEvent.Status.RECEIVED:
-                    queue_verified_push(event)
-            return api_success({'accepted': True, 'recorded': recorded}, 'Push vérifié et synchronisation programmée si activée.')
+                    queued += queue_verified_push(event)
+                event.refresh_from_db(fields=['status', 'error_message'])
+                deferred += int(event.status == GitWebhookEvent.Status.RECEIVED)
+                ignored += int(event.status in (GitWebhookEvent.Status.IGNORED, GitWebhookEvent.Status.FAILED))
+            if not matched:
+                log.warning('AUTOKOM webhook signed %s: no active GitConnection for installation', event_type)
+            else:
+                log.info('AUTOKOM webhook signed %s: connections=%s events=%s queued=%s deferred=%s ignored=%s',
+                         event_type, matched, recorded, queued, deferred, ignored)
+            return api_success({'accepted': True, 'recorded': recorded, 'queued': queued,
+                                'connections': matched, 'deferred': deferred, 'ignored': ignored},
+                               'Webhook GitHub vérifié ; résultat de mise en file enregistré.')
+
         except Exception as exc:
             return handle_error(exc, 'github_webhook')
