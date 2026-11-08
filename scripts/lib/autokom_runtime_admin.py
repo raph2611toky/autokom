@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Host-side AUTOKOM runtime lifecycle; runs ONLY through the AUTOKOM CLI as root."""
 import argparse
+import hashlib
 from collections import deque
 from datetime import datetime
 import queue
@@ -235,6 +236,67 @@ def pipeline_xml(script):
     return ET.tostring(root,encoding='utf-8',xml_declaration=True)
 
 
+
+def _canonical_pipeline(script):
+    """Normalize only XML/Git line endings, not Groovy content or indentation."""
+    if not isinstance(script, str):
+        return None
+    return script.replace('\r\n', '\n').replace('\r', '\n').rstrip('\n')
+
+
+def _pipeline_fingerprint(script):
+    """No Jenkinsfile bodies in operator logs; print only lengths and digest."""
+    normalized = _canonical_pipeline(script)
+    if normalized is None:
+        return 'absent'
+    return f'len={len(normalized)} sha256={hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]}'
+
+
+def _read_jenkins_job_pipeline(env, job):
+    """Read back Jenkins's authoritative job config, not the submitted XML."""
+    from urllib.parse import quote
+    code, payload = jenkins_request(env, 'GET', '/job/' + quote(job, safe='') + '/config.xml')
+    if code != 200:
+        raise SetupError(f'Lecture de la configuration Jenkins impossible (HTTP {code}) ; droits Job/Configure requis.')
+    try:
+        tree = ET.fromstring(payload)
+    except ET.ParseError as exc:
+        raise SetupError('Configuration XML du job Jenkins invalide.') from exc
+    definition = tree.find('./definition')
+    if (definition is None
+            or definition.get('class') != 'org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition'):
+        raise SetupError('Le job Jenkins n’utilise pas la définition Pipeline AUTOKOM approuvée.')
+    script = definition.findtext('script')
+    if script is None:
+        raise SetupError('Script Pipeline absent du job Jenkins.')
+    return script
+
+
+def _pipeline_mismatch(expected, actual):
+    if _canonical_pipeline(expected) == _canonical_pipeline(actual):
+        return ''
+    return ('Jenkinsfile différent : installé [' + _pipeline_fingerprint(actual)
+            + '] ; attendu [' + _pipeline_fingerprint(expected) + '].')
+
+
+def _verify_jenkins_script_after_write(env, job, expected):
+    """A 2xx/302 HTTP response alone does not guarantee Jenkins saved a job."""
+    mismatch = None
+    for attempt in range(4):
+        try:
+            current = _read_jenkins_job_pipeline(env, job)
+            mismatch = _pipeline_mismatch(expected, current)
+            if not mismatch:
+                return
+        except SetupError as exc:
+            mismatch = str(exc)
+        if attempt < 3:
+            time.sleep(0.3)
+    raise SetupError('Jenkins n’a pas conservé le pipeline demandé. ' + str(mismatch)
+                     + ' Vérifier les droits Job/Configure et les journaux Jenkins ; '
+                     'aucun nouveau build client ne doit être lancé.')
+
+
 def jenkins_sync(*,apply):
     env=load_env()
     job=env.get('AUTOKOM_JENKINS_JOB','autokom-client-deploy')
@@ -261,20 +323,22 @@ def jenkins_sync(*,apply):
     source=JOB_SCRIPT.read_text(encoding='utf-8')
     if 'buildctl' not in source and 'autokom_agent_local.py' not in source:
         raise SetupError('Jenkinsfile approuvé incomplet.')
-    status,old=jenkins_request(env,'GET','/job/'+job+'/config.xml')
+    from urllib.parse import quote
+    config_path = '/job/' + quote(job, safe='') + '/config.xml'
+    status,old=jenkins_request(env,'GET',config_path)
     if status not in (200,404):raise SetupError('Impossible de lire le job Jenkins.')
     if status==200:
-        try:
-            existing=ET.fromstring(old).findtext('./definition/script') or ''
-        except ET.ParseError:raise SetupError('Job Jenkins XML illisible; aucune modification.')
-        if existing==source:
-            print('  ✓ Job Jenkins déjà synchronisé.')
+        existing = _read_jenkins_job_pipeline(env, job)
+        mismatch = _pipeline_mismatch(source, existing)
+        if not mismatch:
+            print('  ✓ Job Jenkins déjà synchronisé (contenu vérifié).')
             if apply:
                 jenkins_view_sync(env, job)
             ready, reason = isolated_agent_status(env)
             if not ready:
                 print('  ! Agent autokom-isolated non disponible ('+reason+'). Le job ne démarrera pas.')
             return 0
+        print('  ! ' + mismatch)
     print(f"  ◈ Jenkins · {'mise à jour' if status==200 else 'création'} du job {job}")
     print('  › Pipeline approuvé AUTOKOM, image locale, scan DevSecOps, runner rootless')
     print('  › Agent requis : autokom-isolated, sans appartenance au groupe docker')
@@ -283,16 +347,17 @@ def jenkins_sync(*,apply):
     confirm('SYNCHRONISER')
     if status==200:
         BACKUP.mkdir(parents=True,exist_ok=True,mode=0o700)
-        target=BACKUP/(job+'-'+datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')+'.xml')
+        target=BACKUP/(job+'-'+datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')+'-'+str(os.getpid())+'.xml')
         with target.open('xb') as f:f.write(old)
         os.chmod(target,0o600)
     if status==404:
         path='/createItem?'+urlencode({'name':job})
-    else:path='/job/'+job+'/config.xml'
+    else:path=config_path
     code,_=jenkins_request(env,'POST',path,pipeline_xml(source))
     if code not in (200,201,202,302):
-        raise SetupError('Synchronisation refusée par Jenkins; sauvegarde conservée.')
-    print('  ✓ Jenkins pipeline local synchronisé.')
+        raise SetupError('Synchronisation refusée par Jenkins (HTTP '+str(code)+'); sauvegarde conservée.')
+    _verify_jenkins_script_after_write(env, job, source)
+    print('  ✓ Jenkins pipeline local synchronisé et relu via l’API Jenkins.')
     jenkins_view_sync(env, job)
     ready, reason = isolated_agent_status(env)
     if not ready:
@@ -392,19 +457,16 @@ except (OSError,ValueError,KeyError,TypeError):
     if status!=200:
         raise SetupError('Le job Jenkins n’est pas accessible au compte de service (code HTTP '+str(status)+').')
     print('  ✓ Job Jenkins accessible avec les identifiants du runtime.')
-    # A job can be accessible while still running the *old* trusted Jenkinsfile.
-    # Detect drift before declaring builds ready; do not overwrite UI changes here.
-    code, config_xml = jenkins_request(env, 'GET', '/job/'+quote(job,safe='')+'/config.xml')
-    if code != 200:
-        raise SetupError('Impossible de vérifier le Jenkinsfile approuvé (Job/Configure requis).')
-    try:
-        active_script = ET.fromstring(config_xml).findtext('./definition/script')
-    except ET.ParseError as exc:
-        raise SetupError('Configuration Jenkinsfile invalide ; aucune synchronisation automatique.') from exc
-    if not JOB_SCRIPT.is_file() or active_script != JOB_SCRIPT.read_text(encoding='utf-8'):
-        raise SetupError('Jenkins utilise un ancien pipeline AUTOKOM : '
-                         'sudo autokom runtime jenkins --apply pour synchroniser le job.')
-    print('  ✓ Jenkinsfile AUTOKOM synchronisé avec le runtime installé.')
+    # Always compare the active script from Jenkins, not job metadata or API success alone.
+    if not JOB_SCRIPT.is_file():
+        raise SetupError('Jenkinsfile approuvé absent dans le dépôt AUTOKOM.')
+    active_script = _read_jenkins_job_pipeline(env, job)
+    mismatch = _pipeline_mismatch(JOB_SCRIPT.read_text(encoding='utf-8'), active_script)
+    if mismatch:
+        raise SetupError('Jenkins utilise un pipeline différent. '+mismatch+
+                         ' Vérifier : sudo autokom runtime jenkins --check ; '
+                         'synchroniser : sudo autokom runtime jenkins --apply.')
+    print('  ✓ Jenkinsfile AUTOKOM synchronisé avec le runtime installé (contenu vérifié).')
     from autokom_jenkins_pipeline import inspect as pipeline_inspect, PipelineError
     try:
         pipeline_state=pipeline_inspect(env)

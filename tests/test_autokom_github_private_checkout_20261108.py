@@ -185,8 +185,8 @@ class BackendSourceTests(unittest.TestCase):
 
     def test_runtime_doctor_refuses_old_jenkinsfile(self):
         runtime=(ROOT/'scripts/lib/autokom_runtime_admin.py').read_text(encoding='utf-8')
-        self.assertIn("active_script != JOB_SCRIPT.read_text",runtime)
-        self.assertIn('sudo autokom runtime jenkins --apply pour synchroniser le job',runtime)
+        self.assertIn("mismatch = _pipeline_mismatch(JOB_SCRIPT.read_text",runtime)
+        self.assertIn('sudo autokom runtime jenkins --apply',runtime)
 
     def test_short_lived_archive_redirect_does_not_forward_oauth_token(self):
         class Response:
