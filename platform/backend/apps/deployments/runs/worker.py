@@ -330,7 +330,8 @@ def _release_docker_and_proxy(run):
         'replicas':1,'variables':manifest['variables'],
     },timeout=280)
     add_log(run, 'AUTOKOM_TECH:release:Docker · conteneur et contrôle HTTP interne validés.', level='TECH')
-    PipelineStageRun.objects.filter(deployment=run,stage_key='release').update(status='SUCCESS',finished_at=timezone.now())
+    # The container is a candidate, not a committed public release yet.
+    # Do not show 'Publication: Terminé' until TLS and the public site pass.
     PipelineStageRun.objects.filter(deployment=run,stage_key='health').update(status='RUNNING',started_at=timezone.now())
     # Managed subdomains are activated automatically after the first healthy Docker build.
     # Failure aborts the release so that SUCCEEDED never means an inaccessible public site.
@@ -351,6 +352,7 @@ def _release_docker_and_proxy(run):
         domain.status=Domain.Status.ACTIVE
         domain.tls_status='ACTIVE'
         domain.save(update_fields=['status','tls_status'])
+    PipelineStageRun.objects.filter(deployment=run,stage_key='release').update(status='SUCCESS',finished_at=timezone.now())
     PipelineStageRun.objects.filter(deployment=run,stage_key='health').update(status='SUCCESS',finished_at=timezone.now())
     add_log(run,'AUTOKOM_STAGE:release:SUCCESS')
     add_log(run,'AUTOKOM_STAGE:health:SUCCESS')

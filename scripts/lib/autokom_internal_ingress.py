@@ -183,21 +183,34 @@ def preflight(execute, available, enabled):
 
 
 def _remove_config(name, *, execute, available, enabled, reload=True):
+    """Detach an ingress from Nginx BEFORE deleting its source file.
+
+    Removing the file while the enabled symlink is still visible causes a
+    transient invalid Nginx configuration, even on otherwise healthy hosts.
+    If nginx -t/reload refuses the detach, restore the symlink and preserve
+    the source file for a safe operator retry.
+    """
     path, link = _layout(name, available, enabled)
     if (path.is_symlink() or (link.is_symlink() and link.resolve() != path)
             or (link.exists() and not link.is_symlink())):
         raise IngressError('AUTOKOM_INGRESS_FILE_TAMPERED', 'Fichier ingress non géré détecté.')
-    changed = False
-    if link.is_symlink():
+    had_link = link.is_symlink()
+    had_file = path.is_file()
+    if had_link:
         link.unlink()
-        changed = True
-    if path.is_file():
+    try:
+        if had_link and reload:
+            execute(['nginx', '-t'], timeout=12)
+            execute(['systemctl', 'reload', 'nginx'], timeout=15)
+    except Exception as exc:
+        # The existing valid relay must remain usable if detach fails.
+        if had_file and not link.exists() and not link.is_symlink():
+            link.symlink_to(path)
+        raise IngressError('AUTOKOM_INGRESS_DETACH_FAILED',
+                           'Relais Nginx conservé : retrait non validé.') from exc
+    if had_file:
         path.unlink()
-        changed = True
-    if changed and reload:
-        execute(['nginx','-t'], timeout=12)
-        execute(['systemctl','reload','nginx'], timeout=15)
-    return changed
+    return had_link or had_file
 
 
 def create(name, network, internal_port, *, execute, available, enabled, attempts=4):
@@ -219,8 +232,19 @@ def create(name, network, internal_port, *, execute, available, enabled, attempt
         except Exception as exc:
             try:
                 _remove_config(name, execute=execute, available=available, enabled=enabled)
+            except IngressError as cleanup_exc:
+                if cleanup_exc.code != 'AUTOKOM_INGRESS_DETACH_FAILED':
+                    raise IngressError('AUTOKOM_INGRESS_CLEANUP_FAILED',
+                                       'Nettoyage Nginx incomplet.') from exc
+                # This candidate was never approved as a release.  If a failed
+                # reload prevents orderly detachment, discard ONLY these two
+                # newly-created files; never apply this fallback to a live
+                # release's ingress.remove().
+                _remove_config(name, execute=execute, available=available,
+                               enabled=enabled, reload=False)
             except Exception:
-                raise IngressError('AUTOKOM_INGRESS_CLEANUP_FAILED', 'Nettoyage Nginx incomplet.') from exc
+                raise IngressError('AUTOKOM_INGRESS_CLEANUP_FAILED',
+                                   'Nettoyage Nginx incomplet.') from exc
             if isinstance(exc, IngressError):
                 raise
             raise IngressError('AUTOKOM_INGRESS_NGINX_FAILED', 'Nginx a refusé le relais local.') from exc

@@ -389,40 +389,69 @@ def _docker_deploy_inner(params):
         subprocess.run(['docker','rm','-f',name],capture_output=True,timeout=20)
         raise
 def _rollback(params):
-    env=valid_id(params.get('environment_id'))
-    rid=valid_id(params.get('run_id'))
-    state=_load_state(env)
-    if not state or state['run_id']!=rid:
-        return {'rolled_back':False}
-    old_path=STATE/env/'previous.json'
-    previous=json.loads(old_path.read_text()) if old_path.is_file() else None
-    if previous:
-        _save_state(env,previous)
-    else:
-        (STATE/env/'current.json').unlink(missing_ok=True)
-    run(['docker','rm','-f',state['name']],timeout=20)
-    # If some vhosts were already switched to the failed release, repoint them
-    # to the last healthy runtime (or remove their newly staged vhosts).
+    env = valid_id(params.get('environment_id'))
+    rid = valid_id(params.get('run_id'))
+    state = _load_state(env)
+    if not state or state['run_id'] != rid:
+        return {'rolled_back': False}
+    old_path = STATE / env / 'previous.json'
+    previous = json.loads(old_path.read_text()) if old_path.is_file() else None
+
+    # First detach or repoint public routes while the failed container and its
+    # ingress are still present.  The earlier ordering stopped Docker first,
+    # which briefly exposed an upstream that could only return HTTP 502.
     for owner in STATE.glob('domain-owner-*.txt'):
-        if owner.read_text(encoding='utf-8').strip()!=env:continue
-        host=owner.name[len('domain-owner-'):-len('.txt')]
-        if not HOSTNAME.fullmatch(host):continue
-        conf=PROXY/('autokom-customer-'+host+'.conf')
-        link=ENABLED/conf.name
+        if owner.is_symlink() or not owner.is_file() or owner.read_text(encoding='utf-8').strip() != env:
+            continue
+        host = owner.name[len('domain-owner-'):-len('.txt')]
+        if not HOSTNAME.fullmatch(host):
+            continue
+        conf = PROXY / ('autokom-customer-' + host + '.conf')
+        link = ENABLED / conf.name
         if previous:
-            conf.write_text(_nginx_config(host,previous['port'],tls=True),encoding='utf-8')
+            # A previously healthy publication keeps its TLS front door.
+            if conf.is_symlink() or (link.is_symlink() and link.resolve() != conf):
+                raise BrokerError('AUTOKOM_ROLLBACK_VHOST_INVALID: Vhost modifié hors AUTOKOM.')
+            with tempfile.NamedTemporaryFile('w', dir=PROXY, delete=False,
+                                             prefix='.autokom-rollback-', encoding='utf-8') as fd:
+                fd.write(_nginx_config(host, previous['port'], tls=True))
+                tmp = Path(fd.name)
+            try:
+                os.chmod(tmp, 0o644)
+                os.replace(tmp, conf)
+            finally:
+                tmp.unlink(missing_ok=True)
+            if not link.is_symlink():
+                link.symlink_to(conf)
         else:
-            conf.unlink(missing_ok=True);link.unlink(missing_ok=True);owner.unlink(missing_ok=True)
+            # Disable the public route first; never leave a dangling symlink.
+            if link.is_symlink():
+                if link.resolve() != conf:
+                    raise BrokerError('AUTOKOM_ROLLBACK_VHOST_INVALID: Lien Nginx modifié.')
+                link.unlink()
     try:
-        run(['nginx','-t'])
-        run(['systemctl','reload','nginx'])
-    except BrokerError:
-        raise BrokerError('État Docker restauré ; réconciliation manuelle des vhosts Nginx nécessaire.')
+        run(['nginx', '-t'])
+        run(['systemctl', 'reload', 'nginx'])
+    except BrokerError as exc:
+        raise BrokerError('AUTOKOM_ROLLBACK_NGINX_FAILED: Retour arrière Nginx incomplet.') from exc
+
+    # The relay must be safely detached before stopping its container.
     if state.get('ingress_mode') == ingress.MODE:
         ingress.remove(state['name'], execute=run, available=PROXY, enabled=ENABLED)
+    run(['docker', 'rm', '-f', state['name']], timeout=20)
+    if previous:
+        _save_state(env, previous)
+    else:
+        (STATE / env / 'current.json').unlink(missing_ok=True)
+    for owner in STATE.glob('domain-owner-*.txt'):
+        if owner.is_symlink() or not owner.is_file() or owner.read_text(encoding='utf-8').strip() != env:
+            continue
+        host = owner.name[len('domain-owner-'):-len('.txt')]
+        if previous is None and HOSTNAME.fullmatch(host):
+            (PROXY / ('autokom-customer-' + host + '.conf')).unlink(missing_ok=True)
+            owner.unlink(missing_ok=True)
     old_path.unlink(missing_ok=True)
-    return {'rolled_back':True,'previous_available':previous is not None}
-
+    return {'rolled_back': True, 'previous_available': previous is not None}
 
 def _commit(params):
     env=valid_id(params.get('environment_id'))
@@ -810,32 +839,64 @@ def _issue_customer_certificate(host, *, managed):
 
 
 def _verify_customer_https(host, healthcheck):
-    """Prove SNI, CA validation and proxy routing on the local Nginx listener.
+    """Verify SNI, CA trust and the REAL customer response.
 
-    The application may redirect its health endpoint.  A proxy/catchall 404,
-    TLS mismatch or 50x must not be mistaken for a successful publication.
+    TLS handshake failures are fatal.  HTTP 502/503/504 may be temporary during
+    container startup, so retry briefly; persistent unavailability blocks the
+    publication, rather than incorrectly recording a healthy release.
     """
     valid_hostname(host)
-    if not isinstance(healthcheck, str) or not healthcheck.startswith('/') or ('\r' in healthcheck or '\n' in healthcheck):
+    if (not isinstance(healthcheck, str) or not healthcheck.startswith('/')
+            or any(ch in healthcheck for ch in ('\r', '\n', '#', '%', '\\'))
+            or len(healthcheck) > 128):
         raise BrokerError('AUTOKOM_HTTPS_HEALTHCHECK_INVALID: Chemin de validation refusé.')
+    last_status = 0
+    for attempt in range(4):
+        try:
+            context = ssl.create_default_context()
+            with socket.create_connection(('127.0.0.1', 443), timeout=6) as raw:
+                with context.wrap_socket(raw, server_hostname=host) as connection:
+                    connection.settimeout(6)
+                    connection.sendall(('GET ' + healthcheck + ' HTTP/1.1\r\nHost: ' + host +
+                                        '\r\nConnection: close\r\n\r\n').encode('ascii'))
+                    response = http.client.HTTPResponse(connection)
+                    response.begin()
+                    last_status = response.status
+                    response.close()
+        except (ssl.SSLError, OSError, http.client.HTTPException, UnicodeEncodeError) as exc:
+            raise BrokerError('AUTOKOM_HTTPS_SNI_FAILED: TLS/SNI ou connexion HTTPS non validée.') from exc
+        if 200 <= last_status < 400:
+            logger.info('AUTOKOM_HTTPS_PROXY_VERIFIED host=%s status=%d', host, last_status)
+            return
+        if last_status not in (502, 503, 504) or attempt == 3:
+            break
+        time.sleep(1)
+    raise BrokerError('AUTOKOM_HTTPS_UPSTREAM_FAILED: '
+                      'Le reverse proxy HTTPS retourne HTTP ' + str(last_status) + '.')
+
+
+def _log_customer_upstream_state(state, host):
+    """Diagnostic redacted: no container log lines or environment variables."""
+    name = state.get('name', '')
+    if not isinstance(name, str) or not ingress.NAME_RE.fullmatch(name):
+        return
     try:
-        context = ssl.create_default_context()
-        with socket.create_connection(('127.0.0.1', 443), timeout=6) as raw:
-            with context.wrap_socket(raw, server_hostname=host) as connection:
-                connection.settimeout(6)
-                connection.sendall(('GET '+healthcheck+' HTTP/1.1\r\nHost: '+host+
-                                    '\r\nConnection: close\r\n\r\n').encode('ascii'))
-                response = http.client.HTTPResponse(connection)
-                response.begin()
-                status = response.status
-                response.close()
-    except (ssl.SSLError, OSError, http.client.HTTPException, UnicodeEncodeError) as exc:
-        raise BrokerError('AUTOKOM_HTTPS_SNI_FAILED: '
-                          'TLS/SNI ou connexion au reverse proxy local non validé.') from exc
-    if not 200 <= status < 400:
-        raise BrokerError('AUTOKOM_HTTPS_UPSTREAM_FAILED: '
-                          'Le reverse proxy HTTPS retourne HTTP '+str(status)+'.')
-    logger.info('AUTOKOM_HTTPS_PROXY_VERIFIED host=%s status=%d', host, status)
+        probe = subprocess.run(['docker', 'inspect', name,
+                                '--format', '{{json .State}}'],
+                               capture_output=True, text=True, timeout=8, check=False)
+        if probe.returncode:
+            logger.warning('AUTOKOM_CUSTOMER_HEALTH_DIAG host=%s container=missing', host)
+            return
+        payload = json.loads(probe.stdout)
+        if not isinstance(payload, dict):
+            raise ValueError('invalid state')
+        logger.warning('AUTOKOM_CUSTOMER_HEALTH_DIAG host=%s running=%s restarting=%s oom=%s exit=%s relay=%s',
+                       host, payload.get('Running') is True, payload.get('Restarting') is True,
+                       payload.get('OOMKilled') is True,
+                       payload.get('ExitCode') if type(payload.get('ExitCode')) is int else 'unknown',
+                       ingress.probe_relay(name, state.get('port')))
+    except (ValueError, OSError, subprocess.TimeoutExpired):
+        logger.warning('AUTOKOM_CUSTOMER_HEALTH_DIAG host=%s unavailable', host)
 
 
 def _proxy_apply(host, environment, *, managed=False):
@@ -859,8 +920,8 @@ def _proxy_apply(host, environment, *, managed=False):
     symlink = ENABLED / name
     if (path.exists() and (path.is_symlink() or not owner.is_file())) or (symlink.exists() and not symlink.is_symlink()):
         raise BrokerError('Vhost existant non géré par AUTOKOM : aucune modification.')
-    if symlink.is_symlink() and symlink.resolve() != path.resolve():
-        raise BrokerError('AUTOKOM_DOMAIN_VHOST_TAMPERED: Lien Nginx modifié.')
+    if symlink.is_symlink() and (symlink.resolve() != path.resolve() or not path.is_file()):
+        raise BrokerError('AUTOKOM_DOMAIN_VHOST_DANGLING: Lien Nginx absent ou modifié.')
     old = path.read_text(encoding='utf-8') if path.exists() else None
     had_link = symlink.is_symlink()
 
@@ -897,7 +958,11 @@ def _proxy_apply(host, environment, *, managed=False):
         logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started host=%s', phase, host)
         publish(_nginx_config(host, state['port'], tls=True))
         phase = 'https_verify'
-        _verify_customer_https(host, state.get('healthcheck', '/'))
+        try:
+            _verify_customer_https(host, state.get('healthcheck', '/'))
+        except BrokerError:
+            _log_customer_upstream_state(state, host)
+            raise
         phase = 'ownership_commit'
         owner.write_text(environment, encoding='utf-8')
         os.chmod(owner, 0o600)
@@ -915,9 +980,10 @@ def _proxy_apply(host, environment, *, managed=False):
             os.chmod(previous, 0o644)
             os.replace(previous, path)
         else:
+            # Remove the enabled symlink before the source file, regardless of
+            # whether the source link predated this transaction.
+            symlink.unlink(missing_ok=True)
             path.unlink(missing_ok=True)
-            if not had_link:
-                symlink.unlink(missing_ok=True)
         try:
             run(['nginx', '-t'])
             run(['systemctl', 'reload', 'nginx'])
