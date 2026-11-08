@@ -1094,6 +1094,16 @@ def deploy(args):
                 if verify_health(port=state.get('port', PORT)):
                     print('  ✓ Backend opérationnel sur http://127.0.0.1:' + str(state.get('port', PORT)))
                     print('  ✓ URL publique prévue : https://' + state.get('domain', '?'))
+                    # A 200 from Django is not sufficient for a deployable
+                    # platform. The root CLI must also verify the privileged
+                    # broker and the unprivileged deployment queue worker.
+                    # Never invoke systemctl from a Django web request.
+                    with phase('Contrôle des déploiements · broker Unix et worker'):
+                        from autokom_control_recovery import reconcile, ControlRecoveryError
+                        try:
+                            reconcile(apply=True)
+                        except ControlRecoveryError as exc:
+                            raise AppError('API Django disponible, mais déploiement des projets indisponible : '+str(exc)) from exc
                     return 0
                 if progress._tty:
                     progress.paint('Vérification du health check', _ * 2)

@@ -306,7 +306,8 @@ def doctor():
         if state != 'active':failures.append(unit)
     directory = sock.parent
     if not directory.is_dir() or directory.is_symlink():
-        raise SetupError('Répertoire de contrôle Unix absent ou non conforme.')
+        raise SetupError('Répertoire de contrôle Unix absent ou non conforme. '
+                         'Réparation : sudo autokom runtime reconcile --apply.')
     import grp
     try:
         expected_gid = grp.getgrnam('autokom').gr_gid
@@ -319,7 +320,8 @@ def doctor():
         raise SetupError('Répertoire de contrôle non accessible au compte Django ; corriger via runtime setup --apply.')
     print('  ✓ Répertoire de contrôle : root:autokom (0750).')
     if not sock.exists() or not stat.S_ISSOCK(sock.stat().st_mode):
-        raise SetupError('Le socket de contrôle n’existe pas. Vérifier le service broker.')
+        raise SetupError('Le socket de contrôle n’existe pas. '
+                         'Réparation : sudo autokom runtime reconcile --apply.')
     sock_stat = sock.stat()
     if sock_stat.st_gid != expected_gid or stat.S_IMODE(sock_stat.st_mode) != 0o660:
         raise SetupError('Socket Unix : groupe ou permissions non conformes (attendu autokom, 0660).')
@@ -491,6 +493,10 @@ def main(argv=None):
     group=agent.add_mutually_exclusive_group()
     group.add_argument('--check',action='store_true')
     group.add_argument('--apply',action='store_true')
+    repair = sub.add_parser('reconcile', help='Réparer le broker et le worker sans modifier les autres services')
+    repair_mode = repair.add_mutually_exclusive_group(required=True)
+    repair_mode.add_argument('--check', action='store_true')
+    repair_mode.add_argument('--apply', action='store_true')
     sub.add_parser('status')
     sub.add_parser('doctor', help='Vérifier Django → broker → Jenkins et compiler un test OCI isolé (cache BuildKit)')
     env_p = sub.add_parser('env', help='Secrets runtime : show, setup, edit, delete',add_help=False)
@@ -507,6 +513,13 @@ def main(argv=None):
         print('  › Configuration :', 'présente' if RUNTIME_ENV.is_file() else 'à créer')
         return 0
     if os.geteuid():raise SetupError('Utiliser sudo autokom runtime '+opts.action)
+    if opts.action=='reconcile':
+        from autokom_control_recovery import reconcile, ControlRecoveryError
+        try:
+            state = reconcile(apply=opts.apply)
+        except ControlRecoveryError as exc:
+            raise SetupError(str(exc)) from exc
+        return 0 if (state.ready or opts.check) else 1
     if opts.action=='doctor':return doctor()
     if opts.action=='buildkit':
         from autokom_buildkit_admin import provision, BuildkitError

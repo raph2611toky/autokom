@@ -96,6 +96,7 @@ def run(*, apply=False):
     from logging_runtime import detected, apply as apply_runtime
     from logging_stack import install_complete, apply_docker
     from cli_colors import pretty_print as print
+    from autokom_control_recovery import inspect as control_inspect, reconcile as control_reconcile
 
     if apply and os.geteuid() != 0:
         raise RecoverError('Utiliser sudo autokom recover --apply')
@@ -105,11 +106,13 @@ def run(*, apply=False):
     api_ok = app.verify_health()
     logs_ok = install_complete(backend, mode)
     ui_ok = ready_frontend(front)
+    control_ok = control_inspect().ready
 
     print('  AUTOKOM / REPRISE AUTOMATIQUE · '+('APPLICATION' if apply else 'SIMULATION'))
     print('  Backend Django : '+('✓ prêt' if api_ok else '! à réparer avec app deploy'))
     print(f"  Journaux : {'✓ prêts' if logs_ok else '+ remise en service'} ({backend}, {mode})")
     print('  Frontend : '+('✓ publié et HTTPS vérifié' if ui_ok else '+ TLS / build / publication à finaliser'))
+    print('  Déploiements : '+('✓ broker et worker accessibles' if control_ok else '+ broker/socket/worker à réconcilier'))
     print('  Domaine : https://' + front + ' → https://' + back)
     print('  Politique : aucun effacement MySQL, aucun changement UFW, aucun basculement implicite Docker ↔ systemd')
     if not apply:
@@ -129,6 +132,18 @@ def run(*, apply=False):
         except Exception as exc:
             failures.append('Backend Django : '+str(exc))
             print('  ✗ '+failures[-1])
+
+    if api_ok and not control_ok:
+        try:
+            print('  › Déploiements : reprise ciblée du broker Unix et du worker')
+            control_ok = control_reconcile(apply=True).ready
+            if not control_ok:
+                raise RecoverError('Broker non validé après la reprise')
+        except Exception as exc:
+            failures.append('Déploiements : '+str(exc))
+            print('  ✗ '+failures[-1])
+    elif not api_ok:
+        failures.append('Déploiements : API Django indisponible, contrôle non relancé')
 
     if not logs_ok:
         try:
@@ -183,7 +198,8 @@ def run(*, apply=False):
 
     print('  AUTOKOM / BILAN : Django='+('OK' if api_ok else 'ERREUR')+
           ' · Journaux='+('OK' if logs_ok else 'ERREUR')+
-          ' · Frontend='+('OK' if ui_ok else 'ERREUR'))
+          ' · Frontend='+('OK' if ui_ok else 'ERREUR')+
+          ' · Déploiements='+('OK' if control_ok else 'ERREUR'))
     if failures:
         raise RecoverError('; '.join(failures))
     return 0

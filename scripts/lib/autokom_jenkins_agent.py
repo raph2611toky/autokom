@@ -254,12 +254,33 @@ def provision_system_dependencies(*, apply):
     run_live(args, env=env, label='Préparation isolée de l’agent Jenkins', timeout=900)
 
 
+def verify_jenkins_identity(env):
+    """Check credentials against the actual authenticated Jenkins JSON API.
+
+    /login is a web-page endpoint and may return a misleading 401/redirect.
+    A local listening socket is not proof that the API token is usable.
+    Do not auto-create tokens, disable Jenkins security or print credentials.
+    """
+    status, raw = http(env, 'GET', '/whoAmI/api/json', max_size=16_384)
+    if status in (401, 403):
+        raise AgentError('Jenkins actif, mais compte/API token refusé (HTTP '+str(status)+'). '
+                         'Vérifier AUTOKOM_JENKINS_USER et le token dans runtime.env ; '
+                         'aucun remplacement automatique des secrets.')
+    if status != 200:
+        raise AgentError('API d’identité Jenkins indisponible (HTTP '+str(status)+'). '
+                         'Vérifier le contrôleur Jenkins local et son URL.')
+    try:
+        identity = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        raise AgentError('API Jenkins : réponse d’identité invalide.') from exc
+    if not isinstance(identity, dict) or identity.get('authenticated') is not True:
+        raise AgentError('API Jenkins : session anonyme ou authentification non confirmée.')
+    return True
+
+
 def preflight(env):
     import shutil
-    local_url(env)
-    status, _ = http(env, 'GET', '/login')
-    if status != 200:
-        raise AgentError(f'Jenkins local ne répond pas correctement (HTTP {status}).')
+    verify_jenkins_identity(env)
     if not shutil.which('java') or not Path('/usr/bin/java').exists():
         raise AgentError('Java absent : relancer le provisionnement Ansible de l’agent.')
     if not shutil.which('git'):
@@ -332,6 +353,10 @@ def provision(env, *, apply):
     print('  ◈ Agent AUTOKOM : nœud local isolé, sans proxy public et sans accès Docker')
     print('  › Nœud prévu : ' + NODE_NAME + ' · label : ' + LABEL)
     print('  › URL de liaison : http://127.0.0.1:8080/ (loopback uniquement)')
+    # Validate the already-configured Jenkins credentials BEFORE Ansible changes
+    # the host; a revoked token must not lead to a partial agent installation.
+    verify_jenkins_identity(env)
+    print('  ✓ API Jenkins : compte de service authentifié sur loopback')
     if not apply:
         print('  ✓ Prévisualisation : agent Jenkins, BuildKit rootless et services systemd prévus.')
         return 0
