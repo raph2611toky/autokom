@@ -93,6 +93,10 @@ def buildkit_preflight():
 def execute(argv,timeout=1500):
     env={k:v for k,v in os.environ.items() if k not in ('AUTOKOM_RUNNER_SHARED_KEY',
          'JENKINS_API_TOKEN','GITHUB_TOKEN','GITHUB_APP_CLIENT_SECRET','AWS_SECRET_ACCESS_KEY','AWS_SESSION_TOKEN')}
+    if argv and argv[0] == 'trivy':
+        # Keep Jenkins scans out of root's shared cache and Django's private tree.
+        env['TRIVY_CACHE_DIR'] = '/var/lib/autokom-jenkins-agent-v2/.cache/trivy'
+        env['XDG_CACHE_HOME'] = '/var/lib/autokom-jenkins-agent-v2/.cache'
     try:
         subprocess.run(argv,check=True,timeout=timeout,env=env)
     except FileNotFoundError:

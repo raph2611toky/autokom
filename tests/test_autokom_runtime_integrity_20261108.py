@@ -94,30 +94,33 @@ class IntegrityTests(unittest.TestCase):
                 with self.assertRaisesRegex(ri.IntegrityError,'symbolique'):
                     ri._ensure_rules()
 
-    def test_trivy_without_apt_package_has_no_install_side_effects(self):
-        def run(argv,**kw):
-            if argv[0]=='dpkg-query':return SimpleNamespace(returncode=1,stdout='',stderr='')
-            self.fail('Unexpected mutating command: '+str(argv))
-        with patch.object(ri,'_builder_binary',return_value=False),patch.object(ri,'_run',side_effect=run):
-            with self.assertRaisesRegex(ri.IntegrityError,'absent d’APT'):
+    def test_trivy_missing_in_agent_path_fails_without_apt(self):
+        absent=ri.ToolProbe(False,None,'binary-not-on-agent-path',None)
+        with patch.object(ri,'_probe_builder_tool',return_value=absent),\
+             patch.object(ri,'_run') as run:
+            with self.assertRaisesRegex(ri.IntegrityError,'PATH Jenkins'):
                 ri._repair_trivy()
+        run.assert_not_called()
 
-    def test_trivy_reinstalls_only_pinned_version(self):
-        calls=[]
-        def run(argv,**kw):
-            calls.append(argv)
-            if argv[:2]==['dpkg-query','-W']:
-                return SimpleNamespace(returncode=0,stdout='0.76.2',stderr='')
-            if argv[:2]==['dpkg-query','-S']:
-                return SimpleNamespace(returncode=0,stdout='trivy: /usr/bin/trivy',stderr='')
-            if argv[0]=='apt-get':
-                return SimpleNamespace(returncode=0,stdout='',stderr='')
-            self.fail('Unexpected command '+str(argv))
-        with patch.object(ri,'_builder_binary',side_effect=[False,True]),\
-             patch.object(ri.shutil,'which',return_value='/usr/bin/trivy'),\
-             patch.object(ri,'_run',side_effect=run):
+    def test_trivy_repairs_cache_without_reinstalling_apt(self):
+        old=ri.ToolProbe(False,1,'cache-not-writable','/usr/bin/trivy')
+        good=ri.ToolProbe(True,0,'ok','/usr/bin/trivy')
+        with patch.object(ri,'_probe_builder_tool',side_effect=[old,good]),\
+             patch.object(ri,'_ensure_trivy_cache') as cache,\
+             patch.object(ri,'_run') as runner:
             ri._repair_trivy()
-        self.assertEqual([x for x in calls if x[0]=='apt-get'][0][-1],'trivy=0.76.2')
+        cache.assert_called_once()
+        runner.assert_not_called()
+
+    def test_trivy_refuses_blind_reinstall_on_unexplained_failure(self):
+        bad=ri.ToolProbe(False,17,'process-failed','/usr/bin/trivy')
+        with patch.object(ri,'_probe_builder_tool',return_value=bad),\
+             patch.object(ri,'_ensure_trivy_cache') as cache,\
+             patch.object(ri,'_run') as runner:
+            with self.assertRaisesRegex(ri.IntegrityError,'cause=process-failed'):
+                ri._repair_trivy()
+        cache.assert_called_once()
+        runner.assert_not_called()
 
     def test_systemd_install_does_not_overwrite_existing_units(self):
         with TemporaryDirectory() as folder:

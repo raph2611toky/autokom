@@ -488,6 +488,10 @@ def main(argv=None):
     repair_mode = repair.add_mutually_exclusive_group(required=True)
     repair_mode.add_argument('--check', action='store_true')
     repair_mode.add_argument('--apply', action='store_true')
+    scan = sub.add_parser('scanners', help='Diagnostic réel Semgrep/Trivy sous autokom-builder')
+    scan.add_argument('--diagnose', action='store_true', required=True)
+    logs = sub.add_parser('logs', help='Afficher les journaux systemd broker, worker et agent Jenkins')
+    logs.add_argument('--lines', type=int, default=100)
     sub.add_parser('status')
     sub.add_parser('doctor', help='Vérifier Django → broker → Jenkins et compiler un test OCI isolé (cache BuildKit)')
     env_p = sub.add_parser('env', help='Secrets runtime : show, setup, edit, delete',add_help=False)
@@ -504,6 +508,20 @@ def main(argv=None):
         print('  › Configuration :', 'présente' if RUNTIME_ENV.is_file() else 'à créer')
         return 0
     if os.geteuid():raise SetupError('Utiliser sudo autokom runtime '+opts.action)
+    if opts.action=='scanners':
+        from autokom_runtime_integrity import trivy_diagnose, _probe_builder_tool
+        sp=_probe_builder_tool('semgrep')
+        print('  ' + ('✓' if sp.ok else '✗') + ' Semgrep : ' + sp.problem)
+        trivy = trivy_diagnose()
+        return 0 if sp.ok and trivy.ok else 1
+    if opts.action=='logs':
+        if not 1 <= opts.lines <= 1000:
+            raise SetupError('--lines doit être compris entre 1 et 1000.')
+        return subprocess.run(['journalctl','-u','autokom-jenkins-agent.service',
+                               '-u','autokom-platform-broker.service',
+                               '-u','autokom-deployment-worker.service',
+                               '-n',str(opts.lines),'--no-pager','--output=short-iso'],
+                              check=False).returncode
     if opts.action=='reconcile':
         from autokom_control_recovery import reconcile as control_reconcile, ControlRecoveryError
         from autokom_runtime_integrity import reconcile as integrity_reconcile, IntegrityError

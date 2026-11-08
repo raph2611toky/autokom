@@ -32,6 +32,8 @@ WATCHERS = DOMAIN_UNITS[1:]
 BUILDER = 'autokom-builder'
 BUILDER_HOME = '/var/lib/autokom-jenkins-agent-v2'
 BUILDER_PATH = '/opt/autokom/toolchains/buildkit/v0.34.2/bin:/usr/local/bin:/usr/bin:/bin'
+BUILDER_CACHE = Path(BUILDER_HOME) / '.cache'
+TRIVY_CACHE = BUILDER_CACHE / 'trivy'
 
 
 class IntegrityError(RuntimeError):
@@ -67,23 +69,152 @@ def _unit_active(unit):
     return result.returncode == 0 and result.stdout.strip() == 'active'
 
 
-def _builder_binary(tool):
-    """Test with the actual Jenkins agent PATH and HOME; no root shell PATH leaks."""
+@dataclass(frozen=True)
+class ToolProbe:
+    ok: bool
+    code: int | None
+    problem: str
+    binary: str | None
+
+
+def _tool_env(tool):
+    variables = ['HOME=' + BUILDER_HOME, 'PATH=' + BUILDER_PATH,
+                 'XDG_CACHE_HOME=' + str(BUILDER_CACHE)]
+    if tool == 'trivy':
+        variables.append('TRIVY_CACHE_DIR=' + str(TRIVY_CACHE))
+    return variables
+
+
+def _probe_builder_tool(tool):
+    """Check the *real* Jenkins user + agent PATH, retain a safe failure class."""
     binary = shutil.which(tool, path=BUILDER_PATH)
     if not binary:
-        return False
-    # A world-accessible absolute executable is not sufficient: the builder
-    # also needs access through all parent directories and shared libraries.
+        return ToolProbe(False, None, 'binary-not-on-agent-path', None)
     try:
         pwd.getpwnam(BUILDER)
+    except KeyError:
+        return ToolProbe(False, None, 'builder-user-missing', binary)
+    try:
         result = _run(['runuser', '-u', BUILDER, '--', '/usr/bin/env',
-                       'HOME=' + BUILDER_HOME, 'PATH=' + BUILDER_PATH,
-                       'XDG_CACHE_HOME=' + BUILDER_HOME + '/.cache',
-                       binary, '--version'], timeout=20)
-        return result.returncode == 0
-    except (KeyError, IntegrityError):
-        return False
+                       *_tool_env(tool), binary, '--version'], timeout=35)
+    except IntegrityError:
+        return ToolProbe(False, None, 'cannot-run-builder-probe', binary)
+    if result.returncode == 0:
+        if tool == 'trivy':
+            # '--version' alone can succeed while the private scan cache is unusable.
+            if not TRIVY_CACHE.is_dir() or TRIVY_CACHE.is_symlink():
+                return ToolProbe(False, 0, 'cache-missing-or-symlink', binary)
+            try:
+                access = _run(['runuser', '-u', BUILDER, '--', 'test', '-w', str(TRIVY_CACHE)], timeout=8)
+            except IntegrityError:
+                return ToolProbe(False, None, 'cache-access-check-failed', binary)
+            if access.returncode != 0:
+                return ToolProbe(False, access.returncode, 'cache-not-writable', binary)
+            for name in ('db/trivy.db', 'db/metadata.json', 'db/trivy.db.lock'):
+                file = TRIVY_CACHE / name
+                if file.exists():
+                    read = _run(['runuser', '-u', BUILDER, '--', 'test', '-r', str(file)], timeout=8)
+                    if read.returncode != 0:
+                        return ToolProbe(False, read.returncode, 'cached-db-unreadable', binary)
+        return ToolProbe(True, 0, 'ok', binary)
+    # Do not forward arbitrary stderr (it may contain paths or credentials).
+    message = (result.stderr + '\n' + result.stdout).lower()
+    if 'permission denied' in message or 'operation not permitted' in message:
+        reason = 'permission-denied'
+    elif 'no such file' in message or 'not found' in message:
+        reason = 'binary-or-library-missing'
+    elif 'read-only file system' in message:
+        reason = 'read-only-filesystem'
+    elif 'timeout' in message:
+        reason = 'timeout'
+    elif 'error while loading shared libraries' in message:
+        reason = 'library-loading-failed'
+    else:
+        reason = 'process-failed'
+    return ToolProbe(False, result.returncode, reason, binary)
 
+
+def _builder_binary(tool):
+    return _probe_builder_tool(tool).ok
+
+
+def trivy_diagnose():
+    probe = _probe_builder_tool('trivy')
+    print('  ◈ AUTOKOM · TRIVY · DIAGNOSTIC COMPTE BUILD')
+    print('  › Identité testée : ' + BUILDER + ' (pas root)')
+    print('  › PATH agent : ' + BUILDER_PATH)
+    print('  › Binaire : ' + (probe.binary or 'introuvable'))
+    print('  › Cache privé : ' + str(TRIVY_CACHE))
+    print('  ' + ('✓' if probe.ok else '✗') + ' Trivy : ' + probe.problem +
+          ('' if probe.code is None else ' · code=' + str(probe.code)))
+    for path in (Path(BUILDER_HOME), BUILDER_CACHE, TRIVY_CACHE):
+        if path.is_symlink():
+            print('  ✗ ' + str(path) + ' : lien symbolique non autorisé')
+            continue
+        if not path.exists():
+            print('  ! ' + str(path) + ' : absent')
+            continue
+        info = path.stat()
+        print('  › ' + str(path) + ' : uid=' + str(info.st_uid) +
+              ' mode=' + format(stat.S_IMODE(info.st_mode), '04o'))
+    print('  › Réparer : sudo autokom runtime reconcile --apply')
+    print('  › Journaux agent : sudo autokom runtime logs --lines 100')
+    return probe
+
+
+def _ensure_trivy_cache():
+    """Repair only AUTOKOM's dedicated private cache, never broad host chmod."""
+    try:
+        account = pwd.getpwnam(BUILDER)
+    except KeyError as exc:
+        raise IntegrityError('Compte autokom-builder absent ; reprovisionner l’agent Jenkins.') from exc
+    home = Path(BUILDER_HOME)
+    if home.is_symlink() or not home.is_dir():
+        raise IntegrityError('HOME isolé du builder absent ou symbolique : ' + str(home))
+    hi = home.stat()
+    if hi.st_uid != account.pw_uid or not (stat.S_IMODE(hi.st_mode) & 0o700) == 0o700:
+        raise IntegrityError('HOME builder non contrôlé par autokom-builder ; exécuter runtime agent --apply.')
+    if hi.st_mode & 0o022:
+        raise IntegrityError('HOME builder accessible en écriture par un tiers ; réparation automatique refusée.')
+    for directory in (BUILDER_CACHE, TRIVY_CACHE):
+        if directory.is_symlink():
+            raise IntegrityError('Cache Trivy symbolique : refus de modifier ' + str(directory))
+        if not directory.exists():
+            directory.mkdir(mode=0o700, parents=False)
+            os.chown(directory, account.pw_uid, account.pw_gid)
+        info=directory.stat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, account.pw_uid):
+            raise IntegrityError('Cache Trivy appartenant à un compte inattendu : ' + str(directory))
+        # Scope is an AUTOKOM-private directory under the isolated agent home.
+        if info.st_uid == 0:
+            os.chown(directory, account.pw_uid, account.pw_gid)
+        if stat.S_IMODE(directory.stat().st_mode) != 0o700:
+            os.chmod(directory, 0o700)
+    for relative in ('db', 'db/trivy.db', 'db/metadata.json'):
+        target = TRIVY_CACHE / relative
+        if target.is_symlink():
+            raise IntegrityError('Cache Trivy : lien symbolique refusé : ' + relative)
+        if target.exists():
+            info = target.stat()
+            if (info.st_uid not in (0, account.pw_uid) or
+                    (target.is_file() and info.st_nlink != 1)):
+                raise IntegrityError('Cache Trivy : propriétaire ou liens inattendus : ' + relative)
+            if info.st_uid == 0:
+                os.chown(target, account.pw_uid, account.pw_gid)
+            if target.is_dir():
+                os.chmod(target, 0o700)
+            elif relative != 'db':
+                os.chmod(target, 0o600)
+    # Test actual write permission; do not rely exclusively on chmod results.
+    proof = ("import os,tempfile; p=os.environ['TRIVY_CACHE_DIR']; "
+             "f,n=tempfile.mkstemp(dir=p,prefix='.autokom-write-'); "
+             "os.close(f);os.unlink(n)")
+    result = _run(['runuser','-u',BUILDER,'--','/usr/bin/env',
+                   *_tool_env('trivy'),'/usr/bin/python3','-c',proof],timeout=12)
+    if result.returncode:
+        raise IntegrityError('Le builder ne peut pas écrire dans son cache Trivy privé ; '
+                             'vérifier ACL, fichiers root et restrictions systemd.')
+    return True
 
 def _rules_readable():
     if RULES_TARGET.is_symlink() or not RULES_TARGET.is_file():
@@ -157,29 +288,26 @@ def _ensure_rules():
 
 
 def _repair_trivy():
-    """Reinstall ONLY the already-installed APT version of Trivy.
-
-    No unpinned curl|sh, no chmod of arbitrary binaries and no new repository.
-    If APT is unavailable the diagnostic remains explicit.
-    """
-    if _builder_binary('trivy'):
+    """Repair the agent's private cache FIRST, never use blind APT reinstalls."""
+    before = _probe_builder_tool('trivy')
+    if before.ok:
+        # A version test is not a cache write check: scan needs a writable cache.
+        _ensure_trivy_cache()
         return
-    info=_run(['dpkg-query','-W','-f=${Version}','trivy'])
-    if info.returncode != 0 or not re.fullmatch(r'[0-9A-Za-z.+:~\-]+',info.stdout.strip()):
-        raise IntegrityError('Trivy absent d’APT : provisionner le dépôt officiel signé, puis relancer.')
-    binary=shutil.which('trivy',path=BUILDER_PATH)
-    if binary:
-        owner=_run(['dpkg-query','-S',str(Path(binary).resolve())])
-        if owner.returncode != 0 or not owner.stdout.lstrip().startswith('trivy:'):
-            raise IntegrityError('Binaire Trivy hors paquet APT : refus de le remplacer automatiquement.')
-    version=info.stdout.strip()
-    print('  › Trivy : réparation du paquet APT déjà installé (version conservée)')
-    res=_run(['apt-get','install','-y','--no-install-recommends','--reinstall','trivy='+version],timeout=300)
-    if res.returncode:
-        raise IntegrityError('Réinstallation Trivy refusée par APT ; vérifier son dépôt officiel et ses dépendances.')
-    if not _builder_binary('trivy'):
-        raise IntegrityError('Trivy reste inaccessible au builder après restauration APT ; consulter les permissions réelles.')
-
+    if before.problem == 'binary-not-on-agent-path':
+        raise IntegrityError('Trivy absent du PATH Jenkins : ' + BUILDER_PATH +
+                             ' ; relancer le rôle security_cli, pas un chmod global.')
+    print('  › Trivy : vérification et réparation du cache privé autokom-builder')
+    _ensure_trivy_cache()
+    after = _probe_builder_tool('trivy')
+    if after.ok:
+        print('  ✓ Trivy : exécution restaurée après correction du cache privé')
+        return
+    raise IntegrityError('Trivy reste indisponible pour ' + BUILDER +
+                         ' (cause=' + after.problem +
+                         ', exit=' + str(after.code) + '). '
+                         'Exécuter sudo autokom runtime scanners --diagnose. '
+                         'Aucune réinstallation APT à l’aveugle.')
 
 def _ensure_units():
     missing=[]
@@ -249,6 +377,7 @@ def reconcile(*, apply=False):
     if failures or not after.ready:
         if not failures:
             failures.append('Un ou plusieurs contrôles de santé ont échoué après la réparation.')
-        raise IntegrityError('; '.join(failures))
+        raise IntegrityError('; '.join(failures) +
+                             ' ; aide : sudo autokom runtime scanners --diagnose')
     print('  ✓ Runtime complet : scanners et automatisation des domaines validés')
     return after
