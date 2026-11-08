@@ -67,6 +67,11 @@ export default function App() {
     if (API_AVAILABLE && status === 'anonymous' && /^\/(?:dashboard|deploy|projects|sites)(?:\/|$)/.test(route)) {
       navigate('/login')
     }
+    // Le retour sur /login ou /register ne doit pas demander une nouvelle connexion
+    // lorsqu'une session HttpOnly valide a déjà été restaurée par AuthProvider.
+    if (API_AVAILABLE && status === 'authenticated' && (route === '/login' || route === '/register')) {
+      navigate('/dashboard')
+    }
   }, [route, status])
 
   useEffect(() => {

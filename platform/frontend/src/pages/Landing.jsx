@@ -7,6 +7,7 @@ import {
   TerminalSquare, Workflow, X,
 } from 'lucide-react'
 import ThemeToggle from '../components/ThemeToggle.jsx'
+import { useAuth } from '../context/AuthContext.jsx'
 import ContactSection from './ContactSection.jsx'
 import { PRICING_PLANS, formatAr, rememberPlan } from '../config/pricing.js'
 import { AUTOKOM_MARK_OUTLINE } from '../config/brandOutline.js'
@@ -109,8 +110,10 @@ function Brand({ navigate }) {
   )
 }
 
-function LandingHeader({ navigate, theme, onToggleTheme, introBusy = false }) {
+function LandingHeader({ navigate, theme, onToggleTheme, introBusy = false, sessionStatus = 'anonymous' }) {
   const [open, setOpen] = useState(false)
+  const connected = sessionStatus === 'authenticated'
+  const checking = sessionStatus === 'loading'
   const close = () => setOpen(false)
   const links = [
     ['#fonctionnement', 'Comment ça marche'],
@@ -126,12 +129,12 @@ function LandingHeader({ navigate, theme, onToggleTheme, introBusy = false }) {
         <Brand navigate={navigate} />
         <nav id="lp-navigation" className={`lp-nav-links ${open ? 'is-open' : ''}`} aria-label="Navigation de l’accueil">
           {links.map(([href, label]) => <a key={href} href={href} onClick={close}>{label}</a>)}
-          <button type="button" className="lp-nav-mobile-cta" onClick={() => { close(); navigate('/register') }}>Créer un compte <ArrowUpRight size={16} /></button>
-          <button type="button" className="lp-nav-mobile-login" onClick={() => { close(); navigate('/login') }}>Se connecter</button>
+          <button type="button" className="lp-nav-mobile-cta" disabled={checking} onClick={() => { close(); navigate(connected ? '/dashboard' : '/register') }}>{checking ? 'Vérification…' : connected ? 'Mon espace' : 'Créer un compte'} <ArrowUpRight size={16} /></button>
+          <button type="button" className="lp-nav-mobile-login" disabled={checking} onClick={() => { close(); navigate(connected ? '/projects' : '/login') }}>{connected ? 'Mes projets' : 'Se connecter'}</button>
         </nav>
         <div className="lp-nav-actions">
           <ThemeToggle theme={theme} onToggle={onToggleTheme} className="lp-theme-toggle" />
-          <button type="button" className="lp-nav-login" onClick={() => navigate('/login')}>Se connecter <ArrowUpRight size={16} /></button>
+          <button type="button" className={`lp-nav-login ${connected ? 'lp-nav-login-connected' : ''}`} disabled={checking} onClick={() => navigate(connected ? '/dashboard' : '/login')} aria-label={connected ? 'Ouvrir mon espace AUTOKOM' : 'Se connecter à AUTOKOM'}>{checking ? 'Vérification…' : connected ? 'Mon espace' : 'Se connecter'} <ArrowUpRight size={16} /></button>
           <button type="button" className="lp-mobile-menu" aria-label={open ? 'Fermer le menu' : 'Ouvrir le menu'} aria-controls="lp-navigation" aria-expanded={open} onClick={() => setOpen(value => !value)}>
             {open ? <X size={22} /> : <Menu size={22} />}
           </button>
@@ -203,6 +206,9 @@ function PipelinePreview({ mode, setMode, ready }) {
 }
 
 export default function Landing({ navigate, theme, onToggleTheme }) {
+  const { status: sessionStatus } = useAuth()
+  const connected = sessionStatus === 'authenticated'
+  const checkingSession = sessionStatus === 'loading'
   const [mode, setMode] = useState('devsecops')
   const [introState, setIntroState] = useState(() => introInitiallyVisible() ? 'loading' : 'done')
   const [forceIntroMotion, setForceIntroMotion] = useState(previewForced)
@@ -246,7 +252,7 @@ export default function Landing({ navigate, theme, onToggleTheme }) {
     <div className={`lp ${forceIntroMotion ? 'lp-force-intro' : ''}`} data-theme={theme} ref={rootRef}>
       {introState !== 'done' && <LandingIntro leaving={introState === 'leaving'} dismiss={finishIntro} forceMotion={forceIntroMotion} />}
       <a href="#lp-main" className="lp-skip-link" tabIndex={introState !== 'done' ? -1 : undefined}>Aller au contenu</a>
-      <LandingHeader navigate={navigate} theme={theme} onToggleTheme={onToggleTheme} introBusy={introState !== 'done'}/>
+      <LandingHeader navigate={navigate} theme={theme} onToggleTheme={onToggleTheme} introBusy={introState !== 'done'} sessionStatus={sessionStatus}/>
 
       <main id="lp-main" inert={introState !== 'done'}>
         <section className="lp-hero" aria-labelledby="lp-title">
@@ -257,9 +263,10 @@ export default function Landing({ navigate, theme, onToggleTheme }) {
               <h1 id="lp-title"><span className="lp-hero-line">Du code.</span><span className="lp-hero-line">Au cloud.</span><span className="lp-hero-line lp-hero-line-accent">En confiance<span className="lp-title-period">.</span></span></h1>
               <p className="lp-hero-lead">Connectez votre projet, configurez votre pipeline <strong>DevOps ou DevSecOps</strong> et suivez votre application jusqu’à sa mise en ligne. Tout au même endroit.</p>
               <div className="lp-hero-actions">
-                <button className="lp-cta-primary" type="button" onClick={() => navigate('/register')}>Créer mon espace <ArrowUpRight size={19}/></button>
+                <button className="lp-cta-primary" type="button" disabled={checkingSession} onClick={() => navigate(connected ? '/dashboard' : '/register')}>{checkingSession ? 'Vérification de la session…' : connected ? 'Accéder à mon espace' : 'Créer mon espace'} <ArrowUpRight size={19}/></button>
                 <a className="lp-cta-outline" href="#fonctionnement">Découvrir le fonctionnement <ArrowDown size={18}/></a>
               </div>
+              {connected && <p className="lp-session-active" role="status"><span className="lp-session-dot" aria-hidden="true" /> Vous êtes déjà connecté à AUTOKOM.</p>}
               <div className="lp-hero-footnote"><div className="lp-hero-footnote-stars" aria-hidden="true">✳</div><span>De la première configuration<br/>à la supervision de vos applications.</span></div>
             </div>
             <div className="lp-hero-art" data-lp-reveal style={{ '--lp-reveal-delay': '180ms' }}>

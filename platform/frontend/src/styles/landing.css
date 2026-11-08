@@ -2893,3 +2893,11 @@
 @media (prefers-reduced-motion: reduce) {
   .lp-preview-skeleton-icon, .lp-preview-skeleton-copy i { animation: none !important; }
 }
+
+/* Landing : une session serveur valide reste accessible sans nouvelle authentification.
+   Les cookies HttpOnly restent exclusivement gérés par Django. */
+.lp-nav-login-connected { border-color: var(--ak-success); }
+.lp-session-active { display:flex; align-items:center; gap:9px; margin:12px 0 0; font-size:12px; font-weight:650; color:var(--ak-success); }
+.lp-session-dot { width:8px; height:8px; border-radius:50%; flex:0 0 8px; background:currentColor; box-shadow:0 0 0 4px color-mix(in srgb, var(--ak-success) 14%, transparent); }
+.lp-nav-login:disabled, .lp-nav-mobile-cta:disabled, .lp-nav-mobile-login:disabled, .lp-cta-primary:disabled { cursor:wait; opacity:.7; transform:none; }
+@media (prefers-reduced-motion: reduce) { .lp-nav-login-connected { transition:none; } }

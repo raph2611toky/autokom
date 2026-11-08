@@ -252,3 +252,45 @@
 .ak-domain-info p{padding:8px 12px;border-left:2px solid var(--ak-accent);line-height:1.5}
 .ak-domain-form-actions{grid-column:1/-1;display:flex;gap:10px;flex-wrap:wrap}
 @media(max-width:650px){.ak-domain-form-details{grid-template-columns:1fr}}
+
+/* Listes des projets/sites : les boutons restent dans le conteneur,
+   même avec un dépôt ou un nom de domaine très long. */
+.ak-project-list { min-width:0; max-width:100%; }
+.ak-project-list .ak-project-row { max-width:100%; min-width:0; }
+.ak-project-list .ak-project-row > button { max-width:100%; }
+.ak-project-list .ak-project-row-main { min-width:0; }
+.ak-sites-simple-list .ak-project-list .ak-project-row {
+  display:grid;
+  grid-template-columns:43px minmax(0,1fr) minmax(0, min(260px, 32%)) max-content;
+  gap:14px;
+}
+.ak-sites-simple-list .ak-project-row-public { grid-column:3; grid-row:1; min-width:0; max-width:100%; overflow-wrap:anywhere; }
+.ak-sites-simple-list .ak-project-row-public a, .ak-sites-simple-list .ak-project-row-public span { display:block; max-width:100%; overflow-wrap:anywhere; word-break:break-word; }
+.ak-sites-simple-list .ak-project-row > .button-outline {
+  grid-column:4; grid-row:1; justify-self:end; display:inline-flex;
+  align-items:center; justify-content:center; gap:7px; min-width:0;
+  max-width:100%; white-space:nowrap; padding:10px 12px;
+}
+.ak-workspace-hero { min-width:0; flex-wrap:wrap; }
+.ak-workspace-hero > div:first-child { min-width:0; flex:1 1 240px; }
+.ak-project-hero-actions, .ak-project-detail-actions { max-width:100%; min-width:0; }
+.ak-project-hero-actions > button, .ak-project-detail-actions > button,
+.ak-deployment-summary > button { max-width:100%; white-space:normal; }
+@media (max-width:850px) {
+  .ak-sites-simple-list .ak-project-list .ak-project-row {
+    grid-template-columns:40px minmax(0,1fr) max-content;
+    gap:10px;
+  }
+  .ak-sites-simple-list .ak-project-row-public { grid-column:2 / -1; grid-row:2; }
+  .ak-sites-simple-list .ak-project-row > .button-outline { grid-column:3; grid-row:1; }
+}
+@media (max-width:520px) {
+  .ak-sites-simple-list .ak-project-list .ak-project-row {
+    grid-template-columns:34px minmax(0,1fr) max-content;
+    gap:9px; padding:14px 0;
+  }
+  .ak-sites-simple-list .ak-project-row > .button-outline { padding:9px 8px; font-size:11px; }
+  .ak-sites-simple-list .ak-project-row-public { font-size:11px; }
+  .ak-project-hero-actions { justify-content:flex-start; width:100%; }
+  .ak-project-detail-actions { justify-content:flex-start; }
+}
