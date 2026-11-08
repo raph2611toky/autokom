@@ -182,6 +182,32 @@ def public_vite_build_args(doc):
         args.extend(['--opt', 'build-arg:'+key+'='+value])
     return ''.join(declarations), args
 
+# The GitHub checkout may contain committed node_modules from Windows or another
+# platform. Never copy those files on top of dependencies installed by npm ci:
+# a non-executable node_modules/.bin/vite otherwise causes exit code 126.
+VITE_CONTEXT_EXCLUDES = frozenset({
+    '.git', 'node_modules', 'dist', '.next', '.nuxt', '.turbo', '.vite',
+    'coverage', '.cache',
+})
+
+
+def prepare_vite_build_context(source_dir, destination):
+    """Create a disposable BuildKit context without generated dependencies.
+
+    The checked-out repository and user-defined Dockerfile are never modified.
+    Preserve ordinary source files and symlinks; shutil.copytree must not follow
+    symlinks outside the checkout. Only the trusted AUTOKOM Dockerfile is used.
+    """
+    def exclude_generated(_directory, names):
+        return [name for name in names if name in VITE_CONTEXT_EXCLUDES]
+
+    try:
+        shutil.copytree(source_dir, destination, symlinks=True, ignore=exclude_generated)
+    except (OSError, shutil.Error) as exc:
+        fail('Préparation du contexte Vite impossible; vérifier les fichiers du dépôt GitHub.')
+
+
+
 def build(doc):
     path=source(doc)
     cfg=doc['build']
@@ -242,11 +268,16 @@ def build(doc):
         temp=Path(tmp.name)
     try:
         if cfg['method'] == 'STATIC':
-            with tempfile.TemporaryDirectory(prefix='autokom-vite-dockerfile-') as trusted_dir:
-                trusted = Path(trusted_dir)/'Dockerfile'
-                trusted.write_text(recipe, encoding='utf-8')
+            with tempfile.TemporaryDirectory(prefix='autokom-vite-build-') as trusted_dir:
+                trusted_root = Path(trusted_dir)
+                trusted_dockerfile = trusted_root/'recipe'
+                trusted_context = trusted_root/'context'
+                trusted_dockerfile.mkdir()
+                prepare_vite_build_context(path, trusted_context)
+                (trusted_dockerfile/'Dockerfile').write_text(recipe, encoding='utf-8')
                 execute(['buildctl','build','--frontend','dockerfile.v0',
-                         '--local','context='+str(path),'--local','dockerfile='+trusted_dir,
+                         '--local','context='+str(trusted_context),
+                         '--local','dockerfile='+str(trusted_dockerfile),
                          '--opt','filename=Dockerfile',
                          *vite_build_args,
                          '--output','type=docker,name=autokom-local:'+rid+',dest='+str(temp)],timeout=1800)

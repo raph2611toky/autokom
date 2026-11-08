@@ -33,7 +33,7 @@ class StaticAgentTests(unittest.TestCase):
                 dest.write_bytes(b'0'*2048)
             doc={'run_id':'11111111-1111-4111-8111-111111111111','build':{
               'root':'','method':'STATIC','runtime':'STATIC','output_directory':'dist','port':8080,'dockerfile':'Dockerfile','start_command':'','build_command':''}}
-            with patch.dict(os.environ,{'WORKSPACE':str(ws),'AUTOKOM_ARTIFACT_DIR':str(artifacts)}),patch.object(agent,'execute',mock_execute):
+            with patch.dict(os.environ,{'WORKSPACE':str(ws),'AUTOKOM_ARTIFACT_DIR':str(artifacts)}),patch.object(agent,'buildkit_preflight'),patch.object(agent,'execute',mock_execute):
                 agent.build(doc)
             self.assertEqual(len(seen),1)
             self.assertTrue((artifacts/(doc['run_id']+'.tar')).exists())

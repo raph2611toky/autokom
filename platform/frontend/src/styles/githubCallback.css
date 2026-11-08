@@ -1,22 +1,23 @@
-/* Page de transition OAuth, dégradés dans le thème, animations accessibles. */
-.ak-github-callback { display: grid; gap: 19px; text-align: center; }
-.ak-github-orbit { position: relative; width: 88px; height: 88px; margin: 1px auto 4px; display: grid; place-items: center; border-radius: 25px; color: #eaf8ff; background: linear-gradient(145deg, #0a88ff, #6756e8 67%, #b44df1); box-shadow: 0 16px 36px #4a4dd044; animation: ak-github-enter .6s ease-out both; }
-.ak-github-orbit--failed { background: linear-gradient(130deg, #ed4871, #bc305a); }
-.ak-github-orbit-ring { position: absolute; inset: -9px; border: 2px solid transparent; border-top-color: #37bfff; border-right-color: #a17bff; border-radius: 34px; animation: ak-github-spin 2.1s linear infinite; }
-.ak-github-steps { display: grid; gap: 9px; text-align: left; }
-.ak-github-step { display: flex; align-items: center; gap: 11px; min-height: 60px; padding: 9px 13px; background: var(--ak-surface-2); border: 1px solid var(--ak-border); border-radius: 12px; color: var(--ak-muted); transition: border-color .2s, background .2s, transform .2s; }
-.ak-github-step.is-current { transform: translateX(3px); border-color: #8184ff; background: color-mix(in srgb, var(--ak-accent) 11%, var(--ak-surface)); color: var(--ak-text-strong); }
-.ak-github-step.is-done { color: var(--ak-text-strong); border-color: color-mix(in srgb, #17cda6 45%, var(--ak-border)); }
-.ak-github-step-icon { width: 35px; height: 35px; border-radius: 10px; display: grid; place-items: center; color: #8c88ff; background: color-mix(in srgb, #7869ff 15%, transparent); flex: 0 0 35px; }
-.ak-github-step.is-done .ak-github-step-icon { color: #11b991; background: color-mix(in srgb, #11cfa3 12%, transparent); }
-.ak-github-step.is-current .ak-github-step-icon { color: #00aff2; background: color-mix(in srgb, #00aff2 12%, transparent); }
-.ak-github-step > div:nth-child(2) { display: grid; gap: 2px; flex: 1; }
-.ak-github-step strong { font-size: 13px; font-weight: 750; }
-.ak-github-step small { font-size: 11px; opacity: .84; }
-.ak-github-step > svg { color: #8981ff; }
-.ak-github-message { margin: 0; padding: 13px; color: var(--ak-text-strong); background: color-mix(in srgb, #3a8cff 11%, var(--ak-surface)); border: 1px solid color-mix(in srgb, #378cff 26%, var(--ak-border)); border-radius: 11px; font-size: 13px; line-height: 1.5; }
-.ak-github-message.is-error { background: color-mix(in srgb, #e63972 11%, var(--ak-surface)); border-color: #e6397273; }
-.ak-github-security { display: flex; align-items: center; justify-content: center; gap: 5px; font-size: 10px; color: var(--ak-muted); }
+/* Transition OAuth volontairement minimale : GitHub → AUTOKOM. */
+.ak-github-callback-page {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.ak-github-callback { display: grid; justify-items: center; gap: 17px; width: min(360px, 100%); text-align: center; }
+.ak-github-callback-title { margin: 0; font: 720 17px/1.3 var(--ak-font-heading); color: var(--ak-text-strong); }
+.ak-github-transfer { display: flex; justify-content: center; align-items: center; gap: 12px; width: 100%; }
+.ak-github-transfer-mark { display: grid; place-items: center; width: 67px; height: 67px; flex: 0 0 67px; border-radius: 16px; border: 1px solid var(--ak-border-strong); background: var(--ak-surface); }
+.ak-github-transfer-mark--github { color: var(--ak-text-strong); }
+.ak-github-transfer-mark--autokom img { display: block; width: 47px; height: 47px; object-fit: contain; }
+.ak-github-transfer-middle { display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--ak-accent); }
+.ak-github-transfer-middle::before, .ak-github-transfer-middle::after { content: ''; display: block; width: 25px; height: 1px; background: var(--ak-border-strong); }
+.ak-github-transfer-middle.is-error { color: var(--ak-danger); }
+.ak-github-transfer-spinner { animation: ak-github-spin 1s linear infinite; }
+.ak-github-message { margin: 0; color: var(--ak-muted); font-size: 13px; line-height: 1.5; }
+.ak-github-message.is-error { color: var(--ak-danger); }
+.ak-github-callback-action { min-height: 42px; font-size: 12px; }
 @keyframes ak-github-spin { to { transform: rotate(360deg); } }
-@keyframes ak-github-enter { from { opacity: 0; transform: translateY(10px) scale(.91); } to { opacity: 1; transform: translateY(0) scale(1); } }
-@media (prefers-reduced-motion: reduce) { .ak-github-orbit, .ak-github-orbit-ring { animation: none; } .ak-github-step { transition: none; } }
+@media (max-width: 420px) { .ak-github-transfer { gap: 5px; } .ak-github-transfer-middle::before, .ak-github-transfer-middle::after { width: 15px; } }
+@media (prefers-reduced-motion: reduce) { .ak-github-transfer-spinner { animation: none; } }
