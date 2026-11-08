@@ -3,12 +3,14 @@ import contextlib
 import importlib.util
 import io
 import json
+import sys
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 
 PATH = Path(__file__).resolve().parents[1] / 'scripts/lib/autokom_frontend_manager.py'
+sys.path.insert(0, str(PATH.parent))
 spec = importlib.util.spec_from_file_location('autokom_frontend_test_module', PATH)
 fm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fm)

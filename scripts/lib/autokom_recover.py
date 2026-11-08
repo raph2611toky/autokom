@@ -62,6 +62,34 @@ def ready_frontend(front):
         return False
 
 
+def repair_https_partition():
+    """Repair a regressed wildcard 443 listener only under the existing policy.
+
+    This is an explicit --apply recovery, with repair module's transactional
+    snapshots and the original observability HTTPS/SNI smoke tests.
+    """
+    from autokom_nginx_bind_policy import addresses
+    partition = addresses()
+    if not partition:
+        return False
+    repair_path = Path(__file__).resolve().parents[1] / 'repair'
+    if str(repair_path) not in sys.path:
+        sys.path.insert(0, str(repair_path))
+    import repair_nginx_443_bind as repair
+    address, _dev = repair.main_ipv4()
+    if partition != (address, '127.0.0.1'):
+        raise RecoverError('Politique HTTPS et IP routée incohérentes : réparation automatique refusée')
+    try:
+        changes = repair.plan(repair.run(['nginx', '-T']), address)
+    except repair.RepairError as exc:
+        if str(exc).startswith('Aucune directive IPv4 listen 443 globale'):
+            return False
+        raise
+    # No changes to UFW or the VPN process; previous Nginx files are backed up.
+    repair.apply(changes, address)
+    return True
+
+
 def run(*, apply=False):
     import autokom_app_manager as app
     import autokom_frontend_manager as frontmod
@@ -132,6 +160,9 @@ def run(*, apply=False):
                 except frontmod.FrontendError:
                     pass
             if not tls_ready or not state_exists:
+                print('  › Frontend : audit et réparation des écouteurs Nginx 443')
+                if repair_https_partition():
+                    print('  ✓ Partition HTTPS Nginx restaurée sans arrêt du service VPN')
                 print('  › Frontend : publication du challenge HTTP-01, TLS et Nginx')
                 options = argparse.Namespace(domain=front, backend_domain=back,
                     nginx_mode='managed', tls_mode='certbot', email=None,

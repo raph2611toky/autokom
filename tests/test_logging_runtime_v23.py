@@ -36,7 +36,7 @@ class RuntimeV23(unittest.TestCase):
         self.assertIn('127.0.0.1:3100/loki/api/v1/push',data['config.alloy'])
         self.assertNotIn('http://loki:3100/loki/api/v1/push',data['config.alloy'])
         self.assertIn('http_listen_address: 127.0.0.1',data['loki.yaml'])
-        self.assertIn('/var/lib/autokom/loki/chunks',data['loki.yaml'])
+        self.assertIn('/var/lib/autokom-loki/chunks',data['loki.yaml'])
 
     def test_docker_config_is_backward_compatible(self):
         self.assertIn('http://loki:3100/loki/api/v1/push',logging_stack.alloy_config('loki'))

@@ -1,29 +1,49 @@
-"""Small ANSI layer for AUTOKOM status output; never modifies redirected output."""
+"""ANSI statuses used by AUTOKOM: readable, colorful, TTY-only and safe for logs."""
+from __future__ import annotations
 import os
 import re
 import sys
 
-_PALETTE = {"✓":"\033[38;2;134;239;172m", "✗":"\033[38;2;255;135;135m",
-            "!":"\033[38;2;255;211;120m", "›":"\033[38;2;125;211;252m",
-            "+":"\033[38;2;134;239;172m", "◈":"\033[1;36m"}
-_PREFIX=re.compile(r"^(\s*)([✓✗!›+◈])(?=\s|$)")
-# Only color *exact* status tokens; never recolor URLs, paths or arbitrary log text.
-_STATUSES=re.compile(r"(?<![\w/.-])(OK|PASS|UP|DOWN|FAIL|FAILED|ABSENTE|ABSENT|ERREUR|ERROR|WARNING)(?![\w/.-])")
-_STATUS_COLORS={
-    'OK':'✓','PASS':'✓','UP':'✓',
-    'DOWN':'✗','FAIL':'✗','FAILED':'✗','ABSENTE':'✗','ABSENT':'✗','ERREUR':'✗','ERROR':'✗',
-    'WARNING':'!',
+RESET = "\x1b[0m"
+PALETTE = {
+    "ok": "\x1b[38;2;116;238;174m",          # success green
+    "error": "\x1b[38;2;255;110;130m",       # failure red
+    "warn": "\x1b[38;2;255;201;100m",        # warning amber
+    "action": "\x1b[38;2;86;224;241m",       # actions cyan
+    "info": "\x1b[38;2;132;182;255m",        # details blue
+    "heading": "\x1b[1;38;2;199;147;255m", # titles violet
+    "muted": "\x1b[38;2;158;165;183m",      # skip gray
 }
+_MARKERS = {'✓':'ok','✗':'error','!':'warn','›':'info','+':'action','◈':'heading'}
+# Only standalone status markers, never path components or positive arithmetic.
+_INLINE_MARKER = re.compile(r'(?<![\w/])([✓✗◈›])(?=\s|$)|(?<![\w/])([!+])(?=\s)')
+_STATUSES = re.compile(r'(?<![\w/.-])(OK|PASS|UP|DOWN|FAIL|FAILED|ABSENTE|ABSENT|ERREUR|ERROR|WARNING|SIMULATION|APPLICATION)(?![\w/.-])')
+_ROLE = re.compile(r'^(\s*)(Backend Django|Journaux|Frontend|Domaine|Politique|Logs|BILAN|AUTOKOM / REPRISE AUTOMATIQUE|AUTOKOM / BILAN)(?=\s*:|\s*·|\s*$)')
+_STATUS_COLORS = {'OK':'ok','PASS':'ok','UP':'ok','DOWN':'error','FAIL':'error',
+                  'FAILED':'error','ABSENT':'error','ABSENTE':'error',
+                  'ERREUR':'error','ERROR':'error','WARNING':'warn',
+                  'SIMULATION':'heading','APPLICATION':'heading'}
+
+def enabled(target):
+    return (getattr(target, 'isatty', lambda: False)()
+            and 'NO_COLOR' not in os.environ
+            and os.environ.get('TERM', '') not in ('', 'dumb'))
+
+def highlight(line):
+    # Replace tokens in one pass to prevent recoloring existing ANSI sequences.
+    def mark(m):
+        item = m.group(1) or m.group(2)
+        return PALETTE[_MARKERS[item]] + item + RESET
+    line = _INLINE_MARKER.sub(mark, line)
+    line = _STATUSES.sub(lambda m: PALETTE[_STATUS_COLORS[m.group(1)]] + m.group(1) + RESET, line)
+    line = _ROLE.sub(lambda m: m.group(1) + PALETTE['heading'] + m.group(2) + RESET, line)
+    return line
 
 def pretty_print(*args, sep=' ', end='\n', file=None, flush=False):
-    target=file if file is not None else sys.stdout
-    raw=sep.join(str(arg) for arg in args)
-    enabled=(getattr(target,'isatty',lambda:False)() and 'NO_COLOR' not in os.environ
-             and os.environ.get('TERM','') not in ('','dumb'))
-    if enabled:
-        def style(line):
-            line=_PREFIX.sub(lambda m:m.group(1)+_PALETTE[m.group(2)]+m.group(2)+'\033[0m',line,count=1)
-            return _STATUSES.sub(lambda m:_PALETTE[_STATUS_COLORS[m.group(1)]]+m.group(1)+'\033[0m',line)
-        raw='\n'.join(style(line) for line in raw.split('\n'))
-    target.write(raw+end)
-    if flush: target.flush()
+    target = file if file is not None else sys.stdout
+    body = sep.join(str(arg) for arg in args)
+    if enabled(target):
+        body = '\n'.join(highlight(line) for line in body.split('\n'))
+    target.write(body + end)
+    if flush:
+        target.flush()

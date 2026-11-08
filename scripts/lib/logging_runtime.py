@@ -19,9 +19,13 @@ import time
 import datetime
 import urllib.request
 
-NATIVE = Path('/etc/autokom/logs-native')
+NATIVE = Path('/etc/autokom/logs-native')  # root-only state/marker
+CONFIG_DIR = Path('/etc/autokom-logging')  # public, non-secret runtime configs
 STATE = Path('/etc/autokom/state/logs-runtime.json')
-DATA = Path('/var/lib/autokom/loki')
+# Never place Loki under Django's private /var/lib/autokom (0750).
+# autokom-loki cannot traverse that parent; this is one cause of exit=1.
+LEGACY_DATA = Path('/var/lib/autokom/loki')
+DATA = Path('/var/lib/autokom-loki')
 BACKUP_ROOT = Path('/var/backups/autokom/logs')
 UNITS = ('loki','alloy')
 
@@ -153,7 +157,7 @@ def new_backup():
 
 
 def backup_configs(target):
-    for directory in ('/etc/autokom/logs','/etc/autokom/logs-native'):
+    for directory in ('/etc/autokom/logs','/etc/autokom/logs-native', '/etc/autokom-logging'):
         source=Path(directory)
         if source.is_dir() and not source.is_symlink():
             shutil.copytree(source,target/source.name,symlinks=True)
@@ -217,18 +221,68 @@ def install_vendor_packages():
         raise RuntimeErrorSafe('Binaires Loki/Alloy officiels introuvables après installation')
 
 
+def prepare_native_data():
+    """Copy legacy Loki data to a traversable service directory, never erase it.
+
+    /var/lib/autokom belongs to the Django service (0750); the dedicated Loki
+    account cannot traverse that parent even when it owns its own child.
+    """
+    if DATA.is_symlink() or LEGACY_DATA.is_symlink():
+        raise RuntimeErrorSafe('Stockage Loki symbolique : migration refusée')
+    if DATA.exists() and not DATA.is_dir():
+        raise RuntimeErrorSafe('Chemin de données Loki non répertoire')
+    if LEGACY_DATA.exists():
+        if not LEGACY_DATA.is_dir():
+            raise RuntimeErrorSafe('Ancien stockage Loki non répertoire')
+        if any(LEGACY_DATA.iterdir()):
+            if DATA.exists() and any(DATA.iterdir()):
+                raise RuntimeErrorSafe('Ancien et nouveau stockages Loki non vides : fusion interdite')
+            # Loki must not ingest filesystem links from the old private tree.
+            for folder, directories, files in os.walk(LEGACY_DATA, followlinks=False):
+                for name in directories + files:
+                    if (Path(folder) / name).is_symlink():
+                        raise RuntimeErrorSafe('Lien symbolique dans les anciennes données Loki')
+            shutil.copytree(LEGACY_DATA, DATA, dirs_exist_ok=True)
+            print('  ✓ Données Loki recopiées sans effacer l’ancien répertoire privé')
+    DATA.mkdir(parents=True, exist_ok=True, mode=0o750)
+    os.chmod(DATA, 0o750)
+
+
 def prepare_native():
-    NATIVE.mkdir(parents=True,exist_ok=True,mode=0o755)
-    expected=native_files()
-    for key,content in expected.items():
-        path=NATIVE/key
-        if path.exists() and path.read_text()!=content:
-            raise RuntimeErrorSafe('Fichier natif modifié manuellement : '+str(path))
-        if not path.exists():secure_save(path,content)
-    if not cmd('id','-u','autokom-loki',check=False).returncode==0:
-        cmd('useradd','--system','--home-dir',str(DATA),'--shell','/usr/sbin/nologin','autokom-loki')
-    DATA.mkdir(parents=True,exist_ok=True)
-    os.chmod(DATA,0o750)
+    # State is still root-only. Services only read the non-secret configuration
+    # from /etc/autokom-logging, never /etc/autokom (0750 root:root).
+    NATIVE.mkdir(parents=True, exist_ok=True, mode=0o755)
+    if CONFIG_DIR.is_symlink() or (CONFIG_DIR.exists() and not CONFIG_DIR.is_dir()):
+        raise RuntimeErrorSafe('Répertoire de configuration Loki symbolique/invalide')
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o755)
+    if CONFIG_DIR.stat().st_mode & 0o022:
+        raise RuntimeErrorSafe('Configuration Loki modifiable par un utilisateur non autorisé')
+    CONFIG_DIR.chmod(0o755)
+    prepare_native_data()
+    expected = native_files()
+    marker = (NATIVE / '.autokom-installed').is_file()
+    for key, content in expected.items():
+        previous = NATIVE / key
+        managed = CONFIG_DIR / key
+        if previous.is_symlink() or managed.is_symlink():
+            raise RuntimeErrorSafe('Fichier de configuration Loki symbolique interdit')
+        # Old AUTOKOM files must match byte-for-byte: refuse custom operator
+        # changes rather than quietly masking them with a newly generated file.
+        if previous.exists():
+            old = previous.read_text()
+            allowed = (content, content.replace(str(DATA), str(LEGACY_DATA)))
+            if old not in allowed:
+                raise RuntimeErrorSafe('Ancien fichier natif modifié manuellement : '+str(previous))
+        if managed.exists() and managed.read_text() != content:
+            raise RuntimeErrorSafe('Configuration Loki non gérée : '+str(managed))
+        if not managed.exists():
+            if previous.exists() and marker:
+                location = new_backup()
+                backup_configs(location)
+                print('  ✓ Sauvegarde des anciennes configurations Loki : '+str(location))
+            secure_save(managed, content)
+    if cmd('id', '-u', 'autokom-loki', check=False).returncode != 0:
+        cmd('useradd', '--system', '--home-dir', str(DATA), '--shell', '/usr/sbin/nologin', 'autokom-loki')
     # Package service usually runs as `alloy`; ensure reading journald & nginx.
     if cmd('id','-u','alloy',check=False).returncode!=0:
         raise RuntimeErrorSafe('Utilisateur alloy manquant après installation APT')
@@ -237,8 +291,8 @@ def prepare_native():
         if cmd('getent','group',group,check=False).returncode==0:groups.append(group)
     if groups:cmd('usermod','-aG',','.join(groups),'alloy')
     print('  ! Le groupe docker donne un accès très privilégié : une politique de socket-proxy reste recommandée.')
-    native_loki=NATIVE/'loki.yaml'
-    native_alloy=NATIVE/'config.alloy'
+    native_loki=CONFIG_DIR/'loki.yaml'
+    native_alloy=CONFIG_DIR/'config.alloy'
     unit_loki=Path('/etc/systemd/system/loki.service.d/90-autokom.conf')
     unit_alloy=Path('/etc/systemd/system/alloy.service.d/90-autokom.conf')
     loki_binary=shutil.which('loki')
@@ -248,8 +302,7 @@ def prepare_native():
     cmd('systemctl','daemon-reload')
     cmd(shutil.which('alloy'),'validate',str(native_alloy),timeout=90)
     secure_save(NATIVE/'.autokom-installed','loki=3.7.0\nalloy=1.11.0\n',0o600)
-    # Loki's `-verify-config` is not available in all package versions.
-    print('  ✓ Fichiers natifs et validation Alloy préparés')
+    print('  ✓ Loki/Alloy : configurations et stockage accessibles aux comptes dédiés')
 
 
 def chown_loki(root):
@@ -357,7 +410,11 @@ def migrate_to_native(backend):
         if not native_ready():
             if not (NATIVE/'.autokom-installed').is_file():
                 raise RuntimeErrorSafe('Services systemd non gérés : réparation refusée')
+            # Repair native config and data permissions before retrying units.
+            prepare_native()
+            chown_loki(DATA)
             for unit in UNITS:
+                cmd('systemctl', 'reset-failed', unit, check=False)
                 cmd('systemctl', 'enable', '--now', unit, check=False)
             wait_ready()
         from logging_stack import provision_grafana

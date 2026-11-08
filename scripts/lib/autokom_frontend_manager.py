@@ -386,6 +386,22 @@ def prepare_acme_webroot():
 
 
 
+def ensure_frontend_vhost_loaded(front):
+    """A successful nginx -t does not mean the new site is loaded at runtime."""
+    result = subprocess.run(['nginx', '-T'], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, timeout=25, check=False)
+    if result.returncode:
+        raise FrontendError('Nginx -T échoue : TLS/ACME non déployable')
+    heading = '# configuration file ' + str(VHOST) + ':'
+    if heading not in result.stdout and not any(
+        '# configuration file ' + str(p) + ':' in result.stdout
+        for p in (VHOST.resolve(), Path('/etc/nginx/sites-enabled') / VHOST.name)):
+        raise FrontendError('Le vhost frontend n’est pas chargé par Nginx : sites-enabled à corriger')
+    # Name collisions are warnings and nginx -t may still return exit 0.
+    if ('conflicting server name "' + front + '"') in result.stderr:
+        raise FrontendError('Nom de domaine Nginx dupliqué : ' + front + ' ; correction automatique refusée')
+
+
 def verify_acme_http(front):
     """Probe a real token through the targeted Nginx vhost BEFORE contacting CA.
 
@@ -822,6 +838,10 @@ def setup(args):
         if original != new_vhost:
             VHOST.write_text(new_vhost, encoding='utf-8')
             VHOST.chmod(0o644)
+        if link.is_symlink() and link.resolve() != VHOST.resolve():
+            raise FrontendError('Conflit Nginx : sites-enabled pointe sur un autre vhost ; remplacement refusé')
+        if link.exists() and not link.is_symlink():
+            raise FrontendError('Conflit Nginx : sites-enabled n’est pas un lien géré ; remplacement refusé')
         created = not link.exists() and not link.is_symlink()
         if created:
             link.symlink_to(VHOST)
@@ -838,13 +858,16 @@ def setup(args):
             raise
         if args.tls_mode == 'certbot':
             if managed_certificate_installed(front):
-                print('  ✓ Certificat TLS déjà installé : aucune nouvelle demande ACME.')
+                print('  ✓ Certificat TLS existant : pas de nouvelle demande ACME.')
             else:
                 if addresses():
+                    ensure_frontend_vhost_loaded(front)
                     verify_acme_http(front)
                 run_live(certbot_command(front, email), label='Certificat HTTPS Let’s Encrypt', timeout=300)
-                if addresses():
-                    publish_tls_vhost(front, back, backend_port())
+            # A certificate on disk is NOT proof that a 443 vhost exists.
+            # Always converge the generated vhost, even after interrupted setup.
+            if addresses():
+                publish_tls_vhost(front, back, backend_port())
     save_state({'domain': front, 'backend_domain': back, 'nginx_mode': args.nginx_mode,
                 'tls_mode': args.tls_mode, 'releases': previous.get('releases', []) if previous else [],
                 'active': previous.get('active') if previous else None})
