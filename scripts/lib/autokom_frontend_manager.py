@@ -968,7 +968,8 @@ def deploy_locked(args):
         print('  [4/6] SAST Semgrep')
         builder_run(['semgrep', 'scan', '--config', '.semgrep-rules.yml', '--error', '--metrics', 'off', 'src'], stage, env, label='Analyse Semgrep')
         print('  [5/6] Analyse Trivy (vulnérabilités + secrets)')
-        builder_run(['trivy', 'fs', '--scanners', 'vuln,secret', '--exit-code', '1',
+        builder_run(['trivy', 'fs', '--config=', '--ignorefile=', '--secret-config=',
+                     '--scanners', 'vuln,secret', '--exit-code', '1',
                      '--severity', 'HIGH,CRITICAL', '--no-progress', '.'], stage, env, label='Analyse Trivy')
         print('  [6/6] Compilation Vite, sans sourcemap publique')
         builder_run(['npm', 'run', 'build'], stage, env, label='Compilation Vite')

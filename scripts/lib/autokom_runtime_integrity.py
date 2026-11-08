@@ -53,10 +53,13 @@ class Integrity:
         return all((self.semgrep, self.trivy, self.rules, self.timer, self.path))
 
 
-def _run(argv, *, timeout=20):
+def _run(argv, *, timeout=20, cwd=None):
     try:
+        # A root shell's current directory may be /root (0700). Always run
+        # scanner probes from the isolated builder's accessible home.
+        options = {'cwd': cwd} if cwd is not None else {}
         return subprocess.run(argv, capture_output=True, text=True,
-                              check=False, timeout=timeout)
+                              check=False, timeout=timeout, **options)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise IntegrityError('Commande système indisponible : ' + str(argv[0])) from exc
 
@@ -96,7 +99,11 @@ def _probe_builder_tool(tool):
         return ToolProbe(False, None, 'builder-user-missing', binary)
     try:
         result = _run(['runuser', '-u', BUILDER, '--', '/usr/bin/env',
-                       *_tool_env(tool), binary, '--version'], timeout=35)
+                       *_tool_env(tool), binary,
+                       # Trivy auto-loads ./trivy.yaml; that fails if the
+                       # caller is root in /root and is unsafe in a checkout.
+                       *(['--config='] if tool == 'trivy' else []),
+                       '--version'], timeout=35, cwd=BUILDER_HOME)
     except IntegrityError:
         return ToolProbe(False, None, 'cannot-run-builder-probe', binary)
     if result.returncode == 0:
@@ -119,7 +126,9 @@ def _probe_builder_tool(tool):
         return ToolProbe(True, 0, 'ok', binary)
     # Do not forward arbitrary stderr (it may contain paths or credentials).
     message = (result.stderr + '\n' + result.stdout).lower()
-    if 'permission denied' in message or 'operation not permitted' in message:
+    if 'trivy.yaml' in message and 'permission denied' in message:
+        reason = 'implicit-config-inaccessible'
+    elif 'permission denied' in message or 'operation not permitted' in message:
         reason = 'permission-denied'
     elif 'no such file' in message or 'not found' in message:
         reason = 'binary-or-library-missing'
@@ -145,6 +154,8 @@ def trivy_diagnose():
     print('  › PATH agent : ' + BUILDER_PATH)
     print('  › Binaire : ' + (probe.binary or 'introuvable'))
     print('  › Cache privé : ' + str(TRIVY_CACHE))
+    print('  › Répertoire du contrôle : ' + BUILDER_HOME)
+    print('  › Configuration Trivy : --config= (pas de trivy.yaml implicite)')
     print('  ' + ('✓' if probe.ok else '✗') + ' Trivy : ' + probe.problem +
           ('' if probe.code is None else ' · code=' + str(probe.code)))
     for path in (Path(BUILDER_HOME), BUILDER_CACHE, TRIVY_CACHE):
@@ -157,6 +168,8 @@ def trivy_diagnose():
         info = path.stat()
         print('  › ' + str(path) + ' : uid=' + str(info.st_uid) +
               ' mode=' + format(stat.S_IMODE(info.st_mode), '04o'))
+    if probe.problem == 'implicit-config-inaccessible':
+        print('  ! Trivy charge trivy.yaml depuis un répertoire inaccessible ; utiliser --config=')
     print('  › Réparer : sudo autokom runtime reconcile --apply')
     print('  › Journaux agent : sudo autokom runtime logs --lines 100')
     return probe

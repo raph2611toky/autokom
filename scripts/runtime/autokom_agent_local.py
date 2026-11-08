@@ -97,6 +97,15 @@ def execute(argv,timeout=1500):
         # Keep Jenkins scans out of root's shared cache and Django's private tree.
         env['TRIVY_CACHE_DIR'] = '/var/lib/autokom-jenkins-agent-v2/.cache/trivy'
         env['XDG_CACHE_HOME'] = '/var/lib/autokom-jenkins-agent-v2/.cache'
+        # Do not load configuration from the current working directory.
+        # Jenkins sources can contain untrusted trivy.yaml, .trivyignore and
+        # trivy-secret.yaml files. They must not override security policy.
+        # Explicit empty CLI flags are required: empty env vars are ignored.
+        if len(argv) > 1 and argv[1] in ('fs', 'filesystem'):
+            argv = [*argv[:2], '--config=', '--ignorefile=',
+                    '--secret-config=', *argv[2:]]
+        else:
+            argv = [argv[0], '--config=', *argv[1:]]
     try:
         subprocess.run(argv,check=True,timeout=timeout,env=env)
     except FileNotFoundError:
