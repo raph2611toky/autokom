@@ -1,6 +1,6 @@
 .ak-copy-action { transition: color .18s ease, border-color .18s ease, background-color .18s ease; }
-.ak-copy-action.ak-copy-success { color: #44d591 !important; border-color: #44d591 !important; }
+.ak-copy-action.ak-copy-success { color: var(--ak-success) !important; background: var(--ak-success-soft) !important; border-color: var(--ak-success) !important; }
 .ak-copy-action.ak-copy-success svg { animation: ak-copy-affirm .25s ease-out both; }
-.ak-copy-action.ak-copy-error { color: #ff8090 !important; border-color: #ff8090 !important; }
+.ak-copy-action.ak-copy-error { color: var(--ak-danger) !important; background: var(--ak-danger-soft) !important; border-color: var(--ak-danger) !important; }
 @keyframes ak-copy-affirm { from { transform: scale(.55) rotate(-20deg); opacity:.2 } to { transform: scale(1) rotate(0); opacity:1 } }
 @media (prefers-reduced-motion: reduce) { .ak-copy-action.ak-copy-success svg { animation:none; } }

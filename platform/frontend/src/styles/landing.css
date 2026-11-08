@@ -2909,6 +2909,18 @@
 .lp-contact-spinning { animation:lp-contact-spin 1s linear infinite; }
 @keyframes lp-contact-spin { to { transform:rotate(360deg); } }
 .lp-contact-feedback { display:flex; align-items:center; gap:10px; }
-.lp-contact-feedback-success { border-left-color:var(--ak-success); }
-.lp-contact-feedback-error { border-left-color:#ef6c79; }
+/* Chaque résultat réutilise la palette sémantique des thèmes clair et sombre.
+   Un succès n'hérite jamais du fond orange réservé aux actions AUTOKOM. */
+.lp-contact-feedback-success {
+  color: var(--ak-success);
+  background: var(--ak-success-soft);
+  border-left-color: var(--ak-success);
+}
+.lp-contact-feedback-error {
+  color: var(--ak-danger);
+  background: var(--ak-danger-soft);
+  border-left-color: var(--ak-danger);
+}
+.lp-contact-feedback-success svg,
+.lp-contact-feedback-error svg { color: currentColor; }
 @media(prefers-reduced-motion:reduce) { .lp-contact-spinning { animation:none; } }
