@@ -33,7 +33,7 @@ if not (_BACKEND_PY / "apps" / "projects" / "git" / "sqlite_policy.py").is_file(
     raise RuntimeError("AUTOKOM SQLite policy missing: backend source deployment incomplete")
 if str(_BACKEND_PY) not in sys.path:
     sys.path.insert(0, str(_BACKEND_PY))
-from apps.projects.git.sqlite_policy import refuse_sqlite_source
+from apps.projects.git.sqlite_policy import sqlite_storage_warning
 from autokom_frontend_recipes import (ALL_PROFILES, STATIC_PROFILES, recipe as frontend_recipe,
     static_server_config, validate_profile_source)
 
@@ -405,12 +405,14 @@ def build(doc):
         fail('Recette statique non autorisée.')
     if cfg['method'] == 'AUTO' and profile != 'next_server' and profile not in BACKEND_PROFILES:
         fail('La recette serveur automatique demandée est inconnue.')
-    # Storage policy: reject ephemeral SQLite before BuildKit or Docker can run.
+    # SQLite is permitted but warnings must survive UI bypass and appear in the Jenkins log.
     if cfg.get('runtime') in ('PYTHON', 'NODE', 'JAVA', 'PHP') or profile in BACKEND_PROFILES:
         try:
-            refuse_sqlite_source(path)
-        except (ValueError, OSError) as exc:
-            fail(str(exc))
+            warning = sqlite_storage_warning(path)
+            if warning:
+                print('AUTOKOM_LOG:AVERTISSEMENT_STOCKAGE_SQLITE ' + warning, flush=True)
+        except (ValueError, OSError):
+            print('AUTOKOM_LOG:Contrôle SQLite non concluant ; vérifier la persistance des données.', flush=True)
     rid=doc['run_id']
     artifact_dir=Path(os.getenv('AUTOKOM_ARTIFACT_DIR','/var/lib/autokom/build-artifacts'))
     if not artifact_dir.is_dir() or artifact_dir.is_symlink():fail('Répertoire d’artefacts non préparé.')

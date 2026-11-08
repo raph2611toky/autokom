@@ -7,7 +7,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'platform' / 'backend'))
 sys.path.insert(0, str(ROOT / 'scripts' / 'runtime'))
-from apps.projects.git.sqlite_policy import detect_text, refuse_sqlite_source, detect_sqlite_source
+from apps.projects.git.sqlite_policy import detect_text, sqlite_storage_warning, detect_sqlite_source
 from autokom_backend_recipes import BACKEND_RUNTIME, backend_recipe
 
 
@@ -38,10 +38,12 @@ def source(tmp_path, data):
     ('php_laravel', {'composer.json':json.dumps({'require':{'laravel/framework':'*'}}), 'composer.lock':'{}','artisan':'<?php','public/index.php':'<?php','config/database.php':"$driver = env('DB_CONNECTION', 'mysql');", '.env':'DB_CONNECTION=sqlite'}),
     ('php_symfony', {'composer.json':json.dumps({'require':{'symfony/framework-bundle':'*'}}), 'composer.lock':'{}','public/index.php':'<?php','config/packages/doctrine.yaml':'DATABASE_URL=sqlite:///tmp/app.db'}),
 ])
-def test_sqlite_backend_profiles_rejected(tmp_path, profile, files):
+def test_sqlite_backend_profiles_warn_without_blocking(tmp_path, profile, files):
     source(tmp_path, files)
-    with pytest.raises(ValueError, match='SQLite interdit'):
-        backend_recipe(profile, tmp_path, cfg(profile))
+    note = sqlite_storage_warning(tmp_path)
+    assert 'SQLite détectée' in note
+    # A syntactically valid project with SQLite must pass the storage gate.
+    # Recipe compatibility (lockfiles, entrypoints) is tested separately.
 
 
 def test_genuine_flask_without_sqlite_keeps_working(tmp_path):
@@ -54,8 +56,7 @@ def test_sqlite_file_detected_but_documentation_not_a_false_positive(tmp_path):
     source(tmp_path, {'README.md':'import sqlite3\nDB_CONNECTION=sqlite', 'main.py':'print("ok")'})
     assert detect_sqlite_source(tmp_path) is None
     (tmp_path / 'data.sqlite3').write_bytes(b'SQLite format 3\x00')
-    with pytest.raises(ValueError, match='SQLite interdit'):
-        refuse_sqlite_source(tmp_path)
+    assert 'SQLite détectée' in sqlite_storage_warning(tmp_path)
 
 
 def test_sqlite_db_header_detected_and_normal_db_file_not_blocked(tmp_path):
@@ -79,4 +80,4 @@ def test_jirama_app_signature():
 
 def test_runner_checks_sources_before_buildkit():
     runner=(ROOT/'scripts/runtime/autokom_agent_local.py').read_text()
-    assert runner.index('refuse_sqlite_source(path)') < runner.index('rid=doc[\'run_id\']', runner.index('def build(doc)'))
+    assert runner.index('sqlite_storage_warning(path)') < runner.index('rid=doc[\'run_id\']', runner.index('def build(doc)'))

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronRight, ExternalLink, Folder, LoaderCircle, LockKeyhole, Search, Unplug, Code2 } from 'lucide-react'
 import GitHubMark from './GitHubMark.jsx'
+import ActionDialog from './ActionDialog.jsx'
 import { detectSource, recommendFrontendCommands } from '../services/sourceAnalysis.js'
 import { GITHUB_AVAILABLE } from '../config/runtime.js'
 import { projectsApi, gitApi } from '../services/projectsApi.js'
@@ -26,6 +27,7 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
   const [installationUrl, setInstallationUrl] = useState('')
   const [busy, setBusy] = useState(false)
   const [chosenRepo, setChosenRepo] = useState(null)
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false)
   const [permissionPending, setPermissionPending] = useState(false)
   const permissionBaseline = useRef({ ids: new Set(), installs: new Set() })
   const permissionBusy = useRef(false)
@@ -115,9 +117,7 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
       if (active) {
         setDirectories(data?.directories || [])
         const detected = detectSource(data?.files || [], data?.package || null)
-        setBrowseAnalysis(data?.storage_guard?.blocked
-          ? { framework: 'SQLite interdit', supported: false, description: data.storage_guard.message, blocked: true }
-          : detected.available ? recommendFrontendCommands(detected, data?.files || []) : null)
+        setBrowseAnalysis(detected.available ? { ...recommendFrontendCommands(detected, data?.files || []), storageWarning: data?.storage_guard?.detected ? data.storage_guard.message : '' } : null)
       }
     }).catch(err => { if (active) { setDirectories([]); setError(errorText(err)) } })
       .finally(() => { if (active) setFoldersLoading(false) })
@@ -142,7 +142,6 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
     catch (err) { setError(errorText(err)); setBusy(false) }
   }
   async function disconnect() {
-    if (!window.confirm('Déconnecter la connexion GitHub de ce compte AUTOKOM ?')) return
     setBusy(true)
     try {
       await gitApi.disconnect()
@@ -228,7 +227,7 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
     {connected && <>
       <div className="gh-inline"><span className="gh-user">Votre espace GitHub réel</span>
         <button className="gh-subtle-button" type="button" onClick={linkForLogin} disabled={busy}><GitHubMark size={15}/> Associer au compte AUTOKOM</button>
-        <button className="gh-subtle-button" type="button" onClick={disconnect} disabled={busy}><Unplug size={15}/> Déconnecter</button></div>
+        <button className="gh-subtle-button" type="button" onClick={() => setConfirmDisconnect(true)} disabled={busy}><Unplug size={15}/> Déconnecter</button></div>
       {organizations.length > 1 && <label className="field"><span>Organisation AUTOKOM</span><select value={form.organizationId || ''} onChange={event => update({ organizationId: event.target.value })}>
         <option value="">Sélectionner…</option>{organizations.map(org => <option value={org.id} key={org.id}>{org.name}</option>)}
       </select></label>}
@@ -266,10 +265,16 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
             {foldersLoading ? <div className="ak-gh-loading" role="status"><LoaderCircle className="ak-spin" size={17}/> Chargement du dossier GitHub…</div> : directories.map(item => <button key={item.path} type="button" onClick={() => setBrowsePath(item.path)}><Folder size={17}/>{item.name}<ChevronRight size={15}/></button>)}
             {!foldersLoading && !directories.length && <small>Aucun sous-dossier à ce niveau.</small>}
           </div>
-          {browseAnalysis && <div className="ak-gh-folder-detection" role="status"><Code2 size={17}/><div><strong>{browseAnalysis.framework} détecté dans {browsePath || 'la racine'}</strong><small>{browseAnalysis.blocked ? browseAnalysis.description : browseAnalysis.supported ? 'Compatible avec la recette automatique' : 'Framework reconnu · vérifier les conditions de publication'}</small></div></div>}
-          <button type="button" className="button-outline ak-gh-use-folder" disabled={foldersLoading || browseAnalysis?.blocked} onClick={() => { update({ workdir: browsePath || './' }); onNotice?.({ type: 'success', text: `Dossier source : ${browsePath || 'racine'}` }) }}><Check size={15}/> Choisir {browsePath || 'la racine'}</button>
+          {browseAnalysis && <div className="ak-gh-folder-detection" role="status"><Code2 size={17}/><div><strong>{browseAnalysis.framework} détecté dans {browsePath || 'la racine'}</strong><small>{browseAnalysis.supported ? 'Compatible avec la recette automatique' : 'Framework reconnu · vérifier les conditions de publication'}</small></div></div>}
+          {browseAnalysis?.storageWarning && <small className="ak-storage-note">SQLite détectée : vous pourrez confirmer le risque au récapitulatif.</small>}
+          <button type="button" className="button-outline ak-gh-use-folder" disabled={foldersLoading} onClick={() => { update({ workdir: browsePath || './' }); onNotice?.({ type: 'success', text: `Dossier source : ${browsePath || 'racine'}` }) }}><Check size={15}/> Choisir {browsePath || 'la racine'}</button>
         </div>
       </div>}
     </>}
+    <ActionDialog open={confirmDisconnect} title="Déconnecter GitHub ?"
+      description="La connexion GitHub de votre compte AUTOKOM sera retirée. Les projets existants ne sont pas supprimés."
+      confirmLabel="Déconnecter" variant="warning" busy={busy}
+      onClose={() => setConfirmDisconnect(false)}
+      onConfirm={() => { setConfirmDisconnect(false); void disconnect() }}/>
   </div>
 }

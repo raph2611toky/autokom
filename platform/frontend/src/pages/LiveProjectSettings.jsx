@@ -3,6 +3,7 @@ import { ArrowLeft, Settings2, Trash2, Archive, RotateCcw, Save, LoaderCircle, H
 import { projectsApi } from '../services/projectsApi.js'
 import { getRemoteProjectDetail, errorText } from '../services/projectWorkflow.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
+import ActionDialog from '../components/ActionDialog.jsx'
 
 /** User-facing settings. Destruction is confined to the bottom Danger Zone. */
 export default function LiveProjectSettings({ navigate, projectId }) {
@@ -13,6 +14,8 @@ export default function LiveProjectSettings({ navigate, projectId }) {
   const [busy,setBusy] = useState(false)
   const [error,setError] = useState('')
   const [notice,setNotice] = useState('')
+  const [removeOpen, setRemoveOpen] = useState(false)
+  const [archiveOpen, setArchiveOpen] = useState(false)
 
   useEffect(() => {
     let active=true
@@ -36,10 +39,9 @@ export default function LiveProjectSettings({ navigate, projectId }) {
   async function removeProject() {
     if (!record || busy) return
     const expected=record.project.name
-    const confirmed=window.prompt(`Supprimer définitivement « ${expected} » de votre espace AUTOKOM ?\nLe site sera arrêté et les domaines désactivés. L’historique est conservé pour audit.\nSaisissez exactement : ${expected}`)
-    if (confirmed!==expected)return
+    setRemoveOpen(false)
     setBusy(true);setError('')
-    try {await projectsApi.deleteProject(projectId,confirmed);navigate('/projects')}
+    try {await projectsApi.deleteProject(projectId,expected);navigate('/projects')}
     catch(err){setError(errorText(err));setBusy(false)}
   }
   if(loading) return <section className="ak-workspace-empty" role="status"><LoaderCircle className="ak-spin" size={18}/> Chargement des paramètres…</section>
@@ -61,14 +63,22 @@ export default function LiveProjectSettings({ navigate, projectId }) {
       </form>
       <div className="ak-project-settings-other"><span>Statut du projet : <strong>{project.status==='ARCHIVED'?'Archivé':'Actif'}</strong></span>
         {project.status==='ARCHIVED' ? <button className="button-outline" disabled={busy} onClick={() => operation(() => projectsApi.restore(projectId), 'Projet restauré.')}><RotateCcw size={16}/> Restaurer</button> : <button className="button-outline" disabled={busy} onClick={() => {
-          if(window.confirm(`Archiver « ${project.name} » ?`)) operation(() => projectsApi.archive(projectId),'Projet archivé.')
+          setArchiveOpen(true)
         }}><Archive size={16}/> Archiver</button>}
       </div>
     </section>
     <section className="ak-workspace-sheet ak-danger-zone" aria-labelledby="danger-zone-heading">
       <h2 id="danger-zone-heading">Zone de danger</h2>
       <div className="ak-danger-zone-content"><div><strong>Supprimer ce projet</strong><p>Arrête les ressources AUTOKOM et désactive les domaines gérés. Cette action retire le projet de la liste. L’historique d’audit reste conservé.</p></div>
-      <button type="button" className="ak-danger-button" disabled={busy} onClick={removeProject}><Trash2 size={16}/> Supprimer ce projet</button></div>
+      <button type="button" className="ak-danger-button" disabled={busy} onClick={() => setRemoveOpen(true)}><Trash2 size={16}/> Supprimer ce projet</button></div>
     </section>
+    <ActionDialog open={archiveOpen} title="Archiver ce projet ?" variant="warning"
+      description={`Le projet « ${project.name} » sera archivé. Vous pourrez le restaurer depuis les paramètres.`}
+      confirmLabel="Archiver" busy={busy} onClose={() => setArchiveOpen(false)}
+      onConfirm={() => { setArchiveOpen(false); void operation(() => projectsApi.archive(projectId), 'Projet archivé.') }}/>
+    <ActionDialog open={removeOpen} title="Supprimer définitivement ce projet ?" variant="danger"
+      description="Le site sera arrêté et les domaines désactivés. L'historique d'audit reste conservé. Cette opération est irréversible."
+      requiredText={project.name} confirmLabel="Supprimer définitivement" busy={busy}
+      onClose={() => setRemoveOpen(false)} onConfirm={() => { void removeProject() }}/>
   </>
 }

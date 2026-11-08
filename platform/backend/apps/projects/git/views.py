@@ -206,18 +206,18 @@ class GitHubDirectoriesAPIView(APIView):
             # Expose only file names and allowlisted package metadata, never source code or secrets.
             files = [{'name': item['name'], 'type': 'file'} for item in items
                      if item.get('type') == 'file' and isinstance(item.get('name'), str)]
-            storage_guard = {'blocked': False, 'reason': '', 'file': '', 'message': ''}
+            storage_guard = {'blocked': False, 'detected': False, 'reason': '', 'file': '', 'message': ''}
             def check_preview(name, content):
                 reason = detect_text(name, content)
-                if reason and not storage_guard['blocked']:
-                    storage_guard.update(blocked=True, reason=reason, file=name,
+                if reason and not storage_guard['detected']:
+                    storage_guard.update(detected=True, reason=reason, file=name,
                         message=POLICY_MESSAGE + ' Fichier : ' + name + '.')
 
             # Preview is read-only and limited to a few known source/config files.
             # The actual checked-out tree is checked again by the isolated runner.
             for item in files:
                 if item['name'].endswith(('.sqlite', '.sqlite3', '.db3')):
-                    storage_guard.update(blocked=True, reason='Base de données SQLite incluse',
+                    storage_guard.update(detected=True, reason='Base de données SQLite incluse',
                         file=item['name'], message=POLICY_MESSAGE + ' Fichier : ' + item['name'] + '.')
                     break
             package = None
@@ -242,7 +242,7 @@ class GitHubDirectoriesAPIView(APIView):
             preview_names = {'app.py', 'main.py', 'settings.py', 'config.py', 'pyproject.toml',
                 'application.properties', 'application.yml', 'application.yaml',
                 'pom.xml', 'build.gradle', 'build.gradle.kts', 'composer.json'}
-            if not storage_guard['blocked']:
+            if not storage_guard['detected']:
                 for entry in files:
                     name = entry['name']
                     if name not in preview_names:
@@ -257,11 +257,11 @@ class GitHubDirectoriesAPIView(APIView):
                             check_preview(name, content.decode('utf-8', errors='replace'))
                     except (ValueError, TypeError, binascii.Error):
                         pass
-                    if storage_guard['blocked']:
+                    if storage_guard['detected']:
                         break
             return api_success({'directories': directories, 'files': files, 'package': package,
                                 'storage_guard': storage_guard, 'path': folder},
-                               'Arborescence GitHub, métadonnées et politique de stockage.')
+                               'Arborescence GitHub et avertissement de stockage éventuel.')
         except Exception as exc:
             return handle_error(exc, 'github_directories')
 

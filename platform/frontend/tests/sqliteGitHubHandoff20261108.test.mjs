@@ -15,10 +15,14 @@ test('GitHub installs keep AUTOKOM tab and refresh permissions after Save', () =
   assert.doesNotMatch(ui, /window\.location\.assign\(verifiedInstallationUrl\(installationUrl\)\)/)
 })
 
-test('SQLite backend source is rejected by Django preview and frontend submit', () => {
-  const ui=read('../src/pages/Deploy.jsx')
-  assert.match(ui, /analysis\?\.storageGuard\?\.blocked/)
-  assert.match(ui, /analysis\.storageGuard\.message/)
+test('SQLite est un avertissement uniquement au récapitulatif, avec confirmation explicite', () => {
+  const deploy=read('../src/pages/Deploy.jsx')
+  assert.match(deploy, /analysis\?\.storageGuard\?\.detected/)
+  assert.match(deploy, /setSqliteConfirmOpen\(true\)/)
+  assert.match(deploy, /previewPipeline\(true\)/)
+  assert.match(deploy, /SQLite détectée — risque de perte de données/)
+  assert.doesNotMatch(deploy, /storageGuard\?\.blocked/)
   const connector=read('../src/components/LiveGitHubConnector.jsx')
-  assert.match(connector, /browseAnalysis\?\.blocked/)
+  assert.doesNotMatch(connector, /browseAnalysis\?\.blocked/)
+  assert.match(connector, /storageWarning/)
 })

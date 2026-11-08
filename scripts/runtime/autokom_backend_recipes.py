@@ -54,9 +54,7 @@ def _python_entry(path, profile):
 
 
 def validate_backend_source(path, profile, cfg):
-    # Revalidate within every direct caller, not just the Jenkins entry point.
-    from apps.projects.git.sqlite_policy import refuse_sqlite_source
-    refuse_sqlite_source(path)
+    # SQLite is an advisory risk (ephemeral data), not a reason to reject a valid profile.
     if profile not in BACKEND_PROFILES:
         raise ValueError('Profil backend non autorisé.')
     if cfg.get('port') != 8080 or cfg.get('runtime') != BACKEND_RUNTIME[profile]:

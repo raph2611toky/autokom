@@ -9,7 +9,9 @@ test('la suppression disparaît de Mes projets et se trouve en zone rouge des pa
   const settings=read('../src/pages/LiveProjectSettings.jsx')
   assert.ok(settings.includes('Zone de danger'))
   assert.ok(settings.includes('projectsApi.deleteProject('))
-  assert.ok(settings.includes('window.prompt('))
+  assert.ok(settings.includes('requiredText={project.name}'))
+  assert.ok(settings.includes('<ActionDialog'))
+  assert.ok(!settings.includes('window.prompt('))
 })
 test('route des paramètres réservée et projet accessible',()=>{
   const app=read('../src/App.jsx')

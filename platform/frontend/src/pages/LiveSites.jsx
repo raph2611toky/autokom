@@ -4,6 +4,7 @@ import { projectsApi } from '../services/projectsApi.js'
 import { errorText, getRemoteProjectDetail, listRemoteProjectRecords } from '../services/projectWorkflow.js'
 import { publicSiteUrl, siteStateLabel } from '../services/sitePresentation.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
+import ActionDialog from '../components/ActionDialog.jsx'
 import { downloadDnsGuide } from '../services/domainGuide.js'
 
 /** Domains are backed by real Django and broker state: no demo or guessed public URLs. */
@@ -19,6 +20,7 @@ export default function LiveSites({ navigate, projectId = null }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [domainToDisable, setDomainToDisable] = useState(null)
 
   async function refreshDomains(info) {
     const actual = info || detail
@@ -114,11 +116,16 @@ export default function LiveSites({ navigate, projectId = null }) {
               {!domain.https && <button type="button" className="button-outline" disabled={busy} onClick={() => perform(() => projectsApi.verifyDomain(detail.project.id, detail.environment.id, domain.id), 'Vérification DNS/HTTPS demandée.')}><ShieldCheck size={15}/> Activer HTTPS</button>}
               {domain.https && !domain.is_primary && <button type="button" className="button-outline" disabled={busy} onClick={() => perform(() => projectsApi.primaryDomain(detail.project.id, detail.environment.id, domain.id), 'Adresse principale modifiée.')}><CheckCircle2 size={15}/> Définir comme principal</button>}
               {domain.https && !domain.is_primary && <button type="button" className="button-quiet ak-danger-action" disabled={busy} onClick={() => {
-                if (window.confirm(`Désactiver ${domain.hostname} ? Le nom restera réservé pour éviter son usurpation.`)) perform(() => projectsApi.deactivateDomain(detail.project.id, detail.environment.id, domain.id), 'Domaine désactivé et réservé.')
+                setDomainToDisable(domain)
               }}>Désactiver</button>}
             </div>
           </article>
         })}
+        <ActionDialog open={Boolean(domainToDisable)} title="Désactiver le domaine ?"
+          description={domainToDisable ? `${domainToDisable.hostname} ne sera plus servi publiquement. Le nom restera réservé afin d'éviter son usurpation.` : ''}
+          variant="warning" confirmLabel="Désactiver" busy={busy}
+          onClose={() => setDomainToDisable(null)}
+          onConfirm={() => { const candidate = domainToDisable; setDomainToDisable(null); if (candidate) void perform(() => projectsApi.deactivateDomain(detail.project.id, detail.environment.id, candidate.id), 'Domaine désactivé et réservé.') }}/>
         <h3>Ajouter ou changer d’adresse</h3>
         <p className="ak-section-subtitle">Ajoutez d’abord le nouveau domaine. Une fois HTTPS actif, définissez-le comme principal : l’ancienne adresse reste opérationnelle jusqu’à sa désactivation.</p>
         <div className="ak-domain-instructions">

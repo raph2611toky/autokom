@@ -1,0 +1,40 @@
+/* Theme-aware confirmations used throughout AUTOKOM: no native browser prompts. */
+.ak-dialog-backdrop {
+  position: fixed; inset: 0; z-index: 5000; background: rgba(0,0,0,.67);
+  display: grid; place-items: center; padding: 18px;
+  backdrop-filter: blur(5px);
+}
+.ak-dialog {
+  width: min(100%, 510px); max-height: min(90vh, 760px); overflow-y: auto;
+  background: var(--ak-surface); color: var(--ak-text);
+  border: 1px solid var(--ak-border-strong);
+  border-top: 3px solid var(--ak-warning);
+  box-shadow: 0 24px 80px rgba(0,0,0,.38);
+  animation: ak-dialog-in .18s ease-out;
+}
+.ak-dialog--danger { border-top-color: var(--ak-danger); }
+.ak-dialog--info { border-top-color: var(--ak-accent); }
+.ak-dialog-header { padding: 23px 25px 14px; display: flex; gap: 13px; align-items: center; }
+.ak-dialog-header h2 { margin: 0; font: 700 clamp(18px,2.5vw,22px) var(--ak-font-heading); color: var(--ak-text-strong); flex: 1; }
+.ak-dialog-symbol { width: 38px; height: 38px; display: grid; place-items: center; flex-shrink: 0; color: var(--ak-warning); background: var(--ak-warning-soft); }
+.ak-dialog--danger .ak-dialog-symbol { color: var(--ak-danger); background: var(--ak-danger-soft); }
+.ak-dialog--info .ak-dialog-symbol { color: var(--ak-accent); background: var(--ak-accent-soft); }
+.ak-dialog-close { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--ak-border); background: transparent; color: var(--ak-muted); }
+.ak-dialog-content { padding: 0 25px 22px; font-size: 14px; line-height: 1.65; color: var(--ak-muted); }
+.ak-dialog-content p { margin: 0 0 11px; }
+.ak-dialog-content strong { color: var(--ak-text); }
+.ak-dialog-confirm-input { display: grid; gap: 9px; font-size: 13px; margin-top: 17px; }
+.ak-dialog-confirm-input input { width: 100%; background: var(--ak-surface-2); border: 1px solid var(--ak-border-strong); color: var(--ak-text); padding: 12px 13px; }
+.ak-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; padding: 17px 25px 22px; border-top: 1px solid var(--ak-border); }
+.ak-dialog-actions button { min-height: 42px; padding: 10px 16px; font-weight: 700; font-size: 13px; }
+.ak-dialog-danger-button { border: 1px solid var(--ak-danger); background: var(--ak-danger-soft); color: var(--ak-danger); }
+.ak-dialog-danger-button:hover:not(:disabled) { filter: brightness(.95); }
+.ak-dialog-data-risk { margin-top: 12px; border-left: 3px solid var(--ak-warning); background: var(--ak-warning-soft); padding: 12px 14px; display: grid; gap: 7px; color: var(--ak-text); font-size: 12px; }
+.ak-dialog-data-risk small { font-size: 11px; overflow-wrap: anywhere; color: var(--ak-muted); }
+.ak-sqlite-review-note { display: flex; gap: 11px; align-items: flex-start; margin-top: 14px; border: 1px solid var(--ak-border); border-left: 3px solid var(--ak-warning); padding: 13px; background: var(--ak-warning-soft); color: var(--ak-text); font-size: 12px; line-height: 1.6; }
+.ak-sqlite-review-note svg { color: var(--ak-warning); flex-shrink: 0; }
+.ak-sqlite-review-note strong { display: block; font-weight: 750; }
+.ak-storage-note { display: block; margin: 8px 0; color: var(--ak-warning); }
+@keyframes ak-dialog-in { from { opacity: 0; transform: translateY(9px) scale(.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@media (prefers-reduced-motion: reduce) { .ak-dialog { animation: none; } }
+@media (max-width: 480px) { .ak-dialog-header { padding: 18px 17px 12px; } .ak-dialog-content { padding: 0 17px 16px; } .ak-dialog-actions { padding: 15px 17px 18px; } .ak-dialog-actions button { flex: 1; } }

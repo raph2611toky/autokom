@@ -4,6 +4,7 @@ import { findPricingPlan } from '../config/pricing.js'
 import { getProjectRecords, removeProject } from '../services/projectWorkspace.js'
 import { API_AVAILABLE } from '../config/runtime.js'
 import LiveProjects from './LiveProjects.jsx'
+import ActionDialog from '../components/ActionDialog.jsx'
 
 function goToConfiguration(project, navigate) {
   if (project.draft) {
@@ -26,6 +27,8 @@ function DemoProjects({ navigate, projectId = null }) {
   const [projects, setProjects] = useState(getProjectRecords)
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('all')
+  const [pendingDelete, setPendingDelete] = useState(null)
+  const [deleteError, setDeleteError] = useState('')
   const selected = projects.find(p => p.id === projectId)
   const visible = useMemo(() => projects.filter(p => {
     const matchesFilter = filter === 'all' || (filter === 'pipeline' ? Boolean(p.preview) : !p.preview)
@@ -33,17 +36,24 @@ function DemoProjects({ navigate, projectId = null }) {
   }),[projects,query,filter])
 
   function deleteProject(project) {
-    if (!window.confirm(`Supprimer « ${project.name} » de ce navigateur ?`)) return
     try {
       removeProject(project.id)
       setProjects(getProjectRecords())
       if (projectId === project.id) navigate('/projects')
-    } catch { window.alert('Le projet n’a pas pu être supprimé.') }
+      setPendingDelete(null)
+    } catch { setDeleteError('Le projet n’a pas pu être supprimé.'); setPendingDelete(null) }
   }
+
+  const confirmDialog = <ActionDialog open={Boolean(pendingDelete)} title="Supprimer le projet ?"
+    description={pendingDelete ? `« ${pendingDelete.name} » sera retiré de ce navigateur.` : ''}
+    variant="danger" confirmLabel="Supprimer" onClose={() => setPendingDelete(null)}
+    onConfirm={() => pendingDelete && deleteProject(pendingDelete)}/>
 
   if (projectId) {
     if (!selected) return <section className="ak-workspace-empty"><FolderKanban size={30}/><h1>Projet introuvable</h1><button className="button-outline" onClick={() => navigate('/projects')}>Mes projets</button></section>
     return <>
+      {confirmDialog}
+      {deleteError && <p className="feedback error" role="alert">{deleteError}</p>}
       <div className="ak-back-line"><button type="button" className="button-quiet" onClick={() => navigate('/projects')}><ArrowLeft size={17}/> Mes projets</button></div>
       <section className="page-hero ak-workspace-hero"><div><h1>{selected.name}</h1><p>{selected.repository} · {selected.branch}</p></div><button className="button-primary" type="button" onClick={() => goToConfiguration(selected,navigate)}><Settings2 size={17}/> Modifier</button></section>
       <section className="ak-workspace-sheet">
@@ -60,13 +70,15 @@ function DemoProjects({ navigate, projectId = null }) {
         </dl>
         <div className="ak-project-detail-actions">
           {selected.preview ? <button type="button" className="button-primary" onClick={() => navigate(`/sites/${encodeURIComponent(selected.id)}`)}><Workflow size={16}/> Pipeline et logs <ArrowRight size={15}/></button> : <button type="button" className="button-outline" onClick={() => goToConfiguration(selected,navigate)}>Préparer le pipeline <ArrowRight size={15}/></button>}
-          <button type="button" className="button-quiet ak-danger-action" onClick={() => deleteProject(selected)}><Trash2 size={16}/> Supprimer</button>
+          <button type="button" className="button-quiet ak-danger-action" onClick={() => setPendingDelete(selected)}><Trash2 size={16}/> Supprimer</button>
         </div>
       </section>
     </>
   }
 
   return <>
+    {confirmDialog}
+    {deleteError && <p className="feedback error" role="alert">{deleteError}</p>}
     <section className="page-hero ak-workspace-hero"><div><h1>Mes projets</h1><p>Retrouvez vos configurations et reprenez leur préparation.</p></div><button className="button-primary" type="button" onClick={() => navigate('/deploy')}><Plus size={17}/> Nouveau projet</button></section>
     <section className="ak-workspace-sheet">
       <div className="ak-workspace-toolbar">

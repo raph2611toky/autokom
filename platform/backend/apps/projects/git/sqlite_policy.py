@@ -1,15 +1,15 @@
-"""AUTOKOM: guard against ephemeral SQLite storage in deployable backends.
+"""AUTOKOM: advisory detection of ephemeral SQLite files in client backends.
 
-Preview checks and the isolated builder use the same bounded signatures. The
-builder scans the actual checked-out source and is the authoritative gate.
+Checks are informational: SQLite alone does not reject a deployment.
 """
 import re
 import os
 from pathlib import Path
 
-POLICY_MESSAGE = ('SQLite interdit pour les services backend AUTOKOM : la base locale '
-                  'risque de perdre ses données lors du remplacement du conteneur. '
-                  'Utilisez PostgreSQL ou MySQL/MariaDB avec un stockage persistant.')
+POLICY_MESSAGE = ('SQLite détectée : cette application conserve potentiellement ses données '
+                  'dans un fichier du conteneur. Lors du redéploiement ou du remplacement '
+                  'du conteneur, les données non persistées peuvent être perdues. '
+                  'Sauvegardez vos données ou utilisez PostgreSQL/MySQL avec un stockage durable.')
 
 _SKIP_DIRS = frozenset({'.git', 'node_modules', 'vendor', '.venv', 'venv', '__pycache__',
     '.next', 'dist', 'build', 'target', 'coverage', '.gradle', 'tests', 'test',
@@ -83,8 +83,10 @@ def detect_sqlite_source(path, *, max_files=3000, max_bytes=256 * 1024):
     return None
 
 
-def refuse_sqlite_source(path):
+def sqlite_storage_warning(path):
+    """Return a non-blocking warning for SQLite use in checked-out sources."""
     issue = detect_sqlite_source(path)
     if issue:
-        file, reason = issue
-        raise ValueError(f'{POLICY_MESSAGE} Détecté : {reason} dans {file}.')
+        filename, reason = issue
+        return f'{POLICY_MESSAGE} Détection : {reason} ({filename}).'
+    return ''
