@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, Check, CloudUpload, Code2, Download, GitBranch, Info, Layers3, LoaderCircle, Plus, Save, Settings2, ShieldCheck, Server, Trash2 } from 'lucide-react'
 import GitHubConnector from '../components/GitHubConnector.jsx'
+import FrontendEnvEditor from '../components/FrontendEnvEditor.jsx'
 import ServiceCatalog from '../components/ServiceCatalog.jsx'
 import { DEFAULT_SERVICES } from '../config/serviceCatalog.js'
 import { getSampleDirectory, getSamplePackage, createPipelinePreview } from '../services/simulationData.js'
@@ -9,14 +10,15 @@ import { API_AVAILABLE } from '../config/runtime.js'
 import { deploymentsApi } from '../services/deploymentsApi.js'
 import { gitApi } from '../services/projectsApi.js'
 import { errorText, saveRemoteProject, prepareRemoteDeployment, getRemoteProjectDetail, remoteProjectToForm, verifiedDeploymentForm } from '../services/projectWorkflow.js'
-import { detectSource } from '../services/sourceAnalysis.js'
+import { detectSource, recommendFrontendCommands } from '../services/sourceAnalysis.js'
+import { publicEnvForFramework } from '../services/frontendEnv.js'
 import { FREE_PRESET, validateProjectSelection } from '../config/deploymentProfiles.js'
 import { PRICING_PLANS, findPricingPlan, getPreferredPlan, getBillingPeriod, inferPricingPlan, planToDeployment, rememberPlan, formatAr } from '../config/pricing.js'
 
 const KEY = 'autokom.projects.drafts.v12'
 const INITIAL = { id: '', projectName: '', repository: '', repositorySlug: '', githubRepositoryId: '', githubInstallationId: '', organizationId: '', backendProjectId: '', backendEnvironmentId: '', branch: '', workdir: './',
   pricingPlan: 'free', billingPeriod: 'monthly', resourcePlan: 'free', highAvailability: false, pipelineMode: 'devsecops', environment: 'production',
-  domainMode: 'autokom', domain: '', autoDeploy: true, advancedBuild: {}, services: { ...DEFAULT_SERVICES }, updatedAt: '' }
+  domainMode: 'autokom', domain: '', autoDeploy: true, advancedBuild: {}, frontendEnv: [], frontendEnvTouched: false, services: { ...DEFAULT_SERVICES }, updatedAt: '' }
 const STEPS = ['Source GitHub', 'Configuration', 'Publication']
 const BUILD_FIELDS = [['installCommand','Installation'],['buildCommand','Build'],['testCommand','Tests'],['outputDir','Sortie'],['startCommand','Démarrage'],['dockerfile','Dockerfile']]
 function readDrafts() { try {
@@ -79,6 +81,8 @@ export default function Deploy({ navigate }) {
   const updateBuild = (key,val) => { setServerPreview(null); setForm(old => ({...old,advancedBuild:{...old.advancedBuild,[key]:val}})) }
   const projectError = validateProjectSelection(form)
   const build = { ...(analysis?.build || {}), ...form.advancedBuild }
+  const [sourceFiles, setSourceFiles] = useState([])
+  const suggested = useMemo(() => recommendFrontendCommands(analysis, sourceFiles), [analysis, sourceFiles])
   const resources = form.resourcePlan === 'free' ? FREE_PRESET : (analysis?.resources || FREE_PRESET)
   const sourceKey = [form.repositorySlug, form.branch, form.workdir].join('|')
   const staticReady = analysisStatus === 'ready' && analysis?.applicationType === 'static' &&
@@ -95,6 +99,7 @@ export default function Deploy({ navigate }) {
     }
     const files = getSampleDirectory(form.githubRepositoryId, form.workdir)
     const pkg = getSamplePackage(form.githubRepositoryId, form.workdir)
+    setSourceFiles(files)
     setAnalysis(detectSource(files, pkg))
     setAnalysisStatus('ready')
     setAnalysisError('')
@@ -103,11 +108,13 @@ export default function Deploy({ navigate }) {
   useEffect(() => {
     if (!API_AVAILABLE || step === 0 || !form.githubInstallationId || !form.githubRepositoryId || !form.branch) return
     let active = true
+    setAnalysis(null); setSourceFiles([])
     setAnalysisStatus('loading'); setAnalysisError('')
     const sourceFolder = form.workdir === './' ? '' : form.workdir
     gitApi.directories(form.githubInstallationId, form.githubRepositoryId, form.branch, sourceFolder)
       .then(result => {
         if (!active) return
+        setSourceFiles(result.files || [])
         const detected = detectSource(result.files || [], result.package || null)
         setAnalysis(detected); setAnalysisStatus('ready')
         setForm(current => current.detectedKind === detected.applicationType && current.detectedFramework === detected.framework && current.detectedVite === detected.isVite && current.hasNpmLockfile === Boolean((result.files || []).some(f => f.name === 'package-lock.json')) &&
@@ -126,6 +133,7 @@ export default function Deploy({ navigate }) {
       setBusy(true); setNotice(null)
       try {
         const checked = verifiedDeploymentForm(form, analysis)
+        if (form.frontendEnvTouched) publicEnvForFramework(form.frontendEnv, analysis)
         const saved = await saveRemoteProject({ ...checked, ...remoteIds }, {
           onCreated: ids => { setRemoteIds(current => ({ ...current, ...ids })); setForm(current => ({ ...current, ...ids })) },
         })
@@ -139,7 +147,7 @@ export default function Deploy({ navigate }) {
     }
 
     if (!form.repositorySlug) { setNotice({type:'error',text:'Choisissez d’abord un dépôt GitHub.'}); return }
-    const entry = {...form,id:form.id || crypto.randomUUID(),updatedAt:new Date().toISOString()}
+    const entry = {...form,frontendEnv: [],frontendEnvTouched:false,id:form.id || crypto.randomUUID(),updatedAt:new Date().toISOString()}
     const nextItems = [entry,...drafts.filter(d=>d.id!==entry.id)].slice(0,40)
     try { localStorage.setItem(KEY, JSON.stringify(nextItems)); setDrafts(nextItems); setForm(entry); setNotice({type:'success',text:'Projet enregistré dans ce navigateur.'}) }
     catch { setNotice({type:'error',text:'Impossible d’enregistrer ce projet.'}) }
@@ -155,6 +163,7 @@ export default function Deploy({ navigate }) {
       try {
         if (analysisStatus !== 'ready') throw new Error('La détection GitHub n’est pas terminée : réessayez après l’analyse.')
         const checked = verifiedDeploymentForm(form, analysis)
+        if (form.frontendEnvTouched) publicEnvForFramework(form.frontendEnv, analysis)
         const saved = await saveRemoteProject({ ...checked, ...remoteIds }, {
           onCreated: ids => { setRemoteIds(current => ({ ...current, ...ids })); setForm(current => ({ ...current, ...ids })) },
         })
@@ -176,7 +185,7 @@ export default function Deploy({ navigate }) {
 
     if (projectError) { setNotice({type:'error',text:projectError}); return }
     try {
-      const entry = { ...form, id:form.id || crypto.randomUUID(), updatedAt:new Date().toISOString() }
+      const entry = { ...form,frontendEnv: [],frontendEnvTouched:false, id:form.id || crypto.randomUUID(), updatedAt:new Date().toISOString() }
       const nextDrafts = [entry, ...drafts.filter(d => d.id !== entry.id)].slice(0,40)
       localStorage.setItem(KEY, JSON.stringify(nextDrafts))
       setDrafts(nextDrafts)
@@ -200,6 +209,8 @@ export default function Deploy({ navigate }) {
         {step===1 && <><div className="panel-heading"><h2>Configuration</h2></div><div className={`ak-analysis-state state-${analysisStatus}`} role="status">{analysisStatus==='loading'?<LoaderCircle size={19} className="ak-spin"/>:<Info size={19}/>}<div><strong>{analysisStatus==='loading'?'Analyse du dépôt…':analysis ? `${analysis.framework} · ${analysis.runtime}` : API_AVAILABLE ? 'Configuration du dépôt réel' : 'Analyse du projet'}</strong><small>{analysis ? `Source : ${form.workdir} · Détection ${analysis.confidence === 'high' ? 'élevée' : 'indicative'}` : API_AVAILABLE ? (analysisError || 'Analyse GitHub du dossier source sélectionné, sans build préalable.') : analysisError || 'Lecture des fichiers GitHub.'}</small></div></div>
 
           {API_AVAILABLE && analysis?.applicationType === 'static' && analysis?.isVite && !analysis?.hasNpmLockfile && <p className="feedback error" role="alert">Ajoutez package-lock.json à votre dossier source pour activer la compilation reproductible gratuite.</p>}
+          {suggested && <div className="ak-framework-advice" role="region" aria-label="Commandes de déploiement suggérées"><div className="ak-framework-advice-title"><Code2 size={18}/><strong>Détection & commandes recommandées</strong><span className={suggested.supported ? 'ak-framework-ready' : 'ak-framework-preview'}>{suggested.supported ? 'Déploiement pris en charge' : 'Détection indicative'}</span></div><p>{suggested.description}</p><div className="ak-command-grid">{[['Installer', suggested.install],['Construire', suggested.build],['Sortie', suggested.output],['Démarrer', suggested.start]].map(([label, value]) => <div key={label}><small>{label}</small><code>{value || 'Sans commande'}</code></div>)}</div><small>Les commandes sont proposées à titre informatif : AUTOKOM conserve la recette BuildKit approuvée pour le déploiement automatique.</small></div>}
+          <FrontendEnvEditor rows={form.frontendEnv || []} analysis={analysis} onChange={rows => update({frontendEnv: rows, frontendEnvTouched: true})}/>
           {analysis?.warnings?.length>0 && <div className="ak-analysis-warnings">{analysis.warnings.map(w=><p key={w}><Info size={15}/>{w}</p>)}</div>}
           <div className="ak-offer-header"><h3>Offre d’hébergement</h3><button className="ak-see-prices" type="button" onClick={() => navigate('/pricing')}>Comparer les tarifs <ArrowRight size={15}/></button></div>
           <div className="ak-offers ak-offers-three">
@@ -214,7 +225,7 @@ export default function Deploy({ navigate }) {
           <div className="ak-essentials"><label className="field"><span>Type de publication</span><select value={form.pipelineMode} onChange={e=>update({pipelineMode:e.target.value})}><option value="devsecops">Protection renforcée</option><option value="devops">Standard</option></select></label><label className="field"><span>Environnement</span><select value={form.environment} onChange={e=>update({environment:e.target.value})}><option value="development">Développement</option><option value="staging">Préproduction</option><option value="production">Production</option></select></label><label className="field"><span>Domaine</span><select value={form.domainMode} onChange={e=>update({domainMode:e.target.value})}><option value="autokom">Sous-domaine AUTOKOM</option><option value="custom">Domaine personnalisé</option></select></label>{form.domainMode==='custom'&&<label className="field"><span>Nom de domaine</span><input value={form.domain} onChange={e=>update({domain:e.target.value})} placeholder="app.exemple.com"/></label>}</div>
           <details className="ak-advanced-settings"><summary><Settings2 size={17}/> Paramètres avancés <span>facultatif</span></summary><div className="ak-advanced-grid">{(!API_AVAILABLE ? BUILD_FIELDS : []).map(([key,label])=><label className="field" key={key}><span>{label}</span><input value={form.advancedBuild[key]??''} placeholder={analysis?.build?.[key] || 'Détection automatique'} onChange={e=>updateBuild(key,e.target.value)}/></label>)}</div><label className="ak-simple-checkbox"><input type="checkbox" checked={form.autoDeploy} onChange={e=>update({autoDeploy:e.target.checked})}/> Déploiement automatique sur push</label>{!API_AVAILABLE && <ServiceCatalog services={form.services || DEFAULT_SERVICES} capabilities={[]} capabilitiesLoaded={false} onChange={(group, choice)=>update({services:{...(form.services || DEFAULT_SERVICES),[group]:choice}})}/>}</details>
         </>}
-        {step===2 && <><div className="panel-heading"><h2>Votre projet</h2></div><div className="ak-review-list"><div><GitBranch size={17}/><span>Dépôt</span><strong>{form.repositorySlug}</strong></div><div><Code2 size={17}/><span>Branche et dossier</span><strong>{form.branch} · {form.workdir}</strong></div><div><Code2 size={17}/><span>Framework</span><strong>{analysis?.framework || (API_AVAILABLE ? 'Analyse nécessaire' : 'Non déterminé')}</strong></div><div><Layers3 size={17}/><span>Offre</span><strong>{findPricingPlan(inferPricingPlan(form)).name}</strong></div><div><ShieldCheck size={17}/><span>Publication</span><strong>{form.pipelineMode==='devsecops'?'Protection renforcée':'Standard'}</strong></div><div><Server size={17}/><span>Disponibilité</span><strong>{form.highAvailability?'Redondance demandée':'Standard'}</strong></div></div><div className="ak-need-analysis"><Info size={18}/><span>{API_AVAILABLE ? 'Votre projet sera préparé et mis en ligne automatiquement. Vous pourrez suivre sa progression dans Mes projets.' : 'Vérifiez votre configuration, puis consultez l’aperçu de votre projet.'}</span></div></>}
+        {step===2 && <><div className="panel-heading"><h2>Votre projet</h2></div><div className="ak-review-list"><div><GitBranch size={17}/><span>Dépôt</span><strong>{form.repositorySlug}</strong></div><div><Code2 size={17}/><span>Branche et dossier</span><strong>{form.branch} · {form.workdir}</strong></div><div><Code2 size={17}/><span>Framework</span><strong>{analysis?.framework || (API_AVAILABLE ? 'Analyse nécessaire' : 'Non déterminé')}</strong></div><div><Layers3 size={17}/><span>Offre</span><strong>{findPricingPlan(inferPricingPlan(form)).name}</strong></div><div><Code2 size={17}/><span>Variables frontend publiques</span><strong>{(form.frontendEnv || []).length} champ(s)</strong></div><div><ShieldCheck size={17}/><span>Publication</span><strong>{form.pipelineMode==='devsecops'?'Protection renforcée':'Standard'}</strong></div><div><Server size={17}/><span>Disponibilité</span><strong>{form.highAvailability?'Redondance demandée':'Standard'}</strong></div></div><div className="ak-need-analysis"><Info size={18}/><span>{API_AVAILABLE ? 'Votre projet sera préparé et mis en ligne automatiquement. Vous pourrez suivre sa progression dans Mes projets.' : 'Vérifiez votre configuration, puis consultez l’aperçu de votre projet.'}</span></div></>}
         {API_AVAILABLE && notice?.type === 'error' && <div className="feedback error ak-inline-error" role="alert">{notice.text}</div>}
         <div className="form-actions ak-form-actions"><button type="button" className="button-quiet" onClick={save} disabled={busy}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <Save size={17}/>} {busy ? 'En cours…' : 'Enregistrer'}</button><div className="actions-right">{step>0&&<button className="button-outline" type="button" onClick={()=>setStep(s=>s-1)}><ArrowLeft size={16}/> Retour</button>}{step<2?<button className="button-primary" type="button" onClick={next} disabled={busy || (API_AVAILABLE && step === 0 && (!githubConnected || Boolean(projectError)))}>Continuer <ArrowRight size={16}/></button>:<><button type="button" className="button-outline" onClick={exportProject}><Download size={17}/> Exporter</button><button type="button" className="button-primary" onClick={previewPipeline} disabled={busy || (API_AVAILABLE && (analysisStatus !== 'ready' || !staticReady))}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <CloudUpload size={17}/>} {busy ? 'Préparation…' : 'Déployer'} <ArrowRight size={16}/></button></>}</div></div>
       </div></section>

@@ -12,6 +12,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from apps.deployments.runs.models import DeploymentRun
 from apps.projects.environments.models import EnvironmentVariable
 from apps.projects.git.services import decrypt
+from apps.deployments.runs.public_build_env import public_vite_variables
 
 
 def check_runner_signature(run_id, epoch, signature):
@@ -50,6 +51,15 @@ def fetch_runner_manifest(run_id, *, include_secrets=False):
         else:
             variables[item.key] = item.value
     domains = list(env.domains.filter(status='ACTIVE').values_list('hostname', flat=True)) if hasattr(env, 'domains') else []
+    # This runner currently builds Vite STATIC only. Never include secret references,
+    # non-public variables, or values for arbitrary Dockerfiles.
+    public_build = {}
+    if cfg.build_method == 'STATIC' and cfg.runtime_type == 'STATIC':
+        try:
+            public_build = public_vite_variables(EnvironmentVariable.objects.filter(
+                environment=env, key__startswith='VITE_').values_list('key', 'value', 'secret_id'))
+        except ValueError:
+            raise ValidationError('Variables frontend publiques invalides ; corriger la configuration avant le build.')
     return {
         'run_id': str(run.id), 'environment_id': str(env.id), 'project_id': str(project.id),
         'repository': project.repository_name, 'repository_id': project.repository_external_id,
@@ -60,5 +70,6 @@ def fetch_runner_manifest(run_id, *, include_secrets=False):
                   'start_command': cfg.start_command, 'output_directory': cfg.output_directory,
                   'port': cfg.internal_port, 'healthcheck': cfg.healthcheck_path},
         'mode': run.mode_snapshot, 'resources': run.resources_snapshot,
-        'variables': variables if include_secrets else {}, 'domains': domains,
+        'variables': variables if include_secrets else {},
+        'public_build_variables': public_build, 'domains': domains,
     }

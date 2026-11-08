@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { api } from '../src/services/api.js'
 import { toBackendConfiguration, errorText, saveRemoteProject, prepareRemoteDeployment,
-  listRemoteProjectRecords, getRemoteProjectDetail } from '../src/services/projectWorkflow.js'
+  listRemoteProjectRecords, getRemoteProjectDetail, syncFrontendVariables } from '../src/services/projectWorkflow.js'
 
 const UUIDS = {
   project: '11111111-1111-4111-8111-111111111111',
@@ -133,6 +133,7 @@ test('Détails réels : configurations et derniers runs Django', async () => {
     [`GET ${p}/environments/${UUIDS.env}/configurations/`]: { configurations: [{ id: UUIDS.cfg, is_draft: true }] },
     [`GET ${p}/environments/${UUIDS.env}/deployments/?page=1&page_size=10`]: { runs: [{ id: 'deployment-1', status: 'QUEUED' }], count: 37 },
     [`GET ${p}/environments/${UUIDS.env}/domains/`]: { domains: [{ id: 'domain-1', hostname: 'test.auto.ikom.mg', status: 'PENDING', https: false }] },
+    [`GET ${p}/environments/${UUIDS.env}/variables/`]: { variables: [{key:'VITE_TITLE',value:'Demo',secret_id:null}] },
   })
   try {
     const details = await getRemoteProjectDetail(UUIDS.project)
@@ -140,6 +141,7 @@ test('Détails réels : configurations et derniers runs Django', async () => {
     assert.equal(details.runs[0].status, 'QUEUED')
     assert.equal(details.runCount, 37)
     assert.equal(details.domains[0].hostname, 'test.auto.ikom.mg')
+    assert.equal(details.variables[0].key, 'VITE_TITLE')
   } finally { restore() }
 })
 
@@ -164,4 +166,43 @@ test('API GitHub directories : encode les chemins, refuse la traversée et trans
     assert.equal(calls[0].options.credentials, 'same-origin')
     assert.throws(() => gitApi.directories(7, 45, 'main', '../root'), /Dossier/)
   } finally { restore() }
+})
+
+
+test('Variables Vite publiques : upsert ciblé et suppression sans toucher aux variables serveur', async () => {
+  const prefix = `/api/projects/${UUIDS.project}/environments/${UUIDS.env}`
+  const existingId = '55555555-5555-4555-8555-555555555555'
+  const removedId = '66666666-6666-4666-8666-666666666666'
+  const calls = mocked({
+    [`GET ${prefix}/variables/`]: {variables:[
+      {id:existingId,key:'VITE_TITLE',value:'Ancien',secret_id:null},
+      {id:removedId,key:'VITE_OBSOLETE',value:'yes',secret_id:null},
+      {id:UUIDS.cfg,key:'DATABASE_URL',value:'postgres://private',secret_id:null},
+    ]},
+    [`PATCH ${prefix}/variables/${existingId}/update/`]: {variable:{id:existingId,key:'VITE_TITLE',value:'Nouveau'}},
+    [`POST ${prefix}/variables/create/`]: {variable:{key:'VITE_PUBLIC_URL',value:'https://example.com'}},
+    [`DELETE ${prefix}/variables/${removedId}/delete/`]: {},
+  })
+  try {
+    await syncFrontendVariables(UUIDS.project,UUIDS.env,[
+      {key:'VITE_TITLE',value:'Nouveau'},{key:'VITE_PUBLIC_URL',value:'https://example.com'},
+    ],{isVite:true,applicationType:'static'})
+    assert.equal(calls.length,4)
+    assert.ok(calls.every(c=>!c.path.includes(UUIDS.cfg)))
+    assert.ok(!calls.some(c=>JSON.stringify(c).includes('postgres://private')))
+  } finally {restore()}
+})
+
+test('Une configuration inchangée ne déclenche aucune API de variables', async () => {
+  const prefix = `/api/projects/${UUIDS.project}/environments/${UUIDS.env}`
+  const calls = mocked({
+    [`GET /api/projects/${UUIDS.project}/environments/`]: {environments:[{id:UUIDS.env,kind:'PRODUCTION'}]},
+    [`GET ${prefix}/configurations/offers/`]: {entitlement:{resource_plan:UUIDS.org}},
+    [`GET ${prefix}/configurations/`]: {configurations:[{id:UUIDS.cfg,is_draft:true}]},
+    [`PATCH ${prefix}/configurations/${UUIDS.cfg}/update/`]: {configuration:{id:UUIDS.cfg}},
+  })
+  try {
+    await saveRemoteProject({...baseForm,backendProjectId:UUIDS.project,frontendEnvTouched:false})
+    assert.ok(!calls.some(c=>c.path.includes('/variables/')))
+  }finally{restore()}
 })

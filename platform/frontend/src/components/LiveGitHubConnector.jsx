@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, ChevronRight, ExternalLink, Folder, LoaderCircle, LockKeyhole, Search, Unplug } from 'lucide-react'
+import { Check, ChevronRight, ExternalLink, Folder, LoaderCircle, LockKeyhole, Search, Unplug, Code2 } from 'lucide-react'
 import GitHubMark from './GitHubMark.jsx'
+import { detectSource, recommendFrontendCommands } from '../services/sourceAnalysis.js'
 import { GITHUB_AVAILABLE } from '../config/runtime.js'
 import { projectsApi, gitApi } from '../services/projectsApi.js'
 import { errorText } from '../services/projectWorkflow.js'
@@ -17,6 +18,7 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
   const [repos, setRepos] = useState([])
   const [branches, setBranches] = useState([])
   const [directories, setDirectories] = useState([])
+  const [browseAnalysis, setBrowseAnalysis] = useState(null)
   const [foldersLoading, setFoldersLoading] = useState(false)
   const [browsePath, setBrowsePath] = useState('')
   const [search, setSearch] = useState('')
@@ -104,9 +106,13 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
   useEffect(() => {
     if (!GITHUB_AVAILABLE || !form.githubInstallationId || !form.githubRepositoryId || !form.branch) return
     let active = true
-    setFoldersLoading(true); setError(''); setDirectories([])
+    setFoldersLoading(true); setError(''); setDirectories([]); setBrowseAnalysis(null)
     gitApi.directories(form.githubInstallationId, form.githubRepositoryId, form.branch, browsePath).then(data => {
-      if (active) setDirectories(data?.directories || [])
+      if (active) {
+        setDirectories(data?.directories || [])
+        const detected = detectSource(data?.files || [], data?.package || null)
+        setBrowseAnalysis(detected.available ? recommendFrontendCommands(detected, data?.files || []) : null)
+      }
     }).catch(err => { if (active) { setDirectories([]); setError(errorText(err)) } })
       .finally(() => { if (active) setFoldersLoading(false) })
     return () => { active = false }
@@ -203,6 +209,7 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
             {foldersLoading ? <div className="ak-gh-loading" role="status"><LoaderCircle className="ak-spin" size={17}/> Chargement du dossier GitHub…</div> : directories.map(item => <button key={item.path} type="button" onClick={() => setBrowsePath(item.path)}><Folder size={17}/>{item.name}<ChevronRight size={15}/></button>)}
             {!foldersLoading && !directories.length && <small>Aucun sous-dossier à ce niveau.</small>}
           </div>
+          {browseAnalysis && <div className="ak-gh-folder-detection" role="status"><Code2 size={17}/><div><strong>{browseAnalysis.framework} détecté dans {browsePath || 'la racine'}</strong><small>{browseAnalysis.supported ? 'Compatible avec la publication Vite automatique' : 'Framework reconnu · vérifier les conditions de publication'}</small></div></div>}
           <button type="button" className="button-outline ak-gh-use-folder" disabled={foldersLoading} onClick={() => { update({ workdir: browsePath || './' }); onNotice?.({ type: 'success', text: `Dossier source : ${browsePath || 'racine'}` }) }}><Check size={15}/> Choisir {browsePath || 'la racine'}</button>
         </div>
       </div>}

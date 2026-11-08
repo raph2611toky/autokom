@@ -110,3 +110,31 @@
 .ak-offers-three + .ak-ha-choice span { display:flex; flex-direction:column; gap:5px; }
 .ak-offers-three + .ak-ha-choice small { color:var(--ak-muted); font-size:11px; line-height:1.5; font-weight:450; }
 .ak-offers-three + .ak-ha-choice input { width:18px; height:18px; accent-color:var(--ak-accent); }
+/* Détection de framework et variables publiques du build — extension additive. */
+.ak-framework-advice,.ak-env-editor {margin:20px 0;padding:18px;background:var(--ak-surface-2);border:1px solid var(--ak-border);min-width:0}
+.ak-framework-advice-title,.ak-env-head,.ak-env-actions {display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.ak-framework-advice-title svg{color:var(--ak-accent)}
+.ak-framework-advice-title strong{font-size:13px}
+.ak-framework-advice-title span {font-size:10px;font-weight:800;letter-spacing:.02em;padding:5px 8px;margin-left:auto}
+.ak-framework-ready{color:var(--ak-success);background:color-mix(in srgb,var(--ak-success) 12%,transparent)}
+.ak-framework-preview{color:var(--ak-warning);background:color-mix(in srgb,var(--ak-warning) 10%,transparent)}
+.ak-framework-advice p,.ak-framework-advice>small,.ak-env-head p,.ak-env-warning,.ak-env-empty,.ak-env-note {font-size:12px;line-height:1.65;color:var(--ak-muted)}
+.ak-command-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:15px 0}
+.ak-command-grid>div {min-width:0;padding:11px;background:var(--ak-surface);border:1px solid var(--ak-border)}
+.ak-command-grid small {display:block;margin-bottom:7px;color:var(--ak-muted);font-size:11px}
+.ak-command-grid code {display:block;font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere;white-space:normal;color:var(--ak-text)}
+.ak-env-head{justify-content:space-between;align-items:flex-start}
+.ak-env-head h3 {margin:0 0 5px;font-size:16px;color:var(--ak-text-strong)}
+.ak-env-head p {margin:0;max-width:480px}
+.ak-env-actions button{font-size:11px;white-space:nowrap}
+.ak-env-warning {margin:17px 0;padding:11px;border-left:3px solid var(--ak-warning);background:var(--ak-surface);display:flex;align-items:flex-start;gap:9px}
+.ak-env-warning svg {flex-shrink:0;margin-top:2px;color:var(--ak-warning)}
+.ak-env-row {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr) 36px;align-items:end;gap:10px;margin:12px 0}
+.ak-env-row .field {min-width:0}
+.ak-env-row .field input {width:100%;min-width:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+.ak-env-remove{height:40px;width:36px;background:transparent;border:1px solid var(--ak-border);color:var(--ak-danger);display:grid;place-items:center;cursor:pointer}
+.ak-gh-folder-detection {padding:11px 9px;display:flex;align-items:flex-start;gap:9px;border-left:3px solid var(--ak-success);background:var(--ak-surface-2);margin:12px 0;font-size:12px}
+.ak-gh-folder-detection svg {color:var(--ak-success);flex-shrink:0}
+.ak-gh-folder-detection strong,.ak-gh-folder-detection small {display:block}
+.ak-gh-folder-detection small {color:var(--ak-muted);margin-top:4px}
+@media(max-width:680px){.ak-command-grid,.ak-env-row{grid-template-columns:minmax(0,1fr)}.ak-env-remove{justify-self:end}.ak-env-head{display:block}.ak-env-actions{margin-top:12px}}

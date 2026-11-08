@@ -3,6 +3,7 @@
  */
 import { projectsApi } from './projectsApi.js'
 import { deploymentsApi } from './deploymentsApi.js'
+import { normalizeFrontendEnv, publicEnvForFramework } from './frontendEnv.js'
 
 export function errorText(error) {
   const raw = String(error?.message || '')
@@ -44,6 +45,24 @@ export function verifiedDeploymentForm(form, analysis) {
     throw new Error('Le script npm « build » est absent de package.json. Ajoutez-le avant de déployer avec Vite.');
   }
   return selected
+}
+
+/** Only update the selected environment's public frontend variables.
+ * Do not delete unrelated runtime variables or secret references.
+ */
+export async function syncFrontendVariables(projectId, envId, rows, analysis) {
+  const desired = publicEnvForFramework(rows, analysis)
+  const original = (await projectsApi.variables(projectId, envId))?.variables || []
+  const previous = new Map(original.filter(v => v.key.startsWith('VITE_') && !v.secret_id).map(v => [v.key, v]))
+  const expected = new Set(desired.map(v => v.key))
+  for (const row of desired) {
+    const item = previous.get(row.key)
+    if (!item) await projectsApi.createVariable(projectId, envId, row)
+    else if (item.value !== row.value) await projectsApi.updateVariable(projectId, envId, item.id, row)
+  }
+  for (const item of previous.values()) {
+    if (!expected.has(item.key)) await projectsApi.deleteVariable(projectId, envId, item.id)
+  }
 }
 
 export function toBackendConfiguration(form) {
@@ -99,12 +118,13 @@ export async function getRemoteProjectDetail(id) {
   const environments = detail.environments || []
   const env = environments.find(item => item.slug === 'production') || environments[0]
   if (!env) throw new Error('Environnement du projet introuvable.')
-  const [configsResponse, runsResponse, domainsResponse] = await Promise.all([
+  const [configsResponse, runsResponse, domainsResponse, variablesResponse] = await Promise.all([
     projectsApi.configurations(project.id, env.id),
     deploymentsApi.list(project.id, env.id, 1, 10),
     projectsApi.domains(project.id, env.id),
+    projectsApi.variables(project.id, env.id),
   ])
-  return { project, environment: env, configurations: configsResponse?.configurations || [], runs: runsResponse?.runs || [], domains: domainsResponse?.domains || [], dnsSetup: domainsResponse?.dns_setup || null, runCount: runsResponse?.count ?? (runsResponse?.runs || []).length }
+  return { project, environment: env, configurations: configsResponse?.configurations || [], runs: runsResponse?.runs || [], domains: domainsResponse?.domains || [], variables: variablesResponse?.variables || [], dnsSetup: domainsResponse?.dns_setup || null, runCount: runsResponse?.count ?? (runsResponse?.runs || []).length }
 }
 
 /** Création d'un projet puis mise à jour de son unique configuration initiale.
@@ -163,6 +183,11 @@ export async function saveRemoteProject(form, { onCreated = () => {} } = {}) {
     draft = result?.configuration
   }
   if (!draft?.id) throw new Error('Le backend n’a pas confirmé la configuration.')
+  if (form.frontendEnvTouched) {
+    await syncFrontendVariables(projectId, envId, form.frontendEnv || [], {
+      isVite: form.detectedVite, applicationType: form.detectedKind,
+    })
+  }
   return { projectId, environmentId: envId, configurationId: draft.id, configuration: draft }
 }
 
@@ -184,6 +209,8 @@ export function remoteProjectToForm(detail) {
     pipelineMode: (cfg.mode || 'DEVOPS').toLowerCase(),
     environment: env.slug,
     autoDeploy: Boolean(cfg.auto_deploy),
+    frontendEnv: (detail.variables || []).filter(item => item.key.startsWith('VITE_') && !item.secret_id).map(item => ({key:item.key, value:item.value})),
+    frontendEnvTouched: false,
     advancedBuild: { dockerfile: cfg.dockerfile_path || 'Dockerfile', buildCommand: cfg.build_command || '',
       startCommand: cfg.start_command || '', outputDir: cfg.output_directory || '', appPort: cfg.internal_port || 8000 },
   }

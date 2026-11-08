@@ -162,6 +162,26 @@ def scan(doc,kind):
     stage(kind,'SUCCESS')
 
 
+
+def public_vite_build_args(doc):
+    """The runner accepts only values explicitly marked as public by Django.
+
+    Never interpolate values into Dockerfile source or execute them through a shell.
+    """
+    values = doc.get('public_build_variables', {})
+    if not isinstance(values, dict) or len(values) > 40:
+        fail('Configuration de variables Vite publiques invalide.')
+    args = []
+    declarations = []
+    for key, value in sorted(values.items()):
+        if not re.fullmatch(r'VITE_[A-Z][A-Z0-9_]{0,79}', key) or re.search(r'SECRET|PASSWORD|TOKEN|PRIVATE|CREDENTIAL|API_KEY|ACCESS_KEY|SESSION', key):
+            fail('Nom de variable Vite publique interdit.')
+        if not isinstance(value, str) or len(value) > 1024 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            fail('Valeur de variable Vite publique invalide.')
+        declarations.append('ARG '+key+'\n')
+        args.extend(['--opt', 'build-arg:'+key+'='+value])
+    return ''.join(declarations), args
+
 def build(doc):
     path=source(doc)
     cfg=doc['build']
@@ -198,10 +218,12 @@ def build(doc):
             fail('Projet Vite avec script build requis pour ce build gratuit.')
         # Base images are provisioned by BuildKit and should be digest-pinned in production.
         # Only the trusted AUTOKOM recipe is executed, never an arbitrary user path.
+        vite_arg_lines, vite_build_args = public_vite_build_args(doc)
         recipe = (
             'FROM node:22-alpine AS builder\n'
             'WORKDIR /app\n'
-            'COPY package.json package-lock.json ./\n'
+            + vite_arg_lines
+            + 'COPY package.json package-lock.json ./\n'
             'RUN npm ci --ignore-scripts --no-audit --no-fund\n'
             'COPY . .\n'
             'RUN npm run build\n'
@@ -226,6 +248,7 @@ def build(doc):
                 execute(['buildctl','build','--frontend','dockerfile.v0',
                          '--local','context='+str(path),'--local','dockerfile='+trusted_dir,
                          '--opt','filename=Dockerfile',
+                         *vite_build_args,
                          '--output','type=docker,name=autokom-local:'+rid+',dest='+str(temp)],timeout=1800)
         else:
             execute(['buildctl','build','--frontend','dockerfile.v0',
