@@ -16,6 +16,7 @@ from helpers.responses import api_success
 from helpers.errors import handle_error
 from apps.projects.common import int_param, safe_relative_path
 from apps.projects.git.models import GitHubAuthorization, GitConnection, GitWebhookEvent
+from apps.projects.git.sqlite_policy import detect_text, POLICY_MESSAGE
 from apps.projects.git.services import (require_github_app, authorize_url, installation_url, consume_state,
     exchange_code, save_authorization, get_installations, get_repositories, get_repository, get_branches,
     get_user_token, _request, verify_signature)
@@ -205,6 +206,20 @@ class GitHubDirectoriesAPIView(APIView):
             # Expose only file names and allowlisted package metadata, never source code or secrets.
             files = [{'name': item['name'], 'type': 'file'} for item in items
                      if item.get('type') == 'file' and isinstance(item.get('name'), str)]
+            storage_guard = {'blocked': False, 'reason': '', 'file': '', 'message': ''}
+            def check_preview(name, content):
+                reason = detect_text(name, content)
+                if reason and not storage_guard['blocked']:
+                    storage_guard.update(blocked=True, reason=reason, file=name,
+                        message=POLICY_MESSAGE + ' Fichier : ' + name + '.')
+
+            # Preview is read-only and limited to a few known source/config files.
+            # The actual checked-out tree is checked again by the isolated runner.
+            for item in files:
+                if item['name'].endswith(('.sqlite', '.sqlite3', '.db3')):
+                    storage_guard.update(blocked=True, reason='Base de données SQLite incluse',
+                        file=item['name'], message=POLICY_MESSAGE + ' Fichier : ' + item['name'] + '.')
+                    break
             package = None
             if any(item['name'] == 'package.json' for item in files):
                 # GitHub contents endpoint; cap returned payload and avoid leaking raw file contents.
@@ -214,6 +229,7 @@ class GitHubDirectoriesAPIView(APIView):
                     try:
                         raw = base64.b64decode(package_response['content'], validate=False)
                         if len(raw) <= 65536:
+                            check_preview('package.json', raw.decode('utf-8', errors='replace'))
                             doc = json.loads(raw)
                             if isinstance(doc, dict) and all(isinstance(doc.get(key) or {}, dict) for key in ('dependencies','devDependencies','scripts')):
                                 package = {
@@ -223,8 +239,29 @@ class GitHubDirectoriesAPIView(APIView):
                                 }
                     except (ValueError, TypeError, KeyError, binascii.Error):
                         package = None
+            preview_names = {'app.py', 'main.py', 'settings.py', 'config.py', 'pyproject.toml',
+                'application.properties', 'application.yml', 'application.yaml',
+                'pom.xml', 'build.gradle', 'build.gradle.kts', 'composer.json'}
+            if not storage_guard['blocked']:
+                for entry in files:
+                    name = entry['name']
+                    if name not in preview_names:
+                        continue
+                    file_response = _request('GET', endpoint + '/' + quote(name, safe='') +
+                        '?ref=' + quote(branch, safe=''), token=get_user_token(request.user))
+                    if not isinstance(file_response, dict) or file_response.get('encoding') != 'base64' or len(file_response.get('content', '')) > 350000:
+                        continue  # Runner will perform authoritative verification.
+                    try:
+                        content = base64.b64decode(file_response['content'], validate=False)
+                        if len(content) <= 256 * 1024:
+                            check_preview(name, content.decode('utf-8', errors='replace'))
+                    except (ValueError, TypeError, binascii.Error):
+                        pass
+                    if storage_guard['blocked']:
+                        break
             return api_success({'directories': directories, 'files': files, 'package': package,
-                                'path': folder}, 'Arborescence GitHub et métadonnées de build.')
+                                'storage_guard': storage_guard, 'path': folder},
+                               'Arborescence GitHub, métadonnées et politique de stockage.')
         except Exception as exc:
             return handle_error(exc, 'github_directories')
 

@@ -210,3 +210,8 @@
 .ak-env-help{position:relative}.ak-env-help summary{list-style:none;display:grid;place-items:center;border:1px solid var(--ak-border);width:28px;height:28px;color:var(--ak-muted);cursor:pointer}
 .ak-env-help summary::-webkit-details-marker{display:none}.ak-env-help[open] summary{color:var(--ak-accent);border-color:var(--ak-accent)}
 .ak-env-help p{position:absolute;left:0;top:32px;z-index:5;width:min(310px,75vw);margin:0!important;padding:12px;background:var(--ak-surface);border:1px solid var(--ak-border-strong);box-shadow:0 8px 30px #0006;font-size:11px;line-height:1.65}
+
+/* GitHub repository-grant handoff: keep AUTOKOM usable while permissions are edited. */
+.ak-gh-permission-handoff { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin:12px 0; padding:12px; border:1px solid var(--border, #39404c); border-radius:8px; }
+.ak-gh-permission-handoff span { flex:1; min-width:190px; }
+.ak-gh-install-action { display:inline-flex; align-items:center; gap:8px; text-decoration:none; }

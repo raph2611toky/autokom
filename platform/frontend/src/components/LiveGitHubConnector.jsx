@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronRight, ExternalLink, Folder, LoaderCircle, LockKeyhole, Search, Unplug, Code2 } from 'lucide-react'
 import GitHubMark from './GitHubMark.jsx'
 import { detectSource, recommendFrontendCommands } from '../services/sourceAnalysis.js'
@@ -26,6 +26,10 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
   const [installationUrl, setInstallationUrl] = useState('')
   const [busy, setBusy] = useState(false)
   const [chosenRepo, setChosenRepo] = useState(null)
+  const [permissionPending, setPermissionPending] = useState(false)
+  const permissionBaseline = useRef({ ids: new Set(), installs: new Set() })
+  const permissionBusy = useRef(false)
+  const permissionStart = useRef(0)
 
   useEffect(() => { onConnectionChange?.(Boolean(GITHUB_AVAILABLE && connected)) }, [connected, onConnectionChange])
 
@@ -111,7 +115,9 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
       if (active) {
         setDirectories(data?.directories || [])
         const detected = detectSource(data?.files || [], data?.package || null)
-        setBrowseAnalysis(detected.available ? recommendFrontendCommands(detected, data?.files || []) : null)
+        setBrowseAnalysis(data?.storage_guard?.blocked
+          ? { framework: 'SQLite interdit', supported: false, description: data.storage_guard.message, blocked: true }
+          : detected.available ? recommendFrontendCommands(detected, data?.files || []) : null)
       }
     }).catch(err => { if (active) { setDirectories([]); setError(errorText(err)) } })
       .finally(() => { if (active) setFoldersLoading(false) })
@@ -146,11 +152,55 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
     finally { setBusy(false) }
   }
   function configureInstallation() {
-    try {
-      sessionStorage.setItem(INSTALL_HANDOFF, JSON.stringify(installations.map(item => String(item.id))))
-      window.location.assign(verifiedInstallationUrl(installationUrl))
-    } catch (err) { setError(errorText(err)) }
+    // On repository updates GitHub may not redirect to the OAuth callback.
+    // Keep AUTOKOM open while GitHub manages installation permissions in a new tab.
+    permissionBaseline.current = {
+      ids: new Set(repos.map(item => String(item.id))),
+      installs: new Set(installations.map(item => String(item.id))),
+    }
+    permissionStart.current = Date.now()
+    setPermissionPending(true)
+    setError('')
   }
+  async function refreshPermissions({ finishUnchanged = false } = {}) {
+    if (permissionBusy.current || !connected) return
+    permissionBusy.current = true
+    try {
+      const current = (await gitApi.installations())?.installations || []
+      const newlyInstalled = current.find(item => !permissionBaseline.current.installs.has(String(item.id)))
+      const preferred = newlyInstalled || current.find(item => String(item.id) === String(form.githubInstallationId)) || current[0]
+      const updated = preferred ? (await gitApi.repositories(preferred.id))?.repositories || [] : []
+      const newRepo = updated.filter(repo => !permissionBaseline.current.ids.has(String(repo.id)))
+      const changedInstall = preferred && !permissionBaseline.current.installs.has(String(preferred.id))
+      setInstallations(current)
+      if (preferred) {
+        setRepos(updated)
+        if (String(form.githubInstallationId) !== String(preferred.id)) {
+          update({ githubInstallationId: String(preferred.id), repository: '', repositorySlug: '',
+            githubRepositoryId: '', branch: '', workdir: './' })
+        }
+      }
+      if (newRepo.length || changedInstall || finishUnchanged) {
+        setPermissionPending(false)
+        if (newRepo.length === 1) chooseRepo(newRepo[0])
+        onNotice?.({type: 'success', text: newRepo.length === 1
+          ? `Dépôt ${newRepo[0].full_name} autorisé. Vous pouvez le configurer.`
+          : 'Autorisations GitHub actualisées. Choisissez votre dépôt dans AUTOKOM.'})
+      }
+    } catch (err) { setError(errorText(err)) }
+    finally { permissionBusy.current = false }
+  }
+  useEffect(() => {
+    if (!permissionPending) return
+    const check = () => {
+      if (Date.now() - permissionStart.current > 180000) { setPermissionPending(false); return }
+      if (document.visibilityState === 'visible') void refreshPermissions()
+    }
+    const interval = window.setInterval(check, 4000)
+    const onFocus = () => { void refreshPermissions() }
+    window.addEventListener('focus', onFocus)
+    return () => { window.clearInterval(interval); window.removeEventListener('focus', onFocus) }
+  }, [permissionPending, connected, form.githubInstallationId, repos, installations])
   function chooseRepo(repo) {
     setChosenRepo(repo)
     setBrowsePath('')
@@ -187,9 +237,16 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
       }}><option value="">Choisir le compte…</option>{installations.map(item => <option key={item.id} value={item.id}>{item.account}</option>)}</select></label>
         : installations.length === 1 ? <p className="ak-simulation-disclosure" role="status">Compte GitHub sélectionné automatiquement : {installations[0].account}</p> :
           <p className="ak-simulation-disclosure">Aucun dépôt autorisé pour ce compte. GitHub demande votre accord avant l’installation.</p>}
-      {installationUrl && <button className="gh-subtle-button ak-gh-install-action" type="button" onClick={configureInstallation} title="Ouvrir GitHub pour gérer les autorisations">
+      {installationUrl && <a className="gh-subtle-button ak-gh-install-action"
+          href={verifiedInstallationUrl(installationUrl)} target="_blank" rel="noopener noreferrer"
+          onClick={configureInstallation} title="Ouvrir GitHub dans un nouvel onglet ; AUTOKOM reste ouvert">
         {installations.length ? 'Gérer les dépôts autorisés' : 'Autoriser des dépôts GitHub'} <ExternalLink size={15} aria-hidden="true"/>
-      </button>}
+      </a>}
+      {permissionPending && <div className="ak-gh-permission-handoff" role="status" aria-live="polite">
+        <LoaderCircle className="ak-spin" size={17}/>
+        <span>Validez les dépôts sur GitHub. Revenez à cet onglet : AUTOKOM actualise la liste automatiquement.</span>
+        <button type="button" className="gh-subtle-button" onClick={() => void refreshPermissions({finishUnchanged: true})}>Actualiser maintenant</button>
+      </div>}
       {!!form.githubInstallationId && <div className="gh-repo-browser">
         <label className="gh-search"><Search size={17}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Rechercher un dépôt…" aria-label="Rechercher un dépôt"/></label>
         <div className="gh-repositories" role="group" aria-label="Dépôts GitHub autorisés">
@@ -209,8 +266,8 @@ export default function LiveGitHubConnector({ form, update, onNotice, onConnecti
             {foldersLoading ? <div className="ak-gh-loading" role="status"><LoaderCircle className="ak-spin" size={17}/> Chargement du dossier GitHub…</div> : directories.map(item => <button key={item.path} type="button" onClick={() => setBrowsePath(item.path)}><Folder size={17}/>{item.name}<ChevronRight size={15}/></button>)}
             {!foldersLoading && !directories.length && <small>Aucun sous-dossier à ce niveau.</small>}
           </div>
-          {browseAnalysis && <div className="ak-gh-folder-detection" role="status"><Code2 size={17}/><div><strong>{browseAnalysis.framework} détecté dans {browsePath || 'la racine'}</strong><small>{browseAnalysis.supported ? 'Compatible avec la publication Vite automatique' : 'Framework reconnu · vérifier les conditions de publication'}</small></div></div>}
-          <button type="button" className="button-outline ak-gh-use-folder" disabled={foldersLoading} onClick={() => { update({ workdir: browsePath || './' }); onNotice?.({ type: 'success', text: `Dossier source : ${browsePath || 'racine'}` }) }}><Check size={15}/> Choisir {browsePath || 'la racine'}</button>
+          {browseAnalysis && <div className="ak-gh-folder-detection" role="status"><Code2 size={17}/><div><strong>{browseAnalysis.framework} détecté dans {browsePath || 'la racine'}</strong><small>{browseAnalysis.blocked ? browseAnalysis.description : browseAnalysis.supported ? 'Compatible avec la recette automatique' : 'Framework reconnu · vérifier les conditions de publication'}</small></div></div>}
+          <button type="button" className="button-outline ak-gh-use-folder" disabled={foldersLoading || browseAnalysis?.blocked} onClick={() => { update({ workdir: browsePath || './' }); onNotice?.({ type: 'success', text: `Dossier source : ${browsePath || 'racine'}` }) }}><Check size={15}/> Choisir {browsePath || 'la racine'}</button>
         </div>
       </div>}
     </>}

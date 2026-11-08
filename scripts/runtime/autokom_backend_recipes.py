@@ -7,6 +7,10 @@ remain untrusted code and must run inside the existing AUTOKOM container sandbox
 import json
 import re
 from pathlib import Path
+import sys
+_ROOT_BACKEND = Path(__file__).resolve().parents[2] / "platform" / "backend"
+if str(_ROOT_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_ROOT_BACKEND))
 
 PYTHON = frozenset({'python_fastapi', 'python_flask', 'python_django', 'python_wsgi'})
 NODE = frozenset({'node_express', 'node_nest'})
@@ -50,6 +54,9 @@ def _python_entry(path, profile):
 
 
 def validate_backend_source(path, profile, cfg):
+    # Revalidate within every direct caller, not just the Jenkins entry point.
+    from apps.projects.git.sqlite_policy import refuse_sqlite_source
+    refuse_sqlite_source(path)
     if profile not in BACKEND_PROFILES:
         raise ValueError('Profil backend non autorisé.')
     if cfg.get('port') != 8080 or cfg.get('runtime') != BACKEND_RUNTIME[profile]:

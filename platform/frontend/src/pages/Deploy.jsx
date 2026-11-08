@@ -131,7 +131,7 @@ export default function Deploy({ navigate, editProjectId = '' }) {
     const timer = window.setTimeout(() => setStableSourceKey(sourceKey), 400)
     return () => window.clearTimeout(timer)
   }, [sourceKey, stableSourceKey])
-  const staticReady = analysisStatus === 'ready' && supportedFrontend(analysis, currentProfile) && validGitSourcePath(form.workdir)
+  const staticReady = analysisStatus === 'ready' && !analysis?.storageGuard?.blocked && supportedFrontend(analysis, currentProfile) && validGitSourcePath(form.workdir)
 
   useEffect(() => { if (!API_AVAILABLE) try { localStorage.setItem(KEY,JSON.stringify(drafts)) } catch {} }, [drafts])
 
@@ -164,7 +164,7 @@ export default function Deploy({ navigate, editProjectId = '' }) {
         if (!active) return
         setSourceInvalid(false)
         setSourceFiles(result.files || [])
-        const detected = detectSource(result.files || [], result.package || null)
+        const detected = { ...detectSource(result.files || [], result.package || null), storageGuard: result.storage_guard || null }
         setAnalysis(detected); setAnalysisStatus('ready')
         setForm(current => current.detectedKind === detected.applicationType && current.detectedFramework === detected.framework && current.detectedVite === detected.isVite && current.hasNpmLockfile === Boolean((result.files || []).some(f => f.name === 'package-lock.json')) &&
           current.hasDockerfile === Boolean((result.files || []).some(f => f.name.toLowerCase() === 'dockerfile')) ? current :
@@ -175,10 +175,10 @@ export default function Deploy({ navigate, editProjectId = '' }) {
     return () => { active = false }
   }, [step > 0, sourceKey, stableSourceKey, form.githubInstallationId, form.githubRepositoryId])
 
-  function next() { if (step === 1 && API_AVAILABLE && !staticReady) { flashInvalidSource(); setNotice({type:'error',text: analysisError || 'Le dossier source doit exister et contenir un profil compatible.'}); return } if (editingProjectId && step === 0) { setStep(1); return } if (step === 0 && projectError) { setNotice({type:'error',text:projectError}); return } setNotice(null);setStep(s=>Math.min(2,s+1));window.scrollTo(0,0) }
+  function next() { if (step === 1 && API_AVAILABLE && !staticReady) { flashInvalidSource(); setNotice({type:'error',text: analysis?.storageGuard?.message || analysisError || 'Le dossier source doit exister et contenir un profil compatible.'}); return } if (editingProjectId && step === 0) { setStep(1); return } if (step === 0 && projectError) { setNotice({type:'error',text:projectError}); return } setNotice(null);setStep(s=>Math.min(2,s+1));window.scrollTo(0,0) }
   async function save() {
     if (API_AVAILABLE) {
-      if (busy || projectError || analysisStatus !== 'ready') { setNotice({ type: 'error', text: projectError || 'Ouvrez Configuration et attendez la détection réelle du projet avant d’enregistrer.' }); return }
+      if (busy || projectError || analysisStatus !== 'ready' || analysis?.storageGuard?.blocked) { setNotice({ type: 'error', text: analysis?.storageGuard?.message || projectError || 'Ouvrez Configuration et attendez la détection réelle du projet avant d’enregistrer.' }); return }
       setBusy(true); setNotice(null)
       try {
         const checked = verifiedDeploymentForm(form, analysis)
@@ -214,6 +214,7 @@ export default function Deploy({ navigate, editProjectId = '' }) {
       setBusy(true); setNotice(null); setLaunchStage('Vérification du dossier source…')
       try {
         if (analysisStatus !== 'ready') throw new Error('La détection GitHub n’est pas terminée : réessayez après l’analyse.')
+        if (analysis?.storageGuard?.blocked) throw new Error(analysis.storageGuard.message)
         const checked = verifiedDeploymentForm(form, analysis)
         if (form.frontendEnvTouched && !BACKEND_PROFILES.includes(currentProfile)) publicEnvForFramework(form.frontendEnv, analysis, currentProfile)
         // Si la requête de lancement précédente a perdu sa réponse, réutiliser la
@@ -288,6 +289,7 @@ export default function Deploy({ navigate, editProjectId = '' }) {
           </div>}
           {currentProfile === 'next_server' && <label className="field ak-healthcheck-edit"><span>URL de santé (interne)</span><input aria-label="Chemin du healthcheck" value={form.advancedBuild?.healthcheckPath || '/'} placeholder="/" onChange={e => updateBuild('healthcheckPath', e.target.value)}/></label>}
           {!BACKEND_PROFILES.includes(currentProfile) ? <FrontendEnvEditor rows={form.frontendEnv || []} analysis={analysis} onChange={rows => update({frontendEnv: rows, frontendEnvTouched: true})}/> : <p className="ak-backend-env-notice">Les variables privées d’un service backend ne sont pas injectées via l’éditeur de variables frontend publiques.</p>}
+          {analysis?.storageGuard?.blocked && <p className="feedback error" role="alert"><Info size={16}/> {analysis.storageGuard.message}</p>}
           {analysis?.warnings?.length>0 && <div className="ak-analysis-warnings">{analysis.warnings.map(w=><p key={w}><Info size={15}/>{w}</p>)}</div>}
           <div className="ak-offer-header"><h3>Offre d’hébergement</h3><button className="ak-see-prices" type="button" onClick={() => navigate('/pricing')}>Comparer les tarifs <ArrowRight size={15}/></button></div>
           <div className="ak-offers ak-offers-three">
