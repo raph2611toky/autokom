@@ -54,6 +54,7 @@ class RecoverFlowTests(unittest.TestCase):
              patch.object(rec,'frontend_targets',return_value=('auto.ikom.mg','backend.auto.ikom.mg')), \
              patch('autokom_app_manager.verify_health',return_value=True), \
              patch('autokom_runtime_integrity.inspect',return_value=integrity_ok), \
+             patch('autokom_jenkins_pipeline.inspect',return_value=MagicMock(ready=True)), \
              patch.object(ctrl,'inspect',return_value=ctrl.Health('active','active','ok',True)), \
              patch('logging_stack.install_complete',return_value=False), \
              patch.object(rec,'ready_frontend',return_value=False), \
@@ -67,6 +68,7 @@ class RecoverFlowTests(unittest.TestCase):
              patch.object(rec,'frontend_targets',return_value=('auto.ikom.mg','backend.auto.ikom.mg')), \
              patch('autokom_app_manager.verify_health',return_value=True), \
              patch('autokom_runtime_integrity.inspect',return_value=integrity_ok), \
+             patch('autokom_jenkins_pipeline.inspect',return_value=MagicMock(ready=True)), \
              patch.object(ctrl,'inspect',return_value=ctrl.Health('active','active','ok',True)), \
              patch('logging_stack.install_complete',side_effect=[False,True]), \
              patch.object(rec,'ready_frontend',side_effect=[False,False,True]), \
@@ -87,6 +89,7 @@ class RecoverFlowTests(unittest.TestCase):
              patch.object(rec,'frontend_targets',return_value=('auto.ikom.mg','backend.auto.ikom.mg')), \
              patch('autokom_app_manager.verify_health',return_value=True), \
              patch('autokom_runtime_integrity.inspect',return_value=integrity_ok), \
+             patch('autokom_jenkins_pipeline.inspect',return_value=MagicMock(ready=True)), \
              patch.object(ctrl,'inspect',return_value=ctrl.Health('active','active','ok',True)), \
              patch('logging_stack.install_complete',return_value=False), \
              patch.object(rec,'ready_frontend',side_effect=[False,False,True]), \

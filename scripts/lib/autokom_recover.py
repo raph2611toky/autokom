@@ -108,7 +108,12 @@ def run(*, apply=False):
     ui_ok = ready_frontend(front)
     control_ok = control_inspect().ready
     from autokom_runtime_integrity import inspect as integrity_inspect, reconcile as integrity_reconcile
+    from autokom_jenkins_pipeline import inspect as pipeline_inspect, reconcile as pipeline_reconcile, PipelineError
     integrity_ok = integrity_inspect().ready
+    try:
+        pipeline_ok = pipeline_inspect().ready
+    except PipelineError:
+        pipeline_ok = False
 
     print('  AUTOKOM / REPRISE AUTOMATIQUE · '+('APPLICATION' if apply else 'SIMULATION'))
     print('  Backend Django : '+('✓ prêt' if api_ok else '! à réparer avec app deploy'))
@@ -116,6 +121,7 @@ def run(*, apply=False):
     print('  Frontend : '+('✓ publié et HTTPS vérifié' if ui_ok else '+ TLS / build / publication à finaliser'))
     print('  Déploiements : '+('✓ broker et worker accessibles' if control_ok else '+ broker/socket/worker à réconcilier'))
     print('  Sécurité & domaines : '+('✓ scanners et reconciler opérationnels' if integrity_ok else '+ intégration DevSecOps / DNS-HTTPS à réparer'))
+    print('  Pipeline Jenkins : '+('✓ Declarative actif' if pipeline_ok else '+ plugin et moteur d’exécution à réparer'))
     print('  Domaine : https://' + front + ' → https://' + back)
     print('  Politique : aucun effacement MySQL, aucun changement UFW, aucun basculement implicite Docker ↔ systemd')
     if not apply:
@@ -147,6 +153,18 @@ def run(*, apply=False):
             print('  ✗ '+failures[-1])
     elif not api_ok:
         failures.append('Déploiements : API Django indisponible, contrôle non relancé')
+
+    if control_ok and not pipeline_ok:
+        try:
+            print('  › Jenkins : réparation contrôlée du moteur Declarative Pipeline')
+            pipeline_ok = pipeline_reconcile(apply=True).ready
+            if not pipeline_ok:
+                raise RecoverError('Plugin Declarative non chargé après tentative de réparation')
+        except PipelineError as exc:
+            failures.append('Jenkins Pipeline : '+str(exc))
+            print('  ✗ '+failures[-1])
+    elif not control_ok and not pipeline_ok:
+        failures.append('Jenkins Pipeline : broker/worker indisponibles, réparation différée')
 
     if not integrity_ok:
         try:
@@ -213,7 +231,8 @@ def run(*, apply=False):
           ' · Journaux='+('OK' if logs_ok else 'ERREUR')+
           ' · Frontend='+('OK' if ui_ok else 'ERREUR')+
           ' · Déploiements='+('OK' if control_ok else 'ERREUR')+
-          ' · Automatisation='+('OK' if integrity_ok else 'ERREUR'))
+          ' · Automatisation='+('OK' if integrity_ok else 'ERREUR')+
+          ' · Pipeline Jenkins='+('OK' if pipeline_ok else 'ERREUR'))
     if failures:
         raise RecoverError('; '.join(failures))
     return 0

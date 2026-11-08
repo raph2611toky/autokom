@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 from urllib.parse import urlencode
-from urllib.request import Request,build_opener,HTTPRedirectHandler
+from urllib.request import Request,build_opener,HTTPRedirectHandler,ProxyHandler
 from urllib.error import HTTPError,URLError
 from xml.etree import ElementTree as ET
 from datetime import datetime,timezone
@@ -151,7 +151,7 @@ def jenkins_request(env,method,path,data=None,content_type='application/xml'):
     req=Request(url+path,data=data,method=method,headers={
         'Authorization':'Basic '+auth,'Content-Type':content_type})
     try:
-        with build_opener(NoRedirect()).open(req,timeout=20) as resp:return resp.status,resp.read(128000)
+        with build_opener(ProxyHandler({}),NoRedirect()).open(req,timeout=20) as resp:return resp.status,resp.read(128000)
     except HTTPError as exc:return exc.code,b''
     except (URLError,OSError,TimeoutError) as exc:raise SetupError('Jenkins inaccessible.') from exc
 
@@ -239,6 +239,14 @@ def jenkins_sync(*,apply):
     env=load_env()
     job=env.get('AUTOKOM_JENKINS_JOB','autokom-client-deploy')
     if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',job):raise SetupError('Nom de job Jenkins invalide.')
+    # A configured Pipeline job is NOT proof that the Declarative interpreter is active.
+    from autokom_jenkins_pipeline import reconcile as pipeline_reconcile, PipelineError
+    try:
+        plugins = pipeline_reconcile(apply=apply, env=env)
+    except PipelineError as exc:
+        raise SetupError(str(exc)) from exc
+    if not plugins.ready:
+        raise SetupError('Jenkins ne peut pas encore exécuter pipeline {} : plugin Declarative manquant ou inactif.')
     # Credentials are not contained in the job XML. Check even if the job
     # itself is already synchronized; no manual Jenkins UI action is required.
     from autokom_jenkins_credentials import provision, CredentialSetupError
@@ -384,6 +392,15 @@ except (OSError,ValueError,KeyError,TypeError):
     if status!=200:
         raise SetupError('Le job Jenkins n’est pas accessible au compte de service (code HTTP '+str(status)+').')
     print('  ✓ Job Jenkins accessible avec les identifiants du runtime.')
+    from autokom_jenkins_pipeline import inspect as pipeline_inspect, PipelineError
+    try:
+        pipeline_state=pipeline_inspect(env)
+    except PipelineError as exc:
+        raise SetupError(str(exc)) from exc
+    if not pipeline_state.ready:
+        raise SetupError('Jenkins Pipeline: Declarative non chargé (plugin pipeline-model-definition). '
+                         'Corriger : sudo autokom runtime pipeline --apply ; puis relancer le déploiement.')
+    print('  ✓ Jenkins Declarative Pipeline chargé et actif.')
     from autokom_jenkins_credentials import provision, CredentialSetupError
     try:
         cred = provision(env, jenkins_request, apply=False)
@@ -488,6 +505,10 @@ def main(argv=None):
     repair_mode = repair.add_mutually_exclusive_group(required=True)
     repair_mode.add_argument('--check', action='store_true')
     repair_mode.add_argument('--apply', action='store_true')
+    pip = sub.add_parser('pipeline', help='Vérifier/réparer le plugin Jenkins Declarative Pipeline réellement actif')
+    pip_mode = pip.add_mutually_exclusive_group(required=True)
+    pip_mode.add_argument('--check', action='store_true')
+    pip_mode.add_argument('--apply', action='store_true')
     scan = sub.add_parser('scanners', help='Diagnostic réel Semgrep/Trivy sous autokom-builder')
     scan.add_argument('--diagnose', action='store_true', required=True)
     logs = sub.add_parser('logs', help='Afficher les journaux systemd broker, worker et agent Jenkins')
@@ -522,9 +543,17 @@ def main(argv=None):
                                '-u','autokom-deployment-worker.service',
                                '-n',str(opts.lines),'--no-pager','--output=short-iso'],
                               check=False).returncode
+    if opts.action=='pipeline':
+        from autokom_jenkins_pipeline import reconcile as pipeline_reconcile, PipelineError
+        try:
+            state=pipeline_reconcile(apply=opts.apply)
+            return 0 if state.ready else 1
+        except PipelineError as exc:
+            raise SetupError(str(exc)) from exc
     if opts.action=='reconcile':
         from autokom_control_recovery import reconcile as control_reconcile, ControlRecoveryError
         from autokom_runtime_integrity import reconcile as integrity_reconcile, IntegrityError
+        from autokom_jenkins_pipeline import reconcile as pipeline_reconcile, PipelineError
         failures=[]
         try:
             control = control_reconcile(apply=opts.apply)
@@ -537,6 +566,12 @@ def main(argv=None):
             if not integrity.ready and opts.apply:
                 failures.append('Scanners ou domaines non prêts')
         except IntegrityError as exc:
+            failures.append(str(exc))
+        try:
+            pipeline=pipeline_reconcile(apply=opts.apply)
+            if not pipeline.ready:
+                failures.append('Jenkins Declarative Pipeline non actif')
+        except PipelineError as exc:
             failures.append(str(exc))
         if failures:
             raise SetupError('; '.join(failures))
