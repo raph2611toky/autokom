@@ -10,6 +10,8 @@ from __future__ import annotations
 from autokom_nginx_bind_policy import https_listens, tls_detected
 
 import fcntl
+import http.client
+import secrets
 import ipaddress
 import json
 import logging
@@ -39,7 +41,7 @@ STATE = Path('/var/lib/autokom/client-runtime')
 IMAGES = Path('/var/lib/autokom/build-artifacts')
 PROXY = Path('/etc/nginx/sites-available')
 ENABLED = Path('/etc/nginx/sites-enabled')
-WEBROOT = Path('/var/lib/autokom/acme')
+WEBROOT = Path('/var/www/autokom-acme')
 CLOUDFLARE_CONFIG = Path('/etc/autokom/secrets/cloudflare-dns.env')
 RUNTIME_CONFIG = Path('/etc/autokom/secrets/runtime.env')
 UUID = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
@@ -621,7 +623,7 @@ def _nginx_config(host,port,tls=False):
     if tls:
         cert='/etc/letsencrypt/live/'+safe_host
         return (f'server {{\n    listen 80;\n    server_name {safe_host};\n'
-            '    location /.well-known/acme-challenge/ { root /var/lib/autokom/acme; }\n'
+            f'    location ^~ /.well-known/acme-challenge/ {{ root {WEBROOT}; default_type text/plain; try_files $uri =404; }}\n'
             '    location / { return 308 https://$host$request_uri; }\n}\n'
             f'server {{\n' + https_listens() + f'    server_name {safe_host};\n'
             f'    ssl_certificate {cert}/fullchain.pem;\n'
@@ -634,8 +636,92 @@ def _nginx_config(host,port,tls=False):
             '        proxy_set_header X-Forwarded-Proto https;\n'
             '        proxy_connect_timeout 5s;\n        proxy_read_timeout 60s;\n    }\n}\n')
     return (f'server {{\n    listen 80;\n    server_name {safe_host};\n'
-            '    location /.well-known/acme-challenge/ { root /var/lib/autokom/acme; }\n'
+            f'    location ^~ /.well-known/acme-challenge/ {{ root {WEBROOT}; default_type text/plain; try_files $uri =404; }}\n'
             '    location / { return 503; }\n}\n')
+
+def _prepare_public_acme_webroot():
+    """Use the existing public AUTOKOM ACME root, outside private Django state.
+
+    The broker itself has UMask=0077. Explicitly set traversal permissions
+    only on these public root-owned ACME directories, NEVER on /var/lib/autokom.
+    Fail closed instead of adopting attacker-owned or world-writable directories.
+    """
+    if not WEBROOT.is_absolute():
+        raise BrokerError('AUTOKOM_ACME_WEBROOT_INVALID: Chemin ACME non absolu.')
+    for parent in reversed(WEBROOT.parents):
+        if parent.is_symlink() or not parent.is_dir():
+            raise BrokerError('AUTOKOM_ACME_WEBROOT_INVALID: Parent symbolique ou non valide.')
+    for item in (WEBROOT, WEBROOT / '.well-known',
+                 WEBROOT / '.well-known' / 'acme-challenge'):
+        if item.is_symlink():
+            raise BrokerError('AUTOKOM_ACME_WEBROOT_INVALID: Lien symbolique interdit.')
+        if not item.exists():
+            item.mkdir(mode=0o755)
+        st = item.lstat()
+        if (not stat.S_ISDIR(st.st_mode) or st.st_uid not in (0, os.geteuid())
+                or stat.S_IMODE(st.st_mode) & 0o022):
+            raise BrokerError('AUTOKOM_ACME_WEBROOT_INVALID: Répertoire non fiable ou insécurisé.')
+        # These directories contain only public, short-lived ACME tokens.
+        # Restrict all other AUTOKOM directories as before.
+        os.chmod(item, 0o755)
+    return WEBROOT
+
+
+def _acme_ingress_local_ipv4():
+    """Find the incoming private interface on NATed GCP/AWS instances."""
+    try:
+        response = subprocess.run(['ip', '-j', '-4', 'route', 'get', '1.1.1.1'],
+                                  capture_output=True, text=True, timeout=3, check=False)
+        if response.returncode:
+            return None
+        route = json.loads(response.stdout)[0]
+        if not isinstance(route, dict) or str(route.get('dev', '')).startswith(
+                ('docker', 'br-', 'veth', 'wg', 'tun')):
+            return None
+        addr = ipaddress.IPv4Address(route.get('prefsrc') or route.get('src'))
+        if addr.is_loopback or addr.is_link_local or addr.is_unspecified:
+            return None
+        return str(addr)
+    except (ValueError, KeyError, IndexError, TypeError, OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _preflight_public_acme_challenge(host):
+    """Confirm Nginx can read a known public token on the inbound NIC.
+
+    Does not log the token or expose secrets. No external certificate request.
+    """
+    valid_hostname(host)
+    root = WEBROOT / '.well-known' / 'acme-challenge'
+    name = 'autokom-preflight-' + secrets.token_hex(12)
+    marker = 'autokom-http01-' + secrets.token_hex(16)
+    file = root / name
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+    fd = os.open(file, flags, 0o644)
+    try:
+        with os.fdopen(fd, 'w', encoding='ascii') as handle:
+            os.fchmod(handle.fileno(), 0o644)  # broker inherits UMask=0077
+            handle.write(marker)
+        address = _acme_ingress_local_ipv4() or '127.0.0.1'
+        connection = http.client.HTTPConnection(address, 80, timeout=6)
+        try:
+            connection.request('GET', '/.well-known/acme-challenge/' + name,
+                               headers={'Host': host})
+            response = connection.getresponse()
+            body = response.read(256).decode('ascii', errors='replace')
+            status = response.status
+        except (OSError, http.client.HTTPException) as exc:
+            raise BrokerError('AUTOKOM_ACME_HTTP01_UNREACHABLE: Nginx HTTP/80 inaccessible depuis l’interface locale.') from exc
+        finally:
+            connection.close()
+        if status != 200 or body != marker:
+            raise BrokerError(
+                f'AUTOKOM_ACME_HTTP01_PREFLIGHT_FAILED: Nginx HTTP {status} sur {host} ; '
+                'vérifier vhost et permissions de /var/www/autokom-acme. '
+                'Aucune demande de certificat envoyée.')
+    finally:
+        file.unlink(missing_ok=True)
+
 
 def _proxy_apply(host,environment):
     valid_hostname(host); valid_id(environment)
@@ -657,7 +743,7 @@ def _proxy_apply(host,environment):
     path=PROXY/name; symlink=ENABLED/name
     if path.exists() and (path.is_symlink() or not owner.is_file()):
         raise BrokerError('Vhost existant non géré par AUTOKOM : aucune modification.')
-    WEBROOT.mkdir(parents=True,exist_ok=True)
+    _prepare_public_acme_webroot()
     old=path.read_text() if path.exists() else None
     def publish(content):
         with tempfile.NamedTemporaryFile('w',dir=PROXY,delete=False,prefix='.autokom-',encoding='utf-8') as f:
@@ -670,6 +756,9 @@ def _proxy_apply(host,environment):
     try:
         logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started', phase)
         publish(_nginx_config(host,state['port'],tls=False))
+        # Validate the *real* Nginx vhost and token permissions before asking
+        # Let's Encrypt; a successful nginx -t cannot detect HTTP 403.
+        _preflight_public_acme_challenge(host)
         phase = 'acme_certificate'
         logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started', phase)
         # Certbot --keep-until-expiring reuses a currently valid certificate.

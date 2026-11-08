@@ -48,6 +48,11 @@ class DomainActivationRegressionTests(unittest.TestCase):
         helper=patch.object(broker,'run',side_effect=fake_run)
         helper.start()
         self.addCleanup(helper.stop)
+        # Domain activation now verifies a public ACME probe after Nginx reload.
+        # This unit test exercises vhost/rollback without a live Nginx instance.
+        preflight=patch.object(broker,'_preflight_public_acme_challenge')
+        preflight.start()
+        self.addCleanup(preflight.stop)
 
     def test_domain_activate_creates_owned_vhost_without_typeerror(self):
         result=broker.handle('domain.activate',{
