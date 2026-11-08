@@ -80,7 +80,6 @@ test('routage et UI : éditeur lié à un ID, sélection GitHub verrouillée, bo
   const deploy=readFileSync(new URL('../src/pages/Deploy.jsx',import.meta.url),'utf8')
   const projects=readFileSync(new URL('../src/pages/LiveProjects.jsx',import.meta.url),'utf8')
   const settings=readFileSync(new URL('../src/pages/LiveProjectSettings.jsx',import.meta.url),'utf8')
-  const projectSerializer=readFileSync(new URL('../../backend/apps/projects/project/serializers.py',import.meta.url),'utf8')
   assert.match(app,/configure\$\/\.test\(route\)/)
   assert.match(app,/editProjectId=\{projectFromPath\(route\)\}/)
   assert.match(projects,/navigate\(`\/projects\/\$\{p.id\}\/configure`\)/)
@@ -88,5 +87,4 @@ test('routage et UI : éditeur lié à un ID, sélection GitHub verrouillée, bo
   assert.match(deploy,/editingProjectId \? 'Enregistrer' : 'Déployer'/)
   assert.match(deploy,/navigate\(editingProjectId \? `\/projects\/\$\{ids.projectId\}\/deployments\//)
   assert.match(settings,/Voir les déploiements/)
-  assert.match(projectSerializer,/github_installation_id/)
 })

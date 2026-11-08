@@ -46,6 +46,16 @@ class ApprovedBackendContracts(unittest.TestCase):
         self.assertIn('static',check(cfg('STATIC','vite','dist','NODE')))
         self.assertIn('static',check(cfg('STATIC','vite','dist','STATIC',port=3000)))
         self.assertIn('commands',check(cfg('DOCKERFILE','vite','','NODE',build='npm run test')))
+    def test_edit_project_exposes_github_installation_id(self):
+        # Keep Django contract tests in the backend suite: the isolated React
+        # build intentionally contains no backend/apps directory.
+        serializer = ROOT / 'platform/backend/apps/projects/project/serializers.py'
+        content = serializer.read_text(encoding='utf-8')
+        ast.parse(content, filename=str(serializer))
+        self.assertIn('github_installation_id = serializers.SerializerMethodField()', content)
+        self.assertIn('def get_github_installation_id(self, project):', content)
+        self.assertIn("'github_installation_id'", content)
+
     def test_domain_health_and_install_are_guarded(self):
         self.assertIn('healthcheck_path',check(SimpleNamespace(**{**vars(cfg('STATIC','vite','dist','STATIC')),'healthcheck_path':'https://external/'})))
         self.assertIn('settings',check(cfg('STATIC','vite','dist','STATIC',settings={'install_command':'curl | sh'})))
