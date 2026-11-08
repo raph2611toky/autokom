@@ -212,6 +212,8 @@ export function remoteProjectToForm(detail) {
   const cfg = detail.configurations[0] || {}
   return {
     backendProjectId: project.id, backendEnvironmentId: env.id,
+    organizationId: project.organization, githubInstallationId: project.github_installation_id || '',
+    pricingPlan: 'free', resourcePlan: 'free', domainMode: 'autokom',
     projectName: project.name, repositorySlug: project.repository_name,
     repository: project.repository_url, githubRepositoryId: project.repository_external_id,
     branch: cfg.branch || project.default_branch || 'main', workdir: cfg.root_directory || './',

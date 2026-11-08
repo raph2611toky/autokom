@@ -4,6 +4,13 @@ from apps.projects.project.models import Project, ProjectMember
 
 class ProjectSerializer(serializers.ModelSerializer):
     public_site = serializers.SerializerMethodField()
+    github_installation_id = serializers.SerializerMethodField()
+
+    def get_github_installation_id(self, project):
+        # Le dépôt d'un projet existant est immuable : ce lien sert uniquement
+        # à réanalyser ses branches/dossiers via la même installation GitHub.
+        connection = project.git_connection
+        return connection.installation_id if connection and connection.is_active else None
 
     def get_public_site(self, project):
         # No guessed URLs: a publicly usable link requires verified HTTPS activation.
@@ -22,7 +29,7 @@ class ProjectSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Project
-        fields = ('id', 'organization', 'created_by', 'git_connection', 'repository_external_id',
+        fields = ('id', 'organization', 'created_by', 'git_connection', 'github_installation_id', 'repository_external_id',
                   'repository_name', 'repository_url', 'default_branch', 'name', 'slug',
                   'description', 'framework', 'status', 'created_at', 'updated_at', 'public_site')
         read_only_fields = fields

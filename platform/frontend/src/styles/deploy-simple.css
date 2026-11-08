@@ -150,3 +150,15 @@
 @media(max-width:680px){.ak-command-edit{grid-template-columns:minmax(0,1fr)}}
 
 .ak-healthcheck-edit{max-width:440px;margin:18px 0}
+
+/* Edition d'un projet existant : identité GitHub verrouillée, paramètres seuls éditables. */
+.ak-edit-repository{display:flex;align-items:center;gap:12px;margin:0 0 15px;padding:14px 16px;border:1px solid var(--ak-border-strong);background:var(--ak-surface-2);min-width:0}
+.ak-edit-repository svg{flex:none;color:var(--ak-accent)}
+.ak-edit-repository div{min-width:0;display:grid;gap:5px}
+.ak-edit-repository span{color:var(--ak-muted);font-size:12px}
+.ak-edit-repository strong{font-size:14px;overflow-wrap:anywhere}
+.ak-edit-branch{display:block;margin-bottom:15px;max-width:520px}
+.ak-project-settings-shortcuts{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+@media(max-width:720px){.ak-project-settings-shortcuts{width:100%}.ak-project-settings-shortcuts .button-outline{flex:1 1 auto}}
+
+.ak-quick-deploy.ak-edit-mode .ak-simple-steps{grid-template-columns:repeat(2,minmax(0,1fr))}

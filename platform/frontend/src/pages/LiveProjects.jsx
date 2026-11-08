@@ -71,8 +71,7 @@ export default function LiveProjects({ navigate, projectId = null }) {
   }), [projects, query, filter])
 
   function editProject(p) {
-    try { sessionStorage.setItem('autokom.ui.editRemoteProject', p.id) } catch {}
-    navigate('/deploy')
+    navigate(`/projects/${p.id}/configure`)
   }
 
   async function publishNow() {
