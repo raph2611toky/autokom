@@ -133,6 +133,34 @@ class DeploymentLogsAPIView(APIView):
             return handle_error(exc, 'deployment_logs')
 
 
+def customer_file_log_line(entry):
+    """One bounded, customer-safe, plain-text line for the project log export."""
+    message = entry.message.replace('\r', ' ').replace('\n', ' ')[:800]
+    source = 'autokom'
+    stage = 'source'
+    level = 'DEBUG' if entry.level == 'DETAIL' else 'INFO'
+    if message.startswith('AUTOKOM_TRACE:'):
+        parts = message.split(':', 3)
+        if len(parts) == 4:
+            _, stage, source, message = parts
+    elif message.startswith('AUTOKOM_TECH:'):
+        parts = message.split(':', 2)
+        if len(parts) == 3:
+            _, stage, message = parts
+            source = 'pipeline'
+    elif message.startswith('AUTOKOM_STAGE:'):
+        parts = message.split(':', 2)
+        if len(parts) == 3:
+            _, stage, event = parts
+            source = 'pipeline'
+            message = 'Étape ' + event
+    elif message.startswith('AUTOKOM_LOG:'):
+        message = message[len('AUTOKOM_LOG:'):].strip()
+    if entry.level == 'ERROR' or any(x in message.lower() for x in ('operationalerror', 'échec', 'failed', 'refus')):
+        level = 'ERROR'
+    return f'{entry.created_at.isoformat()} [{level}] [{stage}/{source}] {message}'
+
+
 class DeploymentLogDownloadAPIView(APIView):
     """Download only the same pre-filtered, project-scoped journal visible to the user."""
     permission_classes = [IsClientUser]
@@ -146,8 +174,7 @@ class DeploymentLogDownloadAPIView(APIView):
                      'Contenu filtré pour le propriétaire du projet · aucune console Jenkins brute', '']
             for entry in DeploymentLogEntry.objects.filter(deployment=run).order_by('sequence')[:10000]:
                 # Every stored message passed through server-side sanitization first.
-                message = entry.message.replace('\r', '').replace('\n', ' ')[:800]
-                lines.append(f'{entry.created_at.isoformat()} [{entry.level}] {message}')
+                lines.append(customer_file_log_line(entry))
             content = '\n'.join(lines) + '\n'
             response = HttpResponse(content, content_type='text/plain; charset=utf-8')
             response['Content-Disposition'] = 'attachment; filename="autokom-publication-' + str(run.pk)[:8] + '.log"'

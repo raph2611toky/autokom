@@ -21,6 +21,22 @@ def redact(text):
     return ''.join(c for c in value if c.isprintable() or c == '\t')
 
 
+def add_customer_trace(run, stage, channel, message):
+    """Store an additional *trusted*, per-run line for the technical file view.
+
+    Only AUTOKOM-authored, bounded messages may use this helper. Never pass
+    repository stdout, subprocess command lines, variables or user-supplied
+    exception strings here. The existing summary stream remains unchanged.
+    """
+    if stage not in {'source', 'sast', 'sca', 'build', 'release', 'health'}:
+        raise ValueError('Stage de trace invalide.')
+    if channel not in {'pipeline', 'broker', 'docker', 'application'}:
+        raise ValueError('Origine de trace invalide.')
+    if not isinstance(message, str) or not message or len(message) > 540 or '\n' in message or '\r' in message:
+        raise ValueError('Trace client invalide.')
+    add_log(run, f'AUTOKOM_TRACE:{stage}:{channel}:{message}', level='DETAIL')
+
+
 def add_log(run, line, level='INFO'):
     line = redact(line)
     # Markers are informational only. Never use customer-originated log text as
@@ -125,9 +141,11 @@ def dispatch_one(client):
             'managed_suffix': settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX,
             'managed_hosts': managed_hosts,
         }, timeout=10)
+        add_customer_trace(run, 'source', 'pipeline', 'Contrôle de la réservation du domaine réussi avant mise en file du build.')
         external_id = client.dispatch(run)
         DeploymentRun.objects.filter(pk=run.pk, status='RUNNING').update(external_run_id=external_id)
         add_log(run, 'AUTOKOM_LOG: Exécution Jenkins mise en file ; aucun jeton GitHub transmis.')
+        add_customer_trace(run, 'source', 'pipeline', 'La demande de compilation a été acceptée par Jenkins ; suivi des étapes démarré.')
     except Exception as exc:
         code = getattr(exc, 'safe_code', '')
         is_cf = code in {'AUTOKOM_DOMAIN_CLOUDFLARE_CONFIG_MISSING','AUTOKOM_CF_SECRETS_PERMISSIONS',
@@ -249,8 +267,10 @@ def poll_one(client, run_id):
             from apps.deployments.runs.autokom_socket import request_control
             try:
                 add_log(run, 'AUTOKOM_TECH:release:Publication contrôlée démarrée (Docker, DNS et HTTPS).', level='TECH')
+                add_customer_trace(run, 'release', 'broker', 'Début de transaction de publication : image locale, conteneur isolé, relais HTTP privé.')
                 _release_docker_and_proxy(run)
                 add_log(run, 'AUTOKOM_TECH:release:Runtime et domaine vérifiés ; validation de la version active.', level='TECH')
+                add_customer_trace(run, 'health', 'broker', 'Contrôles terminés : runtime interne et domaine HTTPS validés avant activation définitive.')
                 # The broker may still roll back at this point. Do NOT publish
                 # the release as ACTIVE in MySQL before this commit succeeds.
                 request_control('runtime.commit', {
@@ -258,10 +278,12 @@ def poll_one(client, run_id):
                     'environment_id': str(run.environment_id),
                 }, timeout=25)
                 add_log(run, 'AUTOKOM_TECH:release:Publication et validation du runtime terminées.', level='TECH')
+                add_customer_trace(run, 'release', 'broker', 'Validation finale enregistrée ; cette version peut devenir la publication active.')
             except Exception as exc:
                 code=getattr(exc, 'safe_code', None)
                 safe_code = code if isinstance(code,str) and re.fullmatch(r'AUTOKOM_[A-Z0-9_]{3,80}',code) else 'AUTOKOM_PUBLISH_FAILED'
                 add_log(run, 'AUTOKOM_TRACE:release:broker:Échec de publication · '+safe_code, level='DETAIL')
+                add_customer_trace(run, 'release', 'broker', 'Le contrôle de santé a refusé la version candidate ; collecte des erreurs de démarrage avant nettoyage.')
                 try:
                     diagnostic=request_control('runtime.diagnostics', {
                         'run_id':str(run.pk), 'environment_id':str(run.environment_id),
@@ -274,12 +296,20 @@ def poll_one(client, run_id):
                         add_log(run, 'AUTOKOM_TRACE:release:docker:État='+status+' · code de sortie='+(
                             str(exit_code) if type(exit_code) is int else 'inconnu')+
                             ' · OOM='+('oui' if diagnostic.get('oom_killed') else 'non'), level='DETAIL')
+                        add_customer_trace(run, 'release', 'docker', 'Résultat de l’inspection du conteneur enregistré avant le nettoyage de la tentative.')
                         for line in diagnostic.get('lines', [])[:24]:
                             if isinstance(line,str) and len(line)<=260:
                                 add_log(run, 'AUTOKOM_TRACE:release:application:'+line, level='DETAIL')
+                        # Safe, targeted interpretation of a known startup error.
+                        # The original sanitized exception remains available above.
+                        if any('sqlite3.OperationalError: unable to open database file' in line
+                               for line in diagnostic.get('lines', []) if isinstance(line, str)):
+                            add_customer_trace(run, 'release', 'application',
+                                'SQLite : vérifier le chemin et les droits. Le système de fichiers applicatif est en lecture seule ; utiliser un emplacement temporaire inscriptible ou une base externe.')
                 except Exception:
                     logger.warning('Diagnostic conteneur indisponible pour %s',run.pk)
                 add_log(run, 'AUTOKOM_TECH:release:Échec lors de la publication ; code='+safe_code, level='TECH')
+                add_customer_trace(run, 'release', 'broker', 'La version candidate n’a pas été activée ; restauration ou conservation de la publication précédente.')
                 try:
                     request_control('runtime.rollback', {
                         'run_id': str(run.pk),
@@ -340,6 +370,9 @@ def _release_docker_and_proxy(run):
         raise ValueError('Haute disponibilité interdite avant activation GCP.')
     PipelineStageRun.objects.filter(deployment=run,stage_key='release').update(status='RUNNING',started_at=timezone.now())
     add_log(run, 'AUTOKOM_TECH:release:Docker · import image, lancement du conteneur et contrôle HTTP interne.', level='TECH')
+    add_customer_trace(run, 'release', 'broker', f'Ressources retenues : CPU={int(resource["cpu_millicores"])}m, RAM={int(resource["memory_mb"])} MiB, stockage temporaire={int(resource["storage_mb"])} MiB.')
+    add_customer_trace(run, 'release', 'docker', f'Publication sur port privé {int(cfg["port"])} ; 1 conteneur isolé, sans exposition TCP directe.')
+    add_customer_trace(run, 'release', 'broker', 'Le conteneur doit répondre au contrôle HTTP interne avant l’activation du domaine.')
     result=request_control('runtime.deploy',{
         'run_id':str(run.pk),'environment_id':str(run.environment_id),
         'cpu_millicores':int(resource['cpu_millicores']),
@@ -348,6 +381,7 @@ def _release_docker_and_proxy(run):
         'replicas':1,'variables':manifest['variables'],
     },timeout=280)
     add_log(run, 'AUTOKOM_TECH:release:Docker · conteneur et contrôle HTTP interne validés.', level='TECH')
+    add_customer_trace(run, 'release', 'docker', 'Réponse HTTP interne conforme : la nouvelle version est candidate à l’activation HTTPS.')
     # The container is a candidate, not a committed public release yet.
     # Do not show 'Publication: Terminé' until TLS and the public site pass.
     PipelineStageRun.objects.filter(deployment=run,stage_key='health').update(status='RUNNING',started_at=timezone.now())
@@ -358,8 +392,10 @@ def _release_docker_and_proxy(run):
         from apps.projects.project.services import reserve_domain
         reserve_domain(run.environment.project, run.environment)
     add_log(run, 'AUTOKOM_TECH:health:Domaine public · vérification DNS, configuration Nginx et certificat HTTPS.', level='TECH')
+    add_customer_trace(run, 'health', 'broker', 'Vérification HTTPS et du reverse proxy en cours ; pas de basculement anticipé.')
     activate_managed_domains_for_release(run.environment)
     add_log(run, 'AUTOKOM_TECH:health:Domaine public · DNS et HTTPS activés.', level='TECH')
+    add_customer_trace(run, 'health', 'broker', 'Réconciliation du domaine géré terminée : terminaison TLS et réponse HTTPS contrôlées.')
     domains=Domain.objects.filter(environment=run.environment,domain_type=Domain.Type.CUSTOM,verified_at__isnull=False,status__in=[Domain.Status.VERIFYING,Domain.Status.ACTIVE])
     for domain in domains:
         request_control('domain.activate',{

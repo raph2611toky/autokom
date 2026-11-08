@@ -222,3 +222,14 @@
 .ak-log-diagnostic { background:var(--ak-surface); }
 .ak-log-diagnostic .ak-log-stage-label { color:var(--ak-focus); }
 @media(max-width:650px){.ak-log-download{width:100%;justify-content:center;margin-left:0;} }
+
+/* Vue Technique : un vrai journal monospace (horodatage / niveau / origine),
+ * indépendant de la grille conservée intégralement dans Synthèse. */
+.ak-log-file { padding:0; background:var(--ak-surface-2); border-left-color:var(--ak-focus); font-variant-ligatures:none; }
+.ak-log-file-line { display:grid; grid-template-columns:46px minmax(0,1fr); align-items:baseline; border-bottom:1px solid var(--ak-border); gap:9px; padding:6px 12px; font-size:11px; line-height:1.65; }
+.ak-log-file-line:last-child { border-bottom:0; }
+.ak-log-file-line:nth-child(even) { background:var(--ak-surface); }
+.ak-log-file-number { color:var(--ak-muted); text-align:right; border-right:1px solid var(--ak-border); padding-right:9px; user-select:none; font-variant-numeric:tabular-nums; }
+.ak-log-file-line code { white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; font:inherit; color:var(--ak-text); }
+.ak-log-file-line.level-debug code { color:var(--ak-muted); }
+.ak-log-file-line.level-error code { color:var(--ak-danger); }

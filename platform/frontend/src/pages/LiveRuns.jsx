@@ -4,7 +4,7 @@ import { getRemoteProjectDetail, errorText } from '../services/projectWorkflow.j
 import { deploymentsApi } from '../services/deploymentsApi.js'
 import { cleanCustomerLog, phaseOrder, phaseTitles, publicationLabel } from '../services/deploymentPresentation.js'
 import { isPublishing, sortRecentRuns } from '../services/deploymentHistory.js'
-import { technicalTimeline } from '../services/deploymentLogTimeline.js'
+import { technicalTimeline, formatTechnicalFileLine } from '../services/deploymentLogTimeline.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
 
 const PAGE_SIZE = 20
@@ -137,12 +137,17 @@ function RunDetails({ navigate, projectId, runId }) {
         <span>{logMode === 'technical' ? 'Journal enrichi, filtré par projet et sans secrets.' : 'Même chronologie que l’ancien journal technique.'}</span>
         <a className="button-outline ak-log-download" download href={`/api/projects/${projectId}/environments/${projectInfo.environment.id}/deployments/${runId}/logs/download/`}><FileText size={15}/> Télécharger .log</a>
       </div>
-      <div className={`ak-log-console ${logMode==='technical'?'ak-log-console-detailed':''}`} role="log" aria-label={logMode==='technical'?'Journal technique de la publication':'Synthèse de la publication'} aria-live="off">
-        {logLines.length ? logLines.map(row => <div key={row.sequence} className={`ak-log-console-line ${row.isDetail?'ak-log-diagnostic':''}`}>
-          <time>{dateTime(row.created_at)}</time>
-          <span className="ak-log-stage-label">{row.channel ? `${phaseTitles[row.stage_key] || 'Préparation'} · ${row.channel}` : phaseTitles[row.stage_key] || 'Préparation'}</span>
-          <code>{row.display}</code>
-        </div>) : <p className="ak-log-console-empty">{run.status === 'FAILED' ? 'Cette exécution ne possède pas de diagnostic détaillé conservé. Les prochaines publications préserveront une analyse de démarrage.' : 'Aucune information disponible pour cette étape.'}</p>}
+      <div className={`ak-log-console ${logMode==='technical'?'ak-log-console-detailed ak-log-file':''}`} role="log" aria-label={logMode==='technical'?'Journal technique de la publication':'Synthèse de la publication'} aria-live="off">
+        {logLines.length ? logLines.map(row => logMode === 'technical'
+          ? <div key={row.sequence} className={`ak-log-file-line level-${formatTechnicalFileLine(row).severity.toLowerCase()}`}>
+              <span className="ak-log-file-number" aria-hidden="true">{String(row.sequence).padStart(4,'0')}</span>
+              <code>{formatTechnicalFileLine(row).text}</code>
+            </div>
+          : <div key={row.sequence} className={`ak-log-console-line ${row.isDetail?'ak-log-diagnostic':''}`}>
+              <time>{dateTime(row.created_at)}</time>
+              <span className="ak-log-stage-label">{row.channel ? `${phaseTitles[row.stage_key] || 'Préparation'} · ${row.channel}` : phaseTitles[row.stage_key] || 'Préparation'}</span>
+              <code>{row.display}</code>
+            </div>) : <p className="ak-log-console-empty">{run.status === 'FAILED' ? 'Cette exécution ne possède pas de diagnostic détaillé conservé. Les prochaines publications préserveront une analyse de démarrage.' : 'Aucune information disponible pour cette étape.'}</p>}
       </div>
       {more && <button className="button-outline ak-run-loadmore" disabled={busy} onClick={loadMore}>{busy ? <LoaderCircle size={16} className="ak-spin"/> : <ArrowRight size={16}/>} Charger davantage de lignes</button>}
     </section>

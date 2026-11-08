@@ -28,3 +28,15 @@ export function technicalTimeline(messages) {
     return [{...item, stage_key:item.stage_key || current, display}]
   })
 }
+
+/** A real file-style line, constructed only from the server-filtered deployment log. */
+export function formatTechnicalFileLine(entry) {
+  const rawDate = new Date(entry?.created_at || 0)
+  const time = Number.isNaN(rawDate.getTime()) ? '---- -- -- --:--:--' : rawDate.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, 'Z')
+  const origin = entry?.channel || (entry?.isDetail ? 'application' : 'autokom')
+  const severity = /(?:error|failed|échec|refus|operationalerror|traceback|permissionerror|notfounderror)/i.test(entry?.display || '')
+    ? 'ERROR' : entry?.isDetail ? 'DEBUG' : entry?.level === 'TECH' ? 'INFO' : 'INFO'
+  const stage = entry?.stage_key || 'source'
+  const message = String(entry?.display || '').replace(/[\r\n\0-\x08\x0b\x0c\x0e-\x1f]/g, ' ').slice(0, 780)
+  return {text:`${time} [${severity}] [${stage}/${origin}] ${message}`,severity}
+}
