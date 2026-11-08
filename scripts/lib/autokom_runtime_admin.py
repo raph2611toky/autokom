@@ -198,7 +198,10 @@ def jenkins_view_xml(job):
     ET.SubElement(root, 'jobFilters')
     ET.SubElement(root, 'includeRegex').text = '^' + re.escape(job) + '$'
     ET.SubElement(root, 'recurse').text = 'false'
-    return ET.tostring(root, encoding='utf-8', xml_declaration=True)
+    # ASCII XML escapes accented characters as numeric character references.
+    # It remains correct even if a Jenkins servlet decodes config.xml POST
+    # bodies as ISO-8859-1 before parsing the XML.
+    return ET.tostring(root, encoding='us-ascii', xml_declaration=True)
 
 
 def jenkins_view_sync(env, job):
@@ -233,7 +236,11 @@ def pipeline_xml(script):
     ET.SubElement(definition,'script').text=script
     ET.SubElement(definition,'sandbox').text='true'
     ET.SubElement(root,'disabled').text='false'
-    return ET.tostring(root,encoding='utf-8',xml_declaration=True)
+    # Critical: config.xml POST may be decoded by Jenkins as ISO-8859-1
+    # even if the XML declaration says UTF-8. ASCII-only XML with numeric
+    # references preserves the EXACT Groovy Unicode after XML parsing.
+    # Do not strip/normalize non-ASCII characters in the Jenkinsfile.
+    return ET.tostring(root, encoding='us-ascii', xml_declaration=True)
 
 
 
