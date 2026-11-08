@@ -85,16 +85,19 @@ def run(argv, *, timeout=30, input=None, max_output=16000, pass_fds=()):
     return p.stdout[:max_output]
 
 def jenkins_config():
-    url = os.environ.get('AUTOKOM_JENKINS_URL','').rstrip('/')
+    # runtime.env is the protected source of truth, including after a token rotation.
+    # Do not continue using credentials cached in a long-running systemd process.
+    configuration = _runtime_dns_env()
+    url = configuration.get('AUTOKOM_JENKINS_URL','').rstrip('/')
     parts = urlsplit(url)
     if parts.scheme != 'https' and not (parts.scheme=='http' and parts.hostname in ('127.0.0.1','localhost')):
         raise BrokerError('Jenkins doit utiliser HTTPS ou loopback.')
     if not parts.hostname or parts.username or parts.password or parts.query or parts.fragment or parts.path not in ('','/'):
         raise BrokerError('Jenkins non configuré.')
-    job = os.environ.get('AUTOKOM_JENKINS_JOB','autokom-client-deploy')
+    job = configuration.get('AUTOKOM_JENKINS_JOB','autokom-client-deploy')
     if not re.fullmatch(r'[\w.-]{1,100}',job):
         raise BrokerError('Job Jenkins invalide.')
-    user, token = os.environ.get('AUTOKOM_JENKINS_USER',''), os.environ.get('AUTOKOM_JENKINS_API_TOKEN','')
+    user, token = configuration.get('AUTOKOM_JENKINS_USER',''), configuration.get('AUTOKOM_JENKINS_API_TOKEN','')
     if not user or not token:
         raise BrokerError('Identifiants du compte Jenkins de service absents.')
     return url, '/job/' + quote(job,safe=''), user, token
@@ -489,7 +492,7 @@ def _runtime_dns_env():
         return read_env(path)
     except BrokerError:
         raise
-    except (OSError, ValueError, ImportError) as exc:
+    except (OSError, ValueError, ImportError, RuntimeError) as exc:
         raise BrokerError('AUTOKOM_RUNTIME_ENV_INVALID: Configuration runtime illisible.') from exc
 
 
@@ -844,6 +847,17 @@ def handle(action,params):
         try:jenkins_config();configured=True
         except BrokerError:configured=False
         return {'jenkins_configured':configured,'runtime':'docker-local','registry_required':False,'ha_ready':False}
+    if action=='jenkins.identity':
+        # Read-only, authenticated probe for host rotation health checks. Never
+        # return user details, API tokens or Jenkins response bodies to clients.
+        status,_,body=jenkins_http('GET','/whoAmI/api/json')
+        if status!=200:raise BrokerError('Identité du compte de service Jenkins refusée.')
+        try:
+            authenticated=json.loads(body).get('authenticated') is True
+        except (ValueError,AttributeError,TypeError):
+            authenticated=False
+        if not authenticated:raise BrokerError('Compte Jenkins non authentifié.')
+        return {'authenticated':True}
     if action.startswith('jenkins.'):
         return jenkins_action(action,params)
     if action=='runtime.deploy':return _docker_deploy(params)

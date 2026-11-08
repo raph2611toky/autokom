@@ -489,6 +489,10 @@ def main(argv=None):
     bk_group=buildkit.add_mutually_exclusive_group()
     bk_group.add_argument('--check',action='store_true')
     bk_group.add_argument('--apply',action='store_true')
+    rotate=sub.add_parser('jenkins-token', help='Contrôler/renouveler le token API Jenkins de façon sécurisée')
+    rotate_group=rotate.add_mutually_exclusive_group(required=True)
+    rotate_group.add_argument('--check', action='store_true', help='Vérifier les identifiants existants en lecture seule')
+    rotate_group.add_argument('--apply', action='store_true', help='Saisir le token masqué, tester puis recharger le broker')
     agent=sub.add_parser('agent', help='Provisionner automatiquement un agent Jenkins isolé')
     group=agent.add_mutually_exclusive_group()
     group.add_argument('--check',action='store_true')
@@ -520,6 +524,10 @@ def main(argv=None):
         except ControlRecoveryError as exc:
             raise SetupError(str(exc)) from exc
         return 0 if (state.ready or opts.check) else 1
+    if opts.action=='jenkins-token':
+        from autokom_jenkins_token import main as token_main, JenkinsTokenError
+        try: return token_main(apply_mode=opts.apply)
+        except JenkinsTokenError as exc: raise SetupError(str(exc)) from exc
     if opts.action=='doctor':return doctor()
     if opts.action=='buildkit':
         from autokom_buildkit_admin import provision, BuildkitError
