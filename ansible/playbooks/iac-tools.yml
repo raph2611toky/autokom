@@ -1,0 +1,18 @@
+---
+# Installation des binaires IaC, sans creation ni modification de ressources GCP.
+- name: AUTOKOM | Outils Infrastructure as Code
+  hosts: local
+  gather_facts: true
+  become: true
+  pre_tasks:
+    - name: Valider Ubuntu et la selection des outils IaC
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - autokom_iac_component | default('all') in ['all', 'terraform', 'gcloud']
+        fail_msg: "Ubuntu et un choix IaC valide (all, terraform, gcloud) sont requis."
+  roles:
+    - role: terraform_cli
+      when: autokom_iac_component | default('all') in ['all', 'terraform']
+    - role: gcloud_cli
+      when: autokom_iac_component | default('all') in ['all', 'gcloud']

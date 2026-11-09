@@ -1,0 +1,125 @@
+---
+# HashiCorp Terraform : depot APT officiel, sans migration de versions existantes.
+- name: Terraform | Detecter le binaire deja installe
+  ansible.builtin.command:
+    argv: [/usr/bin/env, terraform, version]
+  register: autokom_terraform_present
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Terraform | Afficher le plan ou l'existant
+  ansible.builtin.debug:
+    msg: "{{ 'Déjà installé : aucune modification.' if autokom_terraform_present.rc == 0 else ('Installation du paquet terraform depuis le dépôt officiel prévue.' if ansible_check_mode else 'Installation de Terraform depuis le dépôt officiel.') }}"
+
+- name: Terraform | Détecter les sources APT HashiCorp déjà présentes
+  ansible.builtin.shell: |
+    grep -RlE '^deb .*https://apt[.]releases[.]hashicorp[.]com|^URIs: .*apt[.]releases[.]hashicorp[.]com' \
+      /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true
+  register: autokom_hashicorp_sources
+  changed_when: false
+  check_mode: false
+  when: autokom_terraform_present.rc != 0
+
+- name: Terraform | Refuser les dépôts HashiCorp concurrents
+  ansible.builtin.assert:
+    that:
+      - >-
+        (autokom_hashicorp_sources.stdout_lines | default([])
+         | difference(['/etc/apt/sources.list.d/autokom-hashicorp.list'])) | length == 0
+    fail_msg: "Un autre dépôt HashiCorp existe : vérifier les sources APT avant d'ajouter AUTOKOM (évite un conflit signed-by)."
+  when: autokom_terraform_present.rc != 0
+
+- name: Terraform | Installer les prérequis APT
+  ansible.builtin.apt:
+    name: [ca-certificates, gnupg, python3-apt]
+    state: present
+    install_recommends: false
+    update_cache: false
+  when:
+    - autokom_terraform_present.rc != 0
+    - not ansible_check_mode
+
+- name: Terraform | Créer le répertoire des clés APT
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when:
+    - autokom_terraform_present.rc != 0
+    - not ansible_check_mode
+
+- name: Terraform | Télécharger la clé de signature officielle
+  ansible.builtin.get_url:
+    url: https://apt.releases.hashicorp.com/gpg
+    dest: /etc/apt/keyrings/autokom-hashicorp.asc
+    owner: root
+    group: root
+    mode: '0644'
+    timeout: 30
+  register: autokom_hashicorp_key
+  when:
+    - autokom_terraform_present.rc != 0
+    - not ansible_check_mode
+
+- name: Terraform | Vérifier la présence du trousseau binaire
+  ansible.builtin.stat:
+    path: /usr/share/keyrings/hashicorp-archive-keyring.gpg
+  register: autokom_hashicorp_keyring
+  when:
+    - autokom_terraform_present.rc != 0
+    - not ansible_check_mode
+
+- name: Terraform | Convertir la clé au format GPG
+  ansible.builtin.command:
+    argv:
+      - gpg
+      - --batch
+      - --yes
+      - --dearmor
+      - --output
+      - /usr/share/keyrings/hashicorp-archive-keyring.gpg
+      - /etc/apt/keyrings/autokom-hashicorp.asc
+  when:
+    - autokom_terraform_present.rc != 0
+    - not ansible_check_mode
+    - autokom_hashicorp_key.changed or not autokom_hashicorp_keyring.stat.exists
+
+- name: Terraform | Déterminer l'architecture du paquet Debian
+  ansible.builtin.command:
+    argv: [dpkg, --print-architecture]
+  register: autokom_hashicorp_arch
+  changed_when: false
+  check_mode: false
+  when: autokom_terraform_present.rc != 0
+
+- name: Terraform | Déclarer le dépôt APT signé
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/autokom-hashicorp.list
+    content: "deb [arch={{ autokom_hashicorp_arch.stdout }} signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com {{ ansible_facts['distribution_release'] }} main\n"
+    owner: root
+    group: root
+    mode: '0644'
+  when:
+    - autokom_terraform_present.rc != 0
+    - not ansible_check_mode
+
+- name: Terraform | Installer le paquet avec APT
+  ansible.builtin.apt:
+    name: terraform
+    state: present
+    update_cache: true
+    cache_valid_time: 0
+    install_recommends: false
+  when:
+    - autokom_terraform_present.rc != 0
+    - not ansible_check_mode
+
+- name: Terraform | Vérifier le binaire après installation
+  ansible.builtin.command:
+    argv: [/usr/bin/env, terraform, version]
+  register: autokom_terraform_verified
+  changed_when: false
+  when: not ansible_check_mode

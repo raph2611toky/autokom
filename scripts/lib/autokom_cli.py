@@ -718,6 +718,7 @@ Une phase Jenkins interrompue reste à terminer, même si le paquet est install�
             fp.add_argument('--since',default=None,help='Période journalctl / Docker, ex. « 1 hour ago »')
     subcommand('dns', help='BIND9, Cloudflare et DNS')
     subcommand('runtime', help='Runtime Docker/Jenkins/socket et environnement')
+    subcommand('iac', help='Installer et verifier Terraform et Google Cloud CLI (roles Ansible separes)')
     subcommand('app', help='Service Django AUTOKOM : setup, deploy, backend env, status, logs')
     subcommand('domains', help='Découverte et migration progressive des domaines vers ikom.mg')
     up = subcommand('update', help='Mise à jour privée via code GitHub (fast-forward uniquement)',
@@ -773,6 +774,7 @@ def main(argv=None):
             (cmd=='recover' and '--apply' in arguments) or
             (cmd=='app' and len(arguments)>1 and arguments[1] in ('setup','deploy') and '--check' not in arguments) or
             (cmd=='install' and '--check' not in arguments) or
+            (cmd=='iac' and len(arguments)>1 and arguments[1]=='install' and '--check' not in arguments) or
             (cmd=='logs' and ('--apply' in arguments or (len(arguments)>1 and arguments[1]=='use'))) or
             (cmd in ('tools','services') and arguments[1:3]==['nginx','repair'] and '--apply' in arguments) or
             (cmd in ('tools','services') and len(arguments)>2 and
@@ -784,6 +786,10 @@ def main(argv=None):
         from autokom_dns import main as dns_main, DNSError
         try: return dns_main(arguments[1:])
         except DNSError as exc: raise CLIError(str(exc)) from exc
+    if arguments and arguments[0] == 'iac':
+        from autokom_iac import main as iac_main, IACError
+        try: return iac_main(arguments[1:])
+        except IACError as exc: raise CLIError(str(exc)) from exc
     if arguments and arguments[0] == 'runtime':
         from autokom_runtime_admin import main as runtime_main, SetupError
         try: return runtime_main(arguments[1:])

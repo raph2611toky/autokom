@@ -1,0 +1,117 @@
+---
+# Google Cloud CLI : installation locale du client uniquement, sans gcloud auth login.
+- name: gcloud | Detecter le binaire deja installe
+  ansible.builtin.command:
+    argv: [/usr/bin/env, gcloud, version]
+  register: autokom_gcloud_present
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: gcloud | Afficher le plan ou l'existant
+  ansible.builtin.debug:
+    msg: "{{ 'Déjà installé : aucune modification.' if autokom_gcloud_present.rc == 0 else ('Installation du paquet google-cloud-cli depuis le dépôt officiel prévue.' if ansible_check_mode else 'Installation de Google Cloud CLI depuis le dépôt officiel.') }}"
+
+- name: gcloud | Détecter les sources APT Google Cloud déjà présentes
+  ansible.builtin.shell: |
+    grep -RlE '^deb .*https://packages[.]cloud[.]google[.]com/apt|^URIs: .*packages[.]cloud[.]google[.]com/apt' \
+      /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true
+  register: autokom_gcloud_sources
+  changed_when: false
+  check_mode: false
+  when: autokom_gcloud_present.rc != 0
+
+- name: gcloud | Refuser les dépôts Google Cloud concurrents
+  ansible.builtin.assert:
+    that:
+      - >-
+        (autokom_gcloud_sources.stdout_lines | default([])
+         | difference(['/etc/apt/sources.list.d/autokom-google-cloud-cli.list'])) | length == 0
+    fail_msg: "Un autre dépôt Google Cloud CLI existe : vérifier les sources APT avant d'ajouter AUTOKOM (évite un conflit signed-by)."
+  when: autokom_gcloud_present.rc != 0
+
+- name: gcloud | Installer les prérequis APT
+  ansible.builtin.apt:
+    name: [ca-certificates, gnupg, python3-apt]
+    state: present
+    install_recommends: false
+    update_cache: false
+  when:
+    - autokom_gcloud_present.rc != 0
+    - not ansible_check_mode
+
+- name: gcloud | Créer le répertoire des clés APT
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when:
+    - autokom_gcloud_present.rc != 0
+    - not ansible_check_mode
+
+- name: gcloud | Télécharger la clé de signature Google
+  ansible.builtin.get_url:
+    url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+    dest: /etc/apt/keyrings/autokom-google-cloud.asc
+    owner: root
+    group: root
+    mode: '0644'
+    timeout: 30
+  register: autokom_gcloud_key
+  when:
+    - autokom_gcloud_present.rc != 0
+    - not ansible_check_mode
+
+- name: gcloud | Vérifier la présence du trousseau binaire
+  ansible.builtin.stat:
+    path: /usr/share/keyrings/cloud.google.gpg
+  register: autokom_gcloud_keyring
+  when:
+    - autokom_gcloud_present.rc != 0
+    - not ansible_check_mode
+
+- name: gcloud | Convertir la clé au format GPG
+  ansible.builtin.command:
+    argv:
+      - gpg
+      - --batch
+      - --yes
+      - --dearmor
+      - --output
+      - /usr/share/keyrings/cloud.google.gpg
+      - /etc/apt/keyrings/autokom-google-cloud.asc
+  when:
+    - autokom_gcloud_present.rc != 0
+    - not ansible_check_mode
+    - autokom_gcloud_key.changed or not autokom_gcloud_keyring.stat.exists
+
+- name: gcloud | Déclarer le dépôt APT signé
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/autokom-google-cloud-cli.list
+    content: "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main\n"
+    owner: root
+    group: root
+    mode: '0644'
+  when:
+    - autokom_gcloud_present.rc != 0
+    - not ansible_check_mode
+
+- name: gcloud | Installer le paquet avec APT
+  ansible.builtin.apt:
+    name: google-cloud-cli
+    state: present
+    update_cache: true
+    cache_valid_time: 0
+    install_recommends: false
+  when:
+    - autokom_gcloud_present.rc != 0
+    - not ansible_check_mode
+
+- name: gcloud | Vérifier le binaire après installation
+  ansible.builtin.command:
+    argv: [/usr/bin/env, gcloud, version]
+  register: autokom_gcloud_verified
+  changed_when: false
+  when: not ansible_check_mode
