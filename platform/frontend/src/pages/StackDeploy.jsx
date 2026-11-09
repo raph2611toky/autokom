@@ -4,7 +4,8 @@ import { getRemoteProjectDetail, errorText } from '../services/projectWorkflow.j
 import { gitApi } from '../services/projectsApi.js'
 import { stackApi } from '../services/stackApi.js'
 import { detectSource, frontendProfile, availableFrontendProfiles, BACKEND_PROFILES } from '../services/sourceAnalysis.js'
-import { parseStackEnv, stackEnvPayload, publicEnvName, sensitiveEnvName } from '../services/stackEnv.js'
+import { PRICING_PLANS, formatAr } from '../config/pricing.js'
+import { parseStackEnv, stackEnvPayload, publicEnvName, sensitiveEnvName, existingFrontendStackDefaults } from '../services/stackEnv.js'
 import '../styles/stack-deploy.css'
 
 const INITIAL = { branch:'main', root_directory:'', profile:'', output_directory:'build', healthcheck:'/', rows:[] }
@@ -107,12 +108,13 @@ export default function StackDeploy({navigate,projectId}) {
       .then(async ([detail,stackResponse])=>{
         if (!active) return
         setRecord(detail)
-        const branch = detail.configurations?.[0]?.branch || detail.project.default_branch || 'main'
+        const singleService = existingFrontendStackDefaults(detail)
+        const branch = singleService.branch
         const existing = stackResponse?.stack
         const asForm = (data, fallback) => ({...INITIAL,branch:data?.branch||fallback,root_directory:data?.root_directory||'',
-          profile:data?.profile||'',output_directory:data?.output_directory||'build',rows:(data?.variables||[]).map(x=>({key:x.key,value:x.value,secret:false}))})
-        setFrontend(asForm(existing?.frontend,branch)); setBackend(asForm(existing?.backend,branch))
-        if (existing) setAuto(Boolean(existing.auto_deploy))
+          profile:data?.profile||'',output_directory:data?.output_directory||'build',healthcheck:data?.healthcheck||'/',rows:(data?.variables||[]).map(x=>({key:x.key,value:x.value,secret:false}))})
+        setFrontend(asForm(existing?.frontend || singleService,branch)); setBackend(asForm(existing?.backend,branch))
+        setAuto(existing ? Boolean(existing.auto_deploy) : Boolean(detail.configurations?.find(item => !item.is_draft)?.auto_deploy))
         if (detail.project.github_installation_id && detail.project.repository_external_id) {
           try {
             const result = await gitApi.branches(detail.project.github_installation_id,detail.project.repository_external_id)
@@ -191,13 +193,20 @@ export default function StackDeploy({navigate,projectId}) {
   if (!record)return <section className="ak-workspace-empty" role="alert">{error||'Projet non disponible.'}</section>
   return <div className="ak-stack-page">
     <div className="ak-back-line"><button type="button" className="button-quiet" onClick={()=>navigate(`/projects/${projectId}`)}><ArrowLeft size={16}/> Retour au projet</button></div>
-    <section className="page-hero ak-workspace-hero"><div><h1>Frontend + Backend</h1><p>{record.project.repository_name} · un dépôt, deux branches et deux services isolés.</p></div></section>
+    <section className="page-hero ak-workspace-hero"><div><h1>Modifier la configuration · Frontend + Backend</h1><p>{record.project.repository_name} · dépôt GitHub conservé · une offre, deux services isolés.</p></div></section>
     <div className="ak-stack-progress"><span className={step===0?'active':''}>1 · Configuration</span><span className={step===1?'active':''}>2 · Récapitulatif</span><span className={step===2?'active':''}>3 · Publication</span></div>
     {error && <p className="feedback error" role="alert">{error}</p>}
     {notice && <p className="feedback success" role="status">{notice}</p>}
     {step===0 && <>
       <div className="ak-stack-grid"><ComponentCard kind="frontend" data={frontend} onChange={setFrontend} branches={branches} probe={probe.frontend}/>
       <ComponentCard kind="backend" data={backend} onChange={setBackend} branches={branches} probe={probe.backend}/></div>
+      <section className="ak-stack-component ak-stack-common-hosting" aria-label="Offre d'hébergement commune">
+        <div className="ak-stack-inline"><h2>Offre d’hébergement commune</h2><span className="ak-stack-common-tag"><Layers3 size={14}/> Une seule offre pour deux services</span></div>
+        <div className="ak-stack-plan-list">{PRICING_PLANS.map(plan => <div key={plan.id} className={`ak-stack-plan-card ${plan.id==='free'?'current':'unavailable'}`} aria-label={`${plan.name} : ${plan.id==='free'?'offre actuelle':'non disponible'}`}>
+          <strong>{plan.name}</strong><small>{plan.tagline}</small><span>{formatAr(plan.monthly)} / mois</span><small>{plan.id==='free'?'Offre disponible selon les quotas du projet':'Offre bientôt disponible'}</small>
+        </div>)}</div>
+        <p className="ak-stack-subtle"><Info size={15}/> Les ressources sont réparties entre les deux conteneurs. La validation des quotas appartient au backend AUTOKOM ; aucune seconde offre n’est ajoutée automatiquement.</p>
+      </section>
       <section className="ak-stack-component ak-stack-options"><label><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)}/> Déployer automatiquement après un push sur l'une des deux branches</label><p className="ak-stack-subtle">Le nouveau mode conserve la dernière version saine des deux services jusqu'à la validation du nouveau couple.</p></section>
       <div className="ak-stack-footer"><button type="button" className="button-primary" disabled={!ready} onClick={()=>setStep(1)}>Continuer <ArrowRight size={16}/></button></div>
     </>}
@@ -205,6 +214,7 @@ export default function StackDeploy({navigate,projectId}) {
       <div className="ak-stack-review"><div><strong>Frontend</strong><span>{frontend.branch} · /{normalizeFolder(frontend.root_directory)}</span><span>{configLabel(frontend.profile)}</span><span><Globe size={14}/> https://{frontHost}</span></div>
       <div><strong>Backend</strong><span>{backend.branch} · /{normalizeFolder(backend.root_directory)}</span><span>{configLabel(backend.profile)}</span><span><Globe size={14}/> https://{backendHost}</span></div></div>
       <p className="ak-stack-subtle"><Info size={15}/> Le navigateur peut accéder à l'API par /__autokom_backend/ sur le domaine frontend. Les appels serveur utilisent BACKEND_INTERNAL_URL sur le réseau Docker privé. Les secrets backend ne sont jamais incorporés au build frontend.</p>
+      <p className="ak-stack-subtle"><Layers3 size={15}/> Offre d’hébergement commune : ressources du projet existant, réparties entre frontend et backend.</p>
       <p className="ak-stack-subtle"><AlertTriangle size={15}/> Les deux services partagent les ressources du plan actif. Le runtime refusera de réserver plus que les quotas autorisés.</p>
       <div className="ak-stack-footer"><button type="button" className="button-outline" disabled={busy} onClick={()=>setStep(0)}><ArrowLeft size={15}/> Modifier</button>
         <button type="button" className="button-primary" disabled={busy||!ready} onClick={publish}>{busy?<LoaderCircle size={16} className="ak-spin"/>:<CloudUpload size={16}/>} Enregistrer et déployer</button></div>

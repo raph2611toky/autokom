@@ -294,3 +294,24 @@
   .ak-project-hero-actions { justify-content:flex-start; width:100%; }
   .ak-project-detail-actions { justify-content:flex-start; }
 }
+
+
+/* Les styles de Sites sont chargés après deploy-integrations.css et remettaient
+ * overflow:hidden sur la console. Uniquement Technique est défilable ; la grille
+ * de Synthèse conserve exactement sa présentation existante. */
+.ak-run-detail-sheet .ak-log-console.ak-log-file {
+  display:block;
+  block-size: min(60vh, 540px);
+  max-block-size: 640px;
+  min-block-size: 190px;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ak-border-strong) var(--ak-surface-2);
+}
+.ak-run-detail-sheet .ak-log-console.ak-log-file:focus-visible {
+  outline:2px solid var(--ak-accent);
+  outline-offset:2px;
+}

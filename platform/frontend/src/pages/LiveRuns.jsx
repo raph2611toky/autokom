@@ -137,7 +137,7 @@ function RunDetails({ navigate, projectId, runId }) {
         <span>{logMode === 'technical' ? 'Journal enrichi, filtré par projet et sans secrets.' : 'Même chronologie que l’ancien journal technique.'}</span>
         <a className="button-outline ak-log-download" download href={`/api/projects/${projectId}/environments/${projectInfo.environment.id}/deployments/${runId}/logs/download/`}><FileText size={15}/> Télécharger .log</a>
       </div>
-      <div className={`ak-log-console ${logMode==='technical'?'ak-log-console-detailed ak-log-file':''}`} role="log" aria-label={logMode==='technical'?'Journal technique de la publication':'Synthèse de la publication'} aria-live="off">
+      <div className={`ak-log-console ${logMode==='technical'?'ak-log-console-detailed ak-log-file':''}`} tabIndex={logMode==='technical'?0:undefined} role="log" aria-label={logMode==='technical'?'Journal technique de la publication':'Synthèse de la publication'} aria-live="off">
         {logLines.length ? logLines.map(row => logMode === 'technical'
           ? <div key={row.sequence} className={`ak-log-file-line level-${formatTechnicalFileLine(row).severity.toLowerCase()}`}>
               <span className="ak-log-file-number" aria-hidden="true">{String(row.sequence).padStart(4,'0')}</span>

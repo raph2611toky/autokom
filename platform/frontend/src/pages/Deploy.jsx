@@ -9,6 +9,7 @@ import { getSampleDirectory, getSamplePackage, createPipelinePreview } from '../
 import { storePreview } from '../services/projectWorkspace.js'
 import { API_AVAILABLE } from '../config/runtime.js'
 import { deploymentsApi } from '../services/deploymentsApi.js'
+import { stackApi } from '../services/stackApi.js'
 import { gitApi } from '../services/projectsApi.js'
 import { errorText, saveRemoteProject, prepareRemoteDeployment, getRemoteProjectDetail, remoteProjectToForm, verifiedDeploymentForm } from '../services/projectWorkflow.js'
 import { detectSource, recommendFrontendCommands, frontendProfile, availableFrontendProfiles, supportedFrontend, BACKEND_PROFILES } from '../services/sourceAnalysis.js'
@@ -42,6 +43,16 @@ export default function Deploy({ navigate, editProjectId = '' }) {
   const [editingProjectId, setEditingProjectId] = useState(editProjectId)
   const [editLoading, setEditLoading] = useState(Boolean(editProjectId))
   const [editError, setEditError] = useState('')
+  // Un projet déjà associé à un backend ne doit jamais repasser par
+  // le formulaire monolithique : il se modifie via les deux configurations.
+  useEffect(() => {
+    if (!API_AVAILABLE || !editProjectId) return
+    let active = true
+    stackApi.detail(editProjectId).then(result => {
+      if (active && result?.stack) navigate(`/projects/${editProjectId}/stack`)
+    }).catch(() => { /* L'édition classique reste accessible si aucun stack n'est présent. */ })
+    return () => { active = false }
+  }, [editProjectId])
   const [branches, setBranches] = useState([])
   const [notice, setNotice] = useState(null)
   // Notifications temporaires ; les erreurs permanentes restent dans les formulaires.
@@ -282,7 +293,12 @@ export default function Deploy({ navigate, editProjectId = '' }) {
       <section className="cut-frame main-panel"><div className="cut-body">
         {step===0 && <><div className="panel-heading"><h2>Choisissez votre dépôt</h2></div><GitHubConnector form={form} update={data => {update(data);setAnalysis(null);setServerPreview(null)}} onNotice={setNotice} onConnectionChange={setGithubConnected}/>{form.githubRepositoryId && <label className="field ak-project-name"><span>Nom du projet</span><input value={form.projectName} onChange={e=>update({projectName:e.target.value})} placeholder="Nom de votre application"/></label>}</>}
         {step===1 && <><div className="panel-heading"><h2>Configuration</h2></div>
-          {editingProjectId && <div className="ak-edit-repository" role="group" aria-label="Dépôt GitHub verrouillé"><GitBranch size={19}/><div><span>Dépôt GitHub du projet (non modifiable)</span><strong>{form.repositorySlug}</strong></div></div>}
+          {editingProjectId && <><div className="ak-edit-repository" role="group" aria-label="Dépôt GitHub verrouillé"><GitBranch size={19}/><div><span>Dépôt GitHub du projet (non modifiable)</span><strong>{form.repositorySlug}</strong></div></div>
+          <section className="ak-stack-upgrade" aria-label="Ajouter un service backend">
+            <div className="ak-stack-upgrade-icon"><Layers3 size={21}/></div>
+            <div><strong>Frontend + Backend dans le même projet</strong><p>Ajoutez un backend avec sa propre branche, son dossier source et ses variables. Le frontend conserve sa configuration actuelle ; l'offre d'hébergement reste commune aux deux services.</p></div>
+            <button type="button" className="button-outline" onClick={() => navigate(`/projects/${editingProjectId}/stack`)}><Plus size={16}/> Ajouter un backend</button>
+          </section></>}
           <div className="ak-source-edit">{editingProjectId && <label className="field ak-edit-branch"><span>Branche à déployer</span>{branches.length ? <select aria-label="Branche à déployer" value={form.branch} onChange={e => update({branch:e.target.value})}>{!branches.some(item => item.name === form.branch) && <option value={form.branch}>{form.branch}</option>}{branches.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}</select> : <input aria-label="Branche à déployer" value={form.branch} onChange={e => update({branch:e.target.value})}/>}</label>}<label className="field"><span>Dossier source dans le dépôt</span><input aria-label="Dossier source" aria-invalid={sourceInvalid || (analysisStatus === 'error' && !validGitSourcePath(form.workdir))} className={sourceInvalid ? 'ak-source-invalid' : ''} placeholder="./ ou frontend" value={form.workdir} onChange={e => update({workdir:e.target.value})}/></label><small>Exemples : <code>./</code> ou <code>frontend</code>. Une nouvelle analyse est lancée automatiquement après modification. {editingProjectId ? ' Le dépôt GitHub reste lié au projet.' : ' Vous pouvez modifier la branche depuis l’étape Source GitHub.'}</small></div><div className={`ak-analysis-state state-${analysisStatus}`} role="status">{analysisStatus==='loading'?<LoaderCircle size={19} className="ak-spin"/>:<Info size={19}/>}<div><strong>{analysisStatus==='loading'?'Analyse du dépôt…':analysis ? `${analysis.framework} · ${analysis.runtime}` : API_AVAILABLE ? 'Configuration du dépôt réel' : 'Analyse du projet'}</strong><small>{analysis ? `Source : ${form.workdir} · Détection ${analysis.confidence === 'high' ? 'élevée' : 'indicative'}` : API_AVAILABLE ? (analysisError || 'Analyse GitHub du dossier source sélectionné, sans build préalable.') : analysisError || 'Lecture des fichiers GitHub.'}</small></div></div>
 
           {API_AVAILABLE && analysis?.applicationType === 'static' && analysis?.isVite && !analysis?.hasNpmLockfile && <p className="feedback error" role="alert">Ajoutez package-lock.json à votre dossier source pour activer la compilation reproductible gratuite.</p>}

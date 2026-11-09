@@ -32,3 +32,18 @@ export function stackEnvPayload(rows, kind) {
   }
   return {variables,secrets}
 }
+
+/** Initial values for converting an existing single-service frontend into a two-service project.
+ * The GitHub repository is immutable. Never copy private values into browser state. */
+export function existingFrontendStackDefaults(detail) {
+  const cfg = detail?.configurations?.find(item => !item.is_draft) || detail?.configurations?.[0] || {}
+  return {
+    branch: cfg.branch || detail?.project?.default_branch || 'main',
+    root_directory: cfg.root_directory || '',
+    profile: cfg.settings?.frontend_profile || '',
+    output_directory: cfg.output_directory || 'build',
+    healthcheck: cfg.healthcheck_path || '/',
+    variables: (detail?.variables || []).filter(row => !row.secret_id && publicEnvName(row.key))
+      .map(row => ({ key:row.key, value:row.value || '' })),
+  }
+}

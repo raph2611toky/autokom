@@ -179,3 +179,13 @@
 @media (prefers-reduced-motion: reduce) {
   .ak-source-edit .ak-source-invalid { animation: none; }
 }
+
+
+/* Invitation non destructive : conversion opt-in d'un projet simple en projet à deux services. */
+.ak-stack-upgrade { display:flex;align-items:center;flex-wrap:wrap;gap:13px;padding:18px;margin:12px 0 20px;background:var(--ak-surface-2);border:1px solid var(--ak-border-strong);border-left:3px solid var(--ak-accent); }
+.ak-stack-upgrade-icon {color:var(--ak-accent);flex:0 0 auto;}
+.ak-stack-upgrade > div:nth-child(2) {flex:1 1 230px;min-width:0;}
+.ak-stack-upgrade strong {display:block;color:var(--ak-text);font-size:13px;margin-bottom:6px;}
+.ak-stack-upgrade p {color:var(--ak-muted);font-size:12px;line-height:1.65;margin:0;}
+.ak-stack-upgrade .button-outline {margin-left:auto;white-space:nowrap;}
+@media(max-width:650px) {.ak-stack-upgrade .button-outline {width:100%;justify-content:center;}}
