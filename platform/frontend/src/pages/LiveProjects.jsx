@@ -114,9 +114,8 @@ export default function LiveProjects({ navigate, projectId = null }) {
       <section className="page-hero ak-workspace-hero"><div><h1>{project.name}</h1><p>{project.repository_name} · {cfg?.branch || project.default_branch}</p></div>
         <div className="ak-project-hero-actions">
           <span className={`ak-publication-pill state-${latest.length ? statusTone : 'muted'}`} role="status">{latest.length ? statusText : 'Non publié'}</span>
-          <button type="button" className="button-outline" onClick={() => navigate(`/projects/${project.id}/stack`)}>Frontend + Backend</button>
           <button type="button" className="ak-project-settings-icon" onClick={() => navigate(`/projects/${project.id}/settings`)} title="Paramètres du projet" aria-label="Paramètres du projet"><Settings2 size={18}/></button>
-          {active && !stackEnabled ? <button type="button" className="button-primary" onClick={() => navigate(`/projects/${project.id}/deployments/${active.id}`)}><Clock3 size={17}/> Suivre la publication</button> : <button type="button" className="button-primary" disabled={busy || (!ready && !stackEnabled)} onClick={publishNow}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <Rocket size={17}/>} {busy ? 'Préparation…' : stackEnabled ? 'Publier les 2 services' : 'Déployer maintenant'}</button>}
+          {active && !stackEnabled ? <button type="button" className="button-primary" onClick={() => navigate(`/projects/${project.id}/deployments/${active.id}`)}><Clock3 size={17}/> Suivre la publication</button> : <button type="button" className="button-primary" disabled={busy || (!ready && !stackEnabled)} onClick={publishNow}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <Rocket size={17}/>} {busy ? 'Préparation…' : 'Déployer maintenant'}</button>}
         </div>
       </section>
       {launchError && <p className="feedback error" role="alert">{launchError}</p>}

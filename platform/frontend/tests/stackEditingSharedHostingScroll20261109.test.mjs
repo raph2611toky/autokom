@@ -5,14 +5,18 @@ import {existingFrontendStackDefaults} from '../src/services/stackEnv.js'
 
 const source = path => readFileSync(new URL(`../src/${path}`,import.meta.url),'utf8')
 
-test('modifier une configuration simple propose explicitement Ajouter un backend, sans créer de projet', () => {
+test('l’ajout du service manquant est contextuel, sans bouton global et sans création implicite', () => {
   const edit = source('pages/Deploy.jsx')
-  assert.match(edit, /Ajouter un backend/)
+  assert.match(edit, /companionSuggestion\(/)
+  assert.match(edit, /Ajouter un \{companionKind\}/)
   assert.match(edit, /navigate\(`\/projects\/\$\{editingProjectId\}\/stack`\)/)
+  assert.match(edit, /const saved = await save\(\)/)
   assert.match(edit, /stackApi\.detail\(editProjectId\)/)
   const stack = source('pages/StackDeploy.jsx')
   assert.match(stack, /stackApi\.configure\(projectId,payload\)/)
   assert.doesNotMatch(stack, /projectsApi\.create\(/)
+  assert.doesNotMatch(source('pages/LiveProjects.jsx'), />Frontend \+ Backend<\/button>/)
+  assert.doesNotMatch(source('pages/LiveProjectSettings.jsx'), />Frontend \+ Backend<\/button>/)
 })
 
 test('la configuration du frontend existant est reprise depuis Django et ne copie aucun secret', () => {

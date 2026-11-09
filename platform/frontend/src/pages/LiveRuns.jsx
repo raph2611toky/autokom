@@ -36,6 +36,8 @@ function RunDetails({ navigate, projectId, runId }) {
   const [loading,setLoading] = useState(true)
   const [busy,setBusy] = useState(false)
   const [error,setError] = useState('')
+  const logViewport = useRef(null)
+  const followLogTail = useRef(true)
   const cursor = useRef(0)
   const liveStatus = useRef('')
 
@@ -61,6 +63,13 @@ function RunDetails({ navigate, projectId, runId }) {
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
   }, [projectId,runId,logMode])
+
+  // Open Technique at its newest line; do not force the viewport down if the
+  // user deliberately scrolled up to inspect older messages.
+  useEffect(() => {
+    const viewport = logViewport.current
+    if (logMode === 'technical' && viewport && followLogTail.current) viewport.scrollTop = viewport.scrollHeight
+  }, [logMode, stageFilter, messages, loading])
 
   const refresh = useCallback(async () => {
     if (!projectInfo?.environment?.id) return
@@ -102,7 +111,7 @@ function RunDetails({ navigate, projectId, runId }) {
   const sortedStages = [...(run.stages || [])].sort((a,b) => (a.position || phaseOrder.indexOf(a.stage_key)) - (b.position || phaseOrder.indexOf(b.stage_key)))
   const logLines = technicalTimeline(messages)
     .filter(item => stageFilter === 'all' || item.stage_key === stageFilter)
-  const selectMode = next => { if (next !== logMode) { setStageFilter('all'); setLogMode(next) } }
+  const selectMode = next => { if (next !== logMode) { followLogTail.current = true; setStageFilter('all'); setLogMode(next) } }
   return <>
     <div className="ak-back-line"><button type="button" className="button-quiet" onClick={() => navigate(`/projects/${projectId}`)}><ArrowLeft size={16}/> {projectInfo.project.name}</button></div>
     <section className="page-hero ak-workspace-hero"><div><p className="ak-page-kicker">Détails de publication</p><h1>Publication {String(run.id).slice(0,8)}</h1><p>{dateTime(run.created_at)} · {displayTrigger(run.trigger_type)}</p></div><div className="ak-project-hero-actions">{statusPill(run.status)}<button className="button-outline" type="button" onClick={refresh}><RefreshCw size={16}/> Actualiser</button></div></section>
@@ -137,7 +146,7 @@ function RunDetails({ navigate, projectId, runId }) {
         <span>{logMode === 'technical' ? 'Journal enrichi, filtré par projet et sans secrets.' : 'Même chronologie que l’ancien journal technique.'}</span>
         <a className="button-outline ak-log-download" download href={`/api/projects/${projectId}/environments/${projectInfo.environment.id}/deployments/${runId}/logs/download/`}><FileText size={15}/> Télécharger .log</a>
       </div>
-      <div className={`ak-log-console ${logMode==='technical'?'ak-log-console-detailed ak-log-file':''}`} tabIndex={logMode==='technical'?0:undefined} role="log" aria-label={logMode==='technical'?'Journal technique de la publication':'Synthèse de la publication'} aria-live="off">
+      <div ref={logViewport} onScroll={event => { if (logMode==='technical') { const el=event.currentTarget; followLogTail.current = el.scrollHeight-el.scrollTop-el.clientHeight < 70 } }} className={`ak-log-console ${logMode==='technical'?'ak-log-console-detailed ak-log-file':''}`} tabIndex={logMode==='technical'?0:undefined} role="log" aria-label={logMode==='technical'?'Journal technique de la publication':'Synthèse de la publication'} aria-live="off">
         {logLines.length ? logLines.map(row => logMode === 'technical'
           ? <div key={row.sequence} className={`ak-log-file-line level-${formatTechnicalFileLine(row).severity.toLowerCase()}`}>
               <span className="ak-log-file-number" aria-hidden="true">{String(row.sequence).padStart(4,'0')}</span>

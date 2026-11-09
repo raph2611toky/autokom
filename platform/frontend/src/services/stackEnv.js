@@ -35,6 +35,12 @@ export function stackEnvPayload(rows, kind) {
 
 /** Initial values for converting an existing single-service frontend into a two-service project.
  * The GitHub repository is immutable. Never copy private values into browser state. */
+export function existingServiceKind(detail) {
+  const cfg = detail?.configurations?.find(item => !item.is_draft) || detail?.configurations?.[0] || {}
+  const profile = cfg.settings?.frontend_profile || ''
+  return /^(python_|node_|java_|php_)/.test(profile) || ['PYTHON', 'JAVA', 'PHP'].includes(cfg.runtime_type) || (cfg.runtime_type === 'NODE' && profile !== 'next_server') ? 'backend' : 'frontend'
+}
+
 export function existingFrontendStackDefaults(detail) {
   const cfg = detail?.configurations?.find(item => !item.is_draft) || detail?.configurations?.[0] || {}
   return {
@@ -43,7 +49,7 @@ export function existingFrontendStackDefaults(detail) {
     profile: cfg.settings?.frontend_profile || '',
     output_directory: cfg.output_directory || 'build',
     healthcheck: cfg.healthcheck_path || '/',
-    variables: (detail?.variables || []).filter(row => !row.secret_id && publicEnvName(row.key))
+    variables: (detail?.variables || []).filter(row => !row.secret_id && (existingServiceKind(detail) === 'backend' || publicEnvName(row.key)))
       .map(row => ({ key:row.key, value:row.value || '' })),
   }
 }

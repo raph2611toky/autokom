@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, ArrowRight, GitBranch, FolderGit2, Globe, Info, LoaderCircle, FileUp, Plus, Trash2, Save, CloudUpload, CheckCircle2, AlertTriangle } from 'lucide-react'
+import { ArrowLeft, ArrowRight, GitBranch, FolderGit2, Globe, Info, LoaderCircle, FileUp, Plus, Trash2, Save, CloudUpload, CheckCircle2, AlertTriangle, Layers3 } from 'lucide-react'
 import { getRemoteProjectDetail, errorText } from '../services/projectWorkflow.js'
 import { gitApi } from '../services/projectsApi.js'
 import { stackApi } from '../services/stackApi.js'
 import { detectSource, frontendProfile, availableFrontendProfiles, BACKEND_PROFILES } from '../services/sourceAnalysis.js'
 import { PRICING_PLANS, formatAr } from '../config/pricing.js'
-import { parseStackEnv, stackEnvPayload, publicEnvName, sensitiveEnvName, existingFrontendStackDefaults } from '../services/stackEnv.js'
+import { parseStackEnv, stackEnvPayload, publicEnvName, sensitiveEnvName, existingFrontendStackDefaults, existingServiceKind } from '../services/stackEnv.js'
 import '../styles/stack-deploy.css'
 
 const INITIAL = { branch:'main', root_directory:'', profile:'', output_directory:'build', healthcheck:'/', rows:[] }
@@ -109,11 +109,13 @@ export default function StackDeploy({navigate,projectId}) {
         if (!active) return
         setRecord(detail)
         const singleService = existingFrontendStackDefaults(detail)
+        const primaryKind = existingServiceKind(detail)
         const branch = singleService.branch
         const existing = stackResponse?.stack
         const asForm = (data, fallback) => ({...INITIAL,branch:data?.branch||fallback,root_directory:data?.root_directory||'',
           profile:data?.profile||'',output_directory:data?.output_directory||'build',healthcheck:data?.healthcheck||'/',rows:(data?.variables||[]).map(x=>({key:x.key,value:x.value,secret:false}))})
-        setFrontend(asForm(existing?.frontend || singleService,branch)); setBackend(asForm(existing?.backend,branch))
+        setFrontend(asForm(existing?.frontend || (primaryKind==='frontend' ? singleService : null),branch))
+        setBackend(asForm(existing?.backend || (primaryKind==='backend' ? singleService : null),branch))
         setAuto(existing ? Boolean(existing.auto_deploy) : Boolean(detail.configurations?.find(item => !item.is_draft)?.auto_deploy))
         if (detail.project.github_installation_id && detail.project.repository_external_id) {
           try {
@@ -193,7 +195,7 @@ export default function StackDeploy({navigate,projectId}) {
   if (!record)return <section className="ak-workspace-empty" role="alert">{error||'Projet non disponible.'}</section>
   return <div className="ak-stack-page">
     <div className="ak-back-line"><button type="button" className="button-quiet" onClick={()=>navigate(`/projects/${projectId}`)}><ArrowLeft size={16}/> Retour au projet</button></div>
-    <section className="page-hero ak-workspace-hero"><div><h1>Modifier la configuration · Frontend + Backend</h1><p>{record.project.repository_name} · dépôt GitHub conservé · une offre, deux services isolés.</p></div></section>
+    <section className="page-hero ak-workspace-hero"><div><h1>Configuration des services</h1><p>{record.project.repository_name} · dépôt GitHub conservé · une offre commune.</p></div></section>
     <div className="ak-stack-progress"><span className={step===0?'active':''}>1 · Configuration</span><span className={step===1?'active':''}>2 · Récapitulatif</span><span className={step===2?'active':''}>3 · Publication</span></div>
     {error && <p className="feedback error" role="alert">{error}</p>}
     {notice && <p className="feedback success" role="status">{notice}</p>}

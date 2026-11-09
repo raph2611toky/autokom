@@ -194,6 +194,18 @@ def stack_summary(stack):
     }
 
 
+def _primary_service_is_backend(environment):
+    """Detect the legacy service kind without trusting an incoming browser flag."""
+    previous = (DeploymentConfig.objects.filter(environment=environment, is_draft=False)
+                .order_by('-version').first())
+    if previous is None:
+        return False
+    profile = (previous.settings or {}).get('frontend_profile', '')
+    if profile:
+        return profile in BACKEND_RUNTIMES
+    return previous.runtime_type in ('PYTHON', 'JAVA', 'PHP')
+
+
 def configure_stack(user, project_id, attrs):
     """Atomic DB configuration; no Docker, Nginx or network action inside HTTP."""
     project = get_project(user, project_id, write=True)
@@ -234,6 +246,15 @@ def configure_stack(user, project_id, attrs):
             backend_env = Environment.objects.create(project=project, name='Backend · Production',
                                                      slug='backend-production', kind='PRODUCTION')
             free_entitlement(backend_env)
+            if _primary_service_is_backend(frontend_env):
+                # A backend-only project is becoming a pair. Preserve its
+                # existing encrypted environment secrets and plain variables
+                # in the new backend environment, without ever exposing them
+                # to the newly created frontend. Entire operation is atomic.
+                SecretReference.objects.filter(project=project, environment=frontend_env).update(
+                    environment=backend_env)
+                EnvironmentVariable.objects.filter(environment=frontend_env).update(
+                    environment=backend_env)
             stack = ServiceStack.objects.create(project=project, frontend_environment=frontend_env,
                                                 backend_environment=backend_env)
         frontend_cfg = _component_config(frontend_env, user, attrs['frontend'], 'frontend')
