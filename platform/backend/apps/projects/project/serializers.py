@@ -15,7 +15,7 @@ class ProjectSerializer(serializers.ModelSerializer):
     def get_public_site(self, project):
         # No guessed URLs: a publicly usable link requires verified HTTPS activation.
         from apps.deployments.domains.models import Domain
-        qs = Domain.objects.filter(environment__project=project, environment__kind='PRODUCTION', is_disabled=False).order_by('-is_primary', 'created_at')
+        qs = Domain.objects.filter(environment__project=project, environment__kind='PRODUCTION', environment__slug='production', is_disabled=False).order_by('-is_primary', 'created_at')
         selected = qs.filter(status=Domain.Status.ACTIVE, tls_status='ACTIVE',
             environment__hosted_application__observed_state='RUNNING').first()
         planned = selected or qs.first()

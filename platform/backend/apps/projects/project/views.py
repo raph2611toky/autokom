@@ -162,7 +162,9 @@ class ProjectDeleteAPIView(APIView):
             if request.data.get('confirm_name') != project.name:
                 raise ValidationError({'confirm_name':'Saisissez le nom exact du projet pour confirmer.'})
             environments=list(project.environments.all())
-            if DeploymentRun.objects.filter(environment__in=environments,status__in=['QUEUED','RUNNING']).exists():
+            from apps.deployments.runs.models import StackDeployment
+            if (DeploymentRun.objects.filter(environment__in=environments,status__in=['QUEUED','RUNNING','PREPARED']).exists() or
+                StackDeployment.objects.filter(stack__project=project, status__in=['QUEUED','PREPARING','ACTIVATING','BLOCKED']).exists()):
                 raise ValidationError({'project':'Publication en cours : attendre sa fin avant la suppression.'})
             for env in environments:
                 request_control('runtime.deprovision', {

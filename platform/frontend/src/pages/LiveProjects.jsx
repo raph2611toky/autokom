@@ -7,6 +7,7 @@ import { publicationLabel } from '../services/deploymentPresentation.js'
 import { publicSiteUrl } from '../services/sitePresentation.js'
 import { sortRecentRuns, isPublishing, canPublish } from '../services/deploymentHistory.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
+import { stackApi } from '../services/stackApi.js'
 
 function formatDate(value) {
   if (!value) return 'Non renseignée'
@@ -18,6 +19,7 @@ function formatDate(value) {
 export default function LiveProjects({ navigate, projectId = null }) {
   const [projects, setProjects] = useState([])
   const [detail, setDetail] = useState(null)
+  const [stackEnabled, setStackEnabled] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
@@ -29,11 +31,11 @@ export default function LiveProjects({ navigate, projectId = null }) {
 
   useEffect(() => {
     let alive = true
-    setLoading(true); setError(''); setLaunchError(''); setDetail(null)
-    const request = projectId ? getRemoteProjectDetail(projectId) : listRemoteProjectRecords()
+    setLoading(true); setError(''); setLaunchError(''); setDetail(null); setStackEnabled(false)
+    const request = projectId ? Promise.all([getRemoteProjectDetail(projectId), stackApi.detail(projectId).catch(() => ({stack:null}))]) : listRemoteProjectRecords()
     request.then(result => {
       if (!alive) return
-      if (projectId) setDetail(result)
+      if (projectId) { setDetail(result[0]); setStackEnabled(Boolean(result[1]?.stack)) }
       else setProjects(result)
     }).catch(err => { if (alive) setError(errorText(err)) })
       .finally(() => { if (alive) setLoading(false) })
@@ -75,7 +77,9 @@ export default function LiveProjects({ navigate, projectId = null }) {
   }
 
   async function publishNow() {
-    if (launchLock.current || busy || !detail || !canPublish(detail)) return
+    if (launchLock.current || busy || !detail) return
+    if (stackEnabled) { navigate(`/projects/${detail.project.id}/stack`); return }
+    if (!canPublish(detail)) return
     launchLock.current = true
     setBusy(true); setLaunchError('')
     try {
@@ -110,8 +114,9 @@ export default function LiveProjects({ navigate, projectId = null }) {
       <section className="page-hero ak-workspace-hero"><div><h1>{project.name}</h1><p>{project.repository_name} · {cfg?.branch || project.default_branch}</p></div>
         <div className="ak-project-hero-actions">
           <span className={`ak-publication-pill state-${latest.length ? statusTone : 'muted'}`} role="status">{latest.length ? statusText : 'Non publié'}</span>
+          <button type="button" className="button-outline" onClick={() => navigate(`/projects/${project.id}/stack`)}>Frontend + Backend</button>
           <button type="button" className="ak-project-settings-icon" onClick={() => navigate(`/projects/${project.id}/settings`)} title="Paramètres du projet" aria-label="Paramètres du projet"><Settings2 size={18}/></button>
-          {active ? <button type="button" className="button-primary" onClick={() => navigate(`/projects/${project.id}/deployments/${active.id}`)}><Clock3 size={17}/> Suivre la publication</button> : <button type="button" className="button-primary" disabled={busy || !ready} onClick={publishNow}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <Rocket size={17}/>} {busy ? 'Préparation…' : 'Déployer maintenant'}</button>}
+          {active && !stackEnabled ? <button type="button" className="button-primary" onClick={() => navigate(`/projects/${project.id}/deployments/${active.id}`)}><Clock3 size={17}/> Suivre la publication</button> : <button type="button" className="button-primary" disabled={busy || (!ready && !stackEnabled)} onClick={publishNow}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <Rocket size={17}/>} {busy ? 'Préparation…' : stackEnabled ? 'Publier les 2 services' : 'Déployer maintenant'}</button>}
         </div>
       </section>
       {launchError && <p className="feedback error" role="alert">{launchError}</p>}

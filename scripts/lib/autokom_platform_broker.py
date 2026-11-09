@@ -324,7 +324,29 @@ def _docker_deploy_inner(params):
     finally:
         os.close(fd)
     run(['docker','image','inspect',tag,'--format','{{.Id}}'])
-    network='autokom-'+environment.replace('-','')[:20]
+    stack_project = params.get('stack_project_id')
+    stack_role = params.get('stack_role')
+    if stack_project is not None:
+        stack_project = valid_id(stack_project)
+        if stack_role not in ('frontend', 'backend'):
+            raise BrokerError('AUTOKOM_STACK_ROLE_INVALID')
+        network = 'autokom-stack-' + stack_project.replace('-', '')[:20]
+    else:
+        if stack_role is not None or params.get('stack_backend_environment_id') is not None:
+            raise BrokerError('AUTOKOM_STACK_PROJECT_MISSING')
+        network = 'autokom-' + environment.replace('-', '')[:20]
+    gateway_port = None
+    backend_alias = None
+    if stack_role == 'frontend':
+        backend_environment = valid_id(params.get('stack_backend_environment_id'))
+        back_state = _load_state(backend_environment)
+        if (not back_state or back_state.get('stack_project_id') != stack_project or
+                back_state.get('stack_role') != 'backend'):
+            raise BrokerError('AUTOKOM_STACK_BACKEND_NOT_READY')
+        if not ingress.probe_relay(back_state['name'], back_state['port']):
+            raise BrokerError('AUTOKOM_STACK_BACKEND_RELAY_UNAVAILABLE')
+        gateway_port = back_state['port']
+        backend_alias = 'backend-' + back_state['run_id'].replace('-', '')[:20]
     inspect=subprocess.run(['docker','network','inspect',network],capture_output=True,text=True,timeout=10)
     if inspect.returncode:
         run(['docker','network','create','--internal','--driver','bridge',network],timeout=30)
@@ -336,9 +358,18 @@ def _docker_deploy_inner(params):
         except (ValueError,TypeError,KeyError) as exc:
             raise BrokerError('Réseau Docker existant non vérifiable.') from exc
     variables=_safe_env(params.get('variables') or {})
+    if backend_alias:
+        if 'BACKEND_INTERNAL_URL' in variables:
+            raise BrokerError('AUTOKOM_STACK_RESERVED_VARIABLE')
+        variables['BACKEND_INTERNAL_URL'] = 'http://' + backend_alias + ':8080'
     envfile=_env_file(environment,rid,variables)
     # Customer processes run as UID 10001, without extra capabilities, mounts or Docker socket.
-    argv=['docker','run','-d','--name',name,'--network',network,
+    argv=['docker','run','-d','--name',name,'--network',network]
+    if stack_role == 'backend':
+        # Immutable alias: the previous backend may remain connected until
+        # the two-service cutover is committed. Never use a shared 'backend' alias.
+        argv.extend(['--network-alias', 'backend-' + rid.replace('-', '')[:20]])
+    argv += [
           '--cpus',str(cpu/1000),'--memory',f'{mem}m','--memory-swap',f'{mem}m',
           '--pids-limit','128','--cap-drop','ALL','--security-opt','no-new-privileges',
           '--read-only','--tmpfs',f'/tmp:rw,noexec,nosuid,size={min(storage,256)}m',
@@ -367,6 +398,11 @@ def _docker_deploy_inner(params):
         else:raise BrokerError('AUTOKOM_CONTAINER_HEALTHCHECK_FAILED: Application non disponible sur son port interne. Ancienne version conservée.')
         previous=_load_state(environment)
         doc={'environment_id':environment,'run_id':rid,'port':external_port,'name':name,'network':network,'healthcheck':health,**relay}
+        if stack_project:
+            doc['stack_project_id'] = stack_project
+            doc['stack_role'] = stack_role
+            if gateway_port:
+                doc['gateway_port'] = gateway_port
         # Persist previous BEFORE current so a failed snapshot cannot corrupt the active state.
         prior_path=STATE/environment/'previous.json'
         if previous:
@@ -420,7 +456,7 @@ def _rollback(params):
                 raise BrokerError('AUTOKOM_ROLLBACK_VHOST_INVALID: Vhost modifié hors AUTOKOM.')
             with tempfile.NamedTemporaryFile('w', dir=PROXY, delete=False,
                                              prefix='.autokom-rollback-', encoding='utf-8') as fd:
-                fd.write(_nginx_config(host, previous['port'], tls=True))
+                fd.write(_nginx_config(host, previous['port'], tls=True, gateway_port=previous.get('gateway_port')))
                 tmp = Path(fd.name)
             try:
                 os.chmod(tmp, 0o644)
@@ -477,6 +513,34 @@ def _commit(params):
                 ingress.remove(old_name, execute=run, available=PROXY, enabled=ENABLED)
         previous_path.unlink(missing_ok=True)
     return {'committed':True}
+
+
+def _commit_pair(params):
+    items = params.get('services')
+    if not isinstance(items, list) or len(items) != 2:
+        raise BrokerError('AUTOKOM_STACK_COMMIT_INVALID')
+    checked = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise BrokerError('AUTOKOM_STACK_COMMIT_INVALID')
+        env, rid = valid_id(item.get('environment_id')), valid_id(item.get('run_id'))
+        state = _load_state(env)
+        if not state or state.get('run_id') != rid:
+            raise BrokerError('AUTOKOM_STACK_STATE_MISMATCH')
+        checked.append((env, rid))
+    if len({env for env, _ in checked}) != 2:
+        raise BrokerError('AUTOKOM_STACK_DUPLICATE_ENVIRONMENT')
+    # The previously running containers are removed only after BOTH new
+    # releases have passed internal health and public TLS checks.
+    results = []
+    for env, rid in checked:
+        try:
+            results.append(_commit({'environment_id': env, 'run_id': rid}))
+        except Exception as exc:
+            # Never perform an automatic rollback after one commit: the old
+            # container may have been deleted. Leave an explicit reconciliation.
+            raise BrokerError('AUTOKOM_STACK_COMMIT_RECONCILE_REQUIRED') from exc
+    return {'committed': True, 'services': len(results)}
 
 
 def _dig(record,hostname):
@@ -653,9 +717,26 @@ def _cloudflare_record(host):
     cloudflare(req)
     return {'created':True}
 
-def _nginx_config(host,port,tls=False):
+def _nginx_config(host,port,tls=False,*,gateway_port=None):
     if type(port)!=int or not 1024<=port<=65535:raise BrokerError('Port upstream invalide.')
     safe_host=valid_hostname(host)
+    extra = ''
+    if gateway_port is not None:
+        if type(gateway_port) is not int or not 1024 <= gateway_port <= 65535:
+            raise BrokerError('AUTOKOM_STACK_GATEWAY_INVALID')
+        # Nginx can reach the backend's strictly loopback-only trusted relay;
+        # no cross-origin browser request or Docker published port is needed.
+        extra = (
+            '    location = /__autokom_backend { return 308 /__autokom_backend/; }\n'
+            '    location ^~ /__autokom_backend/ {\n'
+            f'        proxy_pass http://127.0.0.1:{gateway_port}/;\n'
+            f'        proxy_set_header Host backend.{safe_host};\n'
+            '        proxy_set_header X-Real-IP $remote_addr;\n'
+            '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n'
+            '        proxy_set_header X-Forwarded-Proto https;\n'
+            '        proxy_connect_timeout 5s;\n'
+            '        proxy_read_timeout 60s;\n    }\n'
+        )
     if tls:
         cert='/etc/letsencrypt/live/'+safe_host
         return (f'server {{\n    listen 80;\n    server_name {safe_host};\n'
@@ -665,8 +746,7 @@ def _nginx_config(host,port,tls=False):
             f'    ssl_certificate {cert}/fullchain.pem;\n'
             f'    ssl_certificate_key {cert}/privkey.pem;\n'
             '    ssl_protocols TLSv1.2 TLSv1.3;\n'
-            '    client_max_body_size 16m;\n'
-            f'    location / {{\n        proxy_pass http://127.0.0.1:{port};\n'
+            '    client_max_body_size 16m;\n' + extra + f'    location / {{\n        proxy_pass http://127.0.0.1:{port};\n'
             '        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n'
             '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n'
             '        proxy_set_header X-Forwarded-Proto https;\n'
@@ -1032,14 +1112,14 @@ def _proxy_apply(host, environment, *, managed=False):
                 _prepare_public_acme_webroot()
                 phase = 'nginx_http'
                 logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started host=%s', phase, host)
-                publish(_nginx_config(host, state['port'], tls=False))
+                publish(_nginx_config(host, state['port'], tls=False, gateway_port=state.get('gateway_port')))
                 _preflight_public_acme_challenge(host)
             phase = 'certificate'
             logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started host=%s', phase, host)
             _issue_customer_certificate(host, managed=managed)
         phase = 'nginx_https'
         logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started host=%s', phase, host)
-        publish(_nginx_config(host, state['port'], tls=True))
+        publish(_nginx_config(host, state['port'], tls=True, gateway_port=state.get('gateway_port')))
         phase = 'https_verify'
         try:
             _verify_customer_https(host, state.get('healthcheck', '/'))
@@ -1238,6 +1318,7 @@ def handle(action,params):
     if action=='runtime.deploy':return _docker_deploy(params)
     if action=='runtime.rollback':return _runtime_lock_call(_rollback,params)
     if action=='runtime.commit':return _runtime_lock_call(_commit,params)
+    if action=='runtime.commit_pair':return _runtime_lock_call(_commit_pair,params)
     if action=='runtime.deprovision':return _runtime_lock_call(_deprovision_environment,params)
     if action=='runtime.status':
         env=valid_id(params.get('environment_id'))

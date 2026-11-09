@@ -7,6 +7,7 @@ class DeploymentRun(models.Model):
     class Status(models.TextChoices):
         QUEUED = 'QUEUED', 'En attente'
         RUNNING = 'RUNNING', 'En cours'
+        PREPARED = 'PREPARED', 'Candidat privé prêt'
         SUCCEEDED = 'SUCCEEDED', 'Réussi'
         FAILED = 'FAILED', 'Échec'
         CANCELLED = 'CANCELLED', 'Annulé'
@@ -120,3 +121,35 @@ class DeploymentLogEntry(models.Model):
         db_table = 'deployments_logentry'
         ordering = ['sequence']
         constraints = [models.UniqueConstraint(fields=['deployment', 'sequence'], name='unique_deploy_log_sequence')]
+
+
+class StackDeployment(models.Model):
+    """One user-visible publication, two pinned commits, two safe candidates."""
+    class Status(models.TextChoices):
+        QUEUED = 'QUEUED', 'En attente'
+        PREPARING = 'PREPARING', 'Construction'
+        ACTIVATING = 'ACTIVATING', 'Activation HTTPS'
+        SUCCEEDED = 'SUCCEEDED', 'En ligne'
+        FAILED = 'FAILED', 'Échec'
+        BLOCKED = 'BLOCKED', 'À réconcilier'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    stack = models.ForeignKey('configurations.ServiceStack', on_delete=models.PROTECT,
+                              related_name='deployments')
+    backend_run = models.OneToOneField('deployments.DeploymentRun', on_delete=models.PROTECT,
+                                       related_name='backend_stack_execution')
+    frontend_run = models.OneToOneField('deployments.DeploymentRun', on_delete=models.PROTECT,
+                                        null=True, blank=True, related_name='frontend_stack_execution')
+    frontend_configuration = models.ForeignKey('configurations.DeploymentConfig', on_delete=models.PROTECT,
+                                                related_name='stack_frontend_deployments')
+    frontend_sha = models.CharField(max_length=40)
+    frontend_resources = models.JSONField(default=dict)
+    idempotency_key = models.CharField(max_length=150, unique=True)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.QUEUED)
+    error_code = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'deployments_stackdeployment'
+        indexes = [models.Index(fields=['stack', 'created_at'])]

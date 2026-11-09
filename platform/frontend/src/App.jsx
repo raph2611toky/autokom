@@ -8,6 +8,7 @@ import ForgotPassword from './pages/ForgotPassword.jsx'
 import ResetPassword from './pages/ResetPassword.jsx'
 import GitHubAuthCallback from './pages/GitHubAuthCallback.jsx'
 import Deploy from './pages/Deploy.jsx'
+import StackDeploy from './pages/StackDeploy.jsx'
 import Sites from './pages/Sites.jsx'
 import Projects from './pages/Projects.jsx'
 import LiveRuns from './pages/LiveRuns.jsx'
@@ -19,7 +20,7 @@ import { useAuth } from './context/AuthContext.jsx'
 const ROUTES = ['/', '/login', '/register', '/dashboard', '/deploy', '/sites', '/projects', '/pricing', '/verify-email', '/forgot-password', '/reset-password', '/integrations/github', '/auth/github/callback']
 
 function validRoute(path) {
-  return ROUTES.includes(path) || /^\/(?:sites|projects)\/[^/]+$/.test(path) || /^\/projects\/[^/]+\/(?:settings|configure|history|deployments\/[^/]+)$/.test(path)
+  return ROUTES.includes(path) || /^\/(?:sites|projects)\/[^/]+$/.test(path) || /^\/projects\/[^/]+\/(?:settings|configure|stack|history|deployments\/[^/]+)$/.test(path)
 }
 
 function projectFromPath(path) {
@@ -89,6 +90,10 @@ export default function App() {
 
   if (API_AVAILABLE && /^\/(?:dashboard|deploy|projects|sites)(?:\/|$)/.test(route) && status !== 'authenticated') {
     return <div className="app-shell"><main className="container workspace" role="status">Vérification de votre session…</main></div>
+  }
+
+  if (API_AVAILABLE && /^\/projects\/[^/]+\/stack$/.test(route)) {
+    return <div className="app-shell"><Header route="/projects" {...commonProps}/><main className="container workspace" id="main-content"><StackDeploy navigate={navigate} projectId={projectFromPath(route)}/></main><footer className="container footer">AUTOKOM · Déploiement et gestion des applications</footer></div>
   }
 
   if (API_AVAILABLE && /^\/projects\/[^/]+\/configure$/.test(route)) {

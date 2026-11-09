@@ -13,6 +13,7 @@ from apps.deployments.runs.console_stream import consume_diagnostic_chunk
 logger = logging.getLogger('autokom.deployments')
 _NEXT_GITHUB_HEAD_CHECK = 0.0
 _GITHUB_HEAD_CHECK_OFFSET = 0
+_STACK_HEAD_CHECK_OFFSET = 0
 SECRETS = re.compile(r'(?i)((?:authorization\s*:\s*bearer|password|token|secret|api[_-]?key)\s*[=:]\s*)(\S+)')
 BEARER = re.compile(r'(?i)\b(?:gh[us]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xsmtpsib-[^\s]+)\b')
 
@@ -271,17 +272,26 @@ def poll_one(client, run_id):
             try:
                 add_log(run, 'AUTOKOM_TECH:release:Publication contrôlée démarrée (Docker, DNS et HTTPS).', level='TECH')
                 add_customer_trace(run, 'release', 'broker', 'Début de transaction de publication : image locale, conteneur isolé, relais HTTP privé.')
-                _release_docker_and_proxy(run)
-                add_log(run, 'AUTOKOM_TECH:release:Runtime et domaine vérifiés ; validation de la version active.', level='TECH')
-                add_customer_trace(run, 'health', 'broker', 'Contrôles terminés : runtime interne et domaine HTTPS validés avant activation définitive.')
+                from apps.deployments.runs.stack_worker import stack_execution_for_run
+                stack_execution, stack_role = stack_execution_for_run(run.pk)
+                _release_docker_and_proxy(run, stack=stack_execution, stack_role=stack_role)
+                if stack_execution:
+                    # The image and its private healthcheck are ready. Never expose
+                    # either domain until BOTH services have reached PREPARED.
+                    status = DeploymentRun.Status.PREPARED
+                    add_log(run, 'AUTOKOM_TECH:release:Service prêt sur réseau privé ; activation groupée en attente.', level='TECH')
+                else:
+                    add_log(run, 'AUTOKOM_TECH:release:Runtime et domaine vérifiés ; validation de la version active.', level='TECH')
+                    add_customer_trace(run, 'health', 'broker', 'Contrôles terminés : runtime interne et domaine HTTPS validés avant activation définitive.')
                 # The broker may still roll back at this point. Do NOT publish
                 # the release as ACTIVE in MySQL before this commit succeeds.
-                request_control('runtime.commit', {
-                    'run_id': str(run.pk),
-                    'environment_id': str(run.environment_id),
-                }, timeout=25)
-                add_log(run, 'AUTOKOM_TECH:release:Publication et validation du runtime terminées.', level='TECH')
-                add_customer_trace(run, 'release', 'broker', 'Validation finale enregistrée ; cette version peut devenir la publication active.')
+                if not stack_execution:
+                    request_control('runtime.commit', {
+                        'run_id': str(run.pk),
+                        'environment_id': str(run.environment_id),
+                    }, timeout=25)
+                    add_log(run, 'AUTOKOM_TECH:release:Publication et validation du runtime terminées.', level='TECH')
+                    add_customer_trace(run, 'release', 'broker', 'Validation finale enregistrée ; cette version peut devenir la publication active.')
             except Exception as exc:
                 code=getattr(exc, 'safe_code', None)
                 safe_code = code if isinstance(code,str) and re.fullmatch(r'AUTOKOM_[A-Z0-9_]{3,80}',code) else 'AUTOKOM_PUBLISH_FAILED'
@@ -335,7 +345,8 @@ def poll_one(client, run_id):
                 try:
                     # After runtime.commit, the broker can have deleted the old
                     # container. Never attempt a blind rollback on DB failure.
-                    register_release(run)
+                    if not stack_execution:
+                        register_release(run)
                 except Exception as exc:
                     logger.error('Réconciliation release MySQL requise pour %s (%s)',
                                  run.pk, type(exc).__name__)
@@ -360,7 +371,7 @@ def poll_one(client, run_id):
         return False
 
 
-def _release_docker_and_proxy(run):
+def _release_docker_and_proxy(run, *, stack=None, stack_role=None):
     """Runs only in background worker; every host operation goes through the socket."""
     from apps.deployments.runs.autokom_socket import request_control
     from apps.deployments.runs.runner_manifest import fetch_runner_manifest
@@ -376,7 +387,14 @@ def _release_docker_and_proxy(run):
     add_customer_trace(run, 'release', 'broker', f'Ressources retenues : CPU={int(resource["cpu_millicores"])}m, RAM={int(resource["memory_mb"])} MiB, stockage temporaire={int(resource["storage_mb"])} MiB.')
     add_customer_trace(run, 'release', 'docker', f'Publication sur port privé {int(cfg["port"])} ; 1 conteneur isolé, sans exposition TCP directe.')
     add_customer_trace(run, 'release', 'broker', 'Le conteneur doit répondre au contrôle HTTP interne avant l’activation du domaine.')
+    stack_options = {}
+    if stack:
+        stack_options = {'stack_project_id': str(stack.stack.project_id),
+                         'stack_role': stack_role}
+        if stack_role == 'frontend':
+            stack_options['stack_backend_environment_id'] = str(stack.stack.backend_environment_id)
     result=request_control('runtime.deploy',{
+        **stack_options,
         'run_id':str(run.pk),'environment_id':str(run.environment_id),
         'cpu_millicores':int(resource['cpu_millicores']),
         'memory_mb':int(resource['memory_mb']),'storage_mb':int(resource['storage_mb']),
@@ -388,6 +406,10 @@ def _release_docker_and_proxy(run):
     # The container is a candidate, not a committed public release yet.
     # Do not show 'Publication: Terminé' until TLS and the public site pass.
     PipelineStageRun.objects.filter(deployment=run,stage_key='health').update(status='RUNNING',started_at=timezone.now())
+    if stack:
+        add_customer_trace(run, 'release', 'docker',
+                           'Candidat validé en privé ; le basculement HTTPS attend le second service.')
+        return
     # Managed subdomains are activated automatically after the first healthy Docker build.
     # Failure aborts the release so that SUCCEEDED never means an inaccessible public site.
     # Reconcile old projects created with only a custom domain.
@@ -438,7 +460,9 @@ def register_release(run):
 def run_tick():
     from datetime import timedelta
     from apps.deployments.runs.push_reconcile import reconcile_received_pushes, reconcile_branch_heads
-    global _NEXT_GITHUB_HEAD_CHECK, _GITHUB_HEAD_CHECK_OFFSET
+    from apps.deployments.runs.stack_worker import reconcile_stack_deployments, reconcile_stack_pushes, reconcile_stack_heads
+    reconcile_stack_deployments(limit=4)
+    global _NEXT_GITHUB_HEAD_CHECK, _GITHUB_HEAD_CHECK_OFFSET, _STACK_HEAD_CHECK_OFFSET
     # Retry HMAC-verified events on each tick (database only).
     reconcile_received_pushes(limit=12)
     # The remote GitHub API can be slow. Never block polling or dispatch of an
@@ -446,11 +470,15 @@ def run_tick():
     # a small batch during idle periods; runs are still validated/queued with
     # the ordinary AUTOKOM entitlement and source authorization rules.
     busy = DeploymentRun.objects.filter(status__in=['QUEUED', 'RUNNING']).exists()
+    if not busy:
+        reconcile_stack_pushes(limit=3)
     if not busy and time.monotonic() >= _NEXT_GITHUB_HEAD_CHECK:
         _NEXT_GITHUB_HEAD_CHECK = time.monotonic() + 90
         try:
             head_status = reconcile_branch_heads(offset=_GITHUB_HEAD_CHECK_OFFSET, limit=3)
             _GITHUB_HEAD_CHECK_OFFSET = head_status['next_offset']
+            stack_status = reconcile_stack_heads(offset=_STACK_HEAD_CHECK_OFFSET, limit=2)
+            _STACK_HEAD_CHECK_OFFSET = stack_status['next_offset']
         except Exception as exc:
             logger.warning('GitHub HEAD reconciliation unavailable (%s); retry scheduled.', type(exc).__name__)
     # A network failure after POST may have left an unknown Jenkins queue ID.
@@ -474,4 +502,5 @@ def run_tick():
     polled = False
     for run_id in DeploymentRun.objects.filter(status='RUNNING').exclude(external_run_id='').order_by('created_at').values_list('pk', flat=True)[:20]:
         polled = poll_one(client, run_id) or polled
+    reconcile_stack_deployments(limit=4)
     return bool(dispatched or polled)

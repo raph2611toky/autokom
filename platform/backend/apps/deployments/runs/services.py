@@ -119,6 +119,11 @@ def _create_run(env, cfg, resources, *, actor, trigger, sha, idem, event=None):
 
 def queue_manual(user, project_id, environment_id, *, idempotency_key=None):
     _, env = get_environment(user, project_id, environment_id, write=True)
+    # Never publish only one member of a paired stack: its private alias and
+    # public Nginx gateway refer to a consistent frontend/backend release.
+    from apps.projects.configurations.models import ServiceStack
+    if ServiceStack.objects.filter(frontend_environment=env).exists() or ServiceStack.objects.filter(backend_environment=env).exists():
+        raise DeploymentConflict('Ce projet a deux services. Utilisez sa publication groupée.')
     if idempotency_key and not IDEMPOTENCY_RE.fullmatch(idempotency_key):
         raise ValidationError({'idempotency_key': 'Entre 12 et 128 caractères alphanumériques/._:-.'})
     idem = f'manual:{env.id}:{user.id}:{idempotency_key or secrets.token_urlsafe(24)}'
@@ -199,6 +204,16 @@ def queue_verified_push(event):
             cfg = DeploymentConfig.objects.filter(environment=env, is_draft=False).order_by('-version').first()
             if not cfg:
                 last_skip_reason = 'NO_FINALIZED_CONFIGURATION'
+                continue
+            # A two-service project uses a coordinated stack transaction. Do
+            # not enqueue its frontend/backend as independent public releases.
+            from apps.projects.configurations.models import ServiceStack
+            stack = ServiceStack.objects.filter(project=project, auto_deploy=True).first()
+            if stack and env.pk in (stack.frontend_environment_id, stack.backend_environment_id):
+                if cfg.branch == event.branch:
+                    eligible += 1
+                    deferred = True
+                    last_skip_reason = 'STACK_AWAITING_RECONCILIATION'
                 continue
             if not cfg.auto_deploy:
                 last_skip_reason = 'AUTO_DEPLOY_DISABLED'

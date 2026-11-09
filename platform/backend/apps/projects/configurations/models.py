@@ -49,3 +49,22 @@ class DeploymentConfig(models.Model):
     class Meta:
         db_table = 'configurations_deploymentconfig'
         constraints = [models.UniqueConstraint(fields=['environment', 'version'], name='unique_deployment_config_version')]
+
+
+class ServiceStack(models.Model):
+    """Opt-in frontend+backend deployment using the existing isolated environments.
+
+    Legacy one-service projects have no ServiceStack and are not affected.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.OneToOneField('projects.Project', on_delete=models.PROTECT, related_name='service_stack')
+    frontend_environment = models.ForeignKey('environments.Environment', on_delete=models.PROTECT,
+                                             related_name='frontend_stacks')
+    backend_environment = models.ForeignKey('environments.Environment', on_delete=models.PROTECT,
+                                            related_name='backend_stacks')
+    auto_deploy = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'configurations_servicestack'
