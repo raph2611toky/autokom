@@ -1,0 +1,4 @@
+# Creer au prealable ce bucket GCS prive, avec versioning et droits IAM limites.
+# Remplacer le nom si indisponible : le bucket doit etre globalement unique.
+bucket = "autokom-tfstate-589474515954"
+prefix = "autokom/gcp-ha"

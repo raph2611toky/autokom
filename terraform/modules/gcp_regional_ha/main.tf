@@ -45,6 +45,7 @@ resource "google_compute_instance_template" "web" {
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
   }
 
+  # Ne jamais placer des secrets dans metadata_startup_script.
   metadata_startup_script = var.bootstrap_mode == "validation" ? templatefile("${path.module}/files/validation-startup.sh.tftpl", {
     backend_port      = var.backend_port
     health_check_path = var.health_check_path
@@ -73,6 +74,25 @@ resource "google_compute_firewall" "lb_to_web" {
   allow {
     protocol = "tcp"
     ports    = [tostring(var.backend_port)]
+  }
+}
+
+# Le reseau GCP default comporte des regles SSH et internes permissives.
+# Cette regle ne cible QUE les nouvelles VM web du MIG par leur tag.
+# Le trafic des proxies/health-checks passe par l'autorisation de priorite 1000 ci-dessus.
+resource "google_compute_firewall" "deny_other_mig_ingress" {
+  count         = var.restrict_mig_ingress ? 1 : 0
+  project       = var.project_id
+  name          = "${var.name_prefix}-deny-other-ingress"
+  description   = "Defense en profondeur : aucune entree directe sur les nouvelles VM MIG."
+  network       = data.google_compute_network.existing.id
+  direction     = "INGRESS"
+  priority      = 1100
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["${var.name_prefix}-backend"]
+
+  deny {
+    protocol = "all"
   }
 }
 
@@ -118,7 +138,7 @@ resource "google_compute_region_instance_group_manager" "web" {
     ignore_changes  = [target_size]
     prevent_destroy = true
   }
-  depends_on = [google_compute_firewall.lb_to_web]
+  depends_on = [google_compute_firewall.lb_to_web, google_compute_firewall.deny_other_mig_ingress]
 }
 
 resource "google_compute_region_autoscaler" "web" {

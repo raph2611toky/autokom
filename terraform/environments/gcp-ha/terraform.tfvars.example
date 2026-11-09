@@ -1,0 +1,32 @@
+# Copier ce fichier en terraform.tfvars (non versionne).
+# Parametres du projet GCP confirme dans nos anciens diagnostics.
+project_id      = "plucky-stacker-480421-c4"
+region          = "us-central1"
+zones           = ["us-central1-a", "us-central1-f"]
+network_name    = "default"          # Verifier le vrai reseau et le sous-reseau
+subnetwork_name = "default"
+name_prefix     = "autokom-ha"
+
+# Les instances du MIG sont NOUVELLES ; ubuntu-server-2 et le serveur principal restent intacts : ni l'orchestrateur ni les serveurs existants ne sont modifies.
+machine_type       = "e2-small"
+assign_external_ip = false
+min_replicas       = 2
+max_replicas       = 4
+cpu_target         = 0.80
+cooldown_seconds   = 180
+backend_port       = 8080
+health_check_path  = "/healthz"
+
+# validation : endpoint technique pour prouver MIG+LB+Autoscaler ; PAS l'application AUTOKOM.
+# application : necessite une image et un demarrage applicatif REELS, exposant :8080/healthz.
+bootstrap_mode                 = "validation"
+application_startup_script_file = ""
+
+# Phase initiale : HTTP pour test de reseau. Activer HTTPS apres creation DNS vers IP du LB.
+enable_https = false
+domain_name  = null
+
+# ATTENTION : 2+ machines + Load Balancer + IP globale generent des couts.
+# Conserver false jusqu'a revue du plan, quota, facturation et regles firewall.
+restrict_mig_ingress        = true
+confirm_billable_resources = false

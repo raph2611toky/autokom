@@ -1,85 +1,89 @@
-# AUTOKOM — Infrastructure GCP Regional MIG + Autoscaler + Load Balancer
+# AUTOKOM — GCP HA : MIG régional + Autoscaler + Load Balancer
 
-## Portee technique
+## Périmètre confirmé (9 novembre 2026)
 
-Ce module Terraform est **independant des services actuels d'AUTOKOM**. Le serveur principal reste **orchestrateur et gestionnaire principal** : Jenkins, Ansible, supervision et controle des deploiements demeurent sur ce serveur. Les VM existantes restent intactes. Terraform cree seulement un **nouveau** groupe de VM web gerees et un equilibrage de charge pour celles-ci.
+- Projet : `plucky-stacker-480421-c4` ; VPC : `default` ; sous-réseau `default` en `us-central1`, CIDR `10.128.0.0/20`.
+- Serveur orchestrateur EXISTANT : `instance-20261028-090021`, `us-central1-a`, `e2-standard-4`. **Ce module ne gère pas cette VM.**
+- VM temporaire du stagiaire : `ubuntu-server-2`, `us-central1-f`, `e2-standard-2`. **Hors périmètre absolu : ne pas importer, arrêter, redimensionner, supprimer ou modifier.**
+- Web 1 et web 2 : **nouvelles VM créées par le MIG**, respectivement réparties entre `us-central1-a` et `us-central1-f` en régime nominal. Les noms individuels sont générés par GCP.
+- Autoscaler : minimum **2**, maximum **4** VM web, moyenne CPU cible **80 %** (`cpu_target=0.80`). En régime nominal : 1 orchestrateur + 2 workers ; en cas de forte charge : jusqu'à 4 workers. La VM temporaire reste un équipement distinct, non compté dans l'architecture AUTOKOM.
 
-- Regional MIG : au moins 2 nouvelles instances reparties sur 2 zones de `us-central1`.
-- Autoscaler : 2 a 4 instances par defaut, CPU cible 60 %.
-- External Application Load Balancer global : IP IPv4 statique, health check `/healthz`, backend TCP/8080, frontal HTTP/80 ; HTTPS/443 en option avec certificat gere GCP.
-- Regle pare-feu **limitee par tag** aux workers du MIG depuis `35.191.0.0/16` et `130.211.0.0/22` pour TCP/8080. Pas de regle generale `0.0.0.0/0` vers les VM.
-- Les VM n'ont pas d'IP externe par defaut. Pour telecharger des paquets ou des images de conteneurs, prevoir Cloud NAT ou une image de boot deja preparee. Les nouvelles VM auront un compte de service dedie sans roles GCP ajoutes implicitement.
+Les instances gérées peuvent être remplacées automatiquement. Toute application devra être stateless ou stocker ses données persistantes dans un service externe.
 
-Les MIG sont adaptes aux applications **stateless** ; stocker sessions, fichiers et donnees persistantes ailleurs avant les deploiements applicatifs.
+## Les ressources créées
 
-## Mode technique de validation et futur mode application
+- Un service account dédié aux nouvelles VM web (sans rôle projet implicite).
+- Un modèle d'instance Ubuntu 24.04, e2-small (20 Gio), sans IP publique.
+- Un MIG régional sur deux zones avec autohealing HTTP `/healthz` port 8080.
+- Un Autoscaler régional CPU 0.80, 2 à 4 VM web, période de démarrage 180 s.
+- Un External Application Load Balancer **global HTTP/80** avec IP IPv4 réservée et health check pour le backend 8080.
+- Deux règles de firewall **ciblées exclusivement sur le tag des VM MIG** : autorisation du trafic du Load Balancer sur 8080 (priorité 1000) et refus des autres connexions entrantes (priorité 1100). Elles ne modifient pas les règles globales du VPC ni les deux VM existantes, **à condition qu’aucune VM existante ne possède déjà le tag `autokom-ha-backend`**. Vérifier ce point dans le preflight.
 
-Par defaut `bootstrap_mode="validation"` installe un service HTTP Python minimal a partir des outils deja presents sur Ubuntu 24.04 : il repond a `/healthz` et `/` avec le nom de l'instance et avertit que **ce n'est pas une application AUTOKOM**. Il permet de confirmer en conditions reelles la configuration de health check, de MIG et de LB **sans pretendre deployer le frontend/backend**.
+Le mode `bootstrap_mode="validation"` ne déploie PAS AUTOKOM ni les applications clientes. Le script de démarrage existant démarre un serveur de vérification utilisant Python déjà fourni par Ubuntu. Les VM n'ont pas d'IP publique. Les mises à jour APT et récupérations de dépôts externes nécessiteront Cloud NAT ou un mécanisme de livraison adapté, non créé par ce module.
 
-En production, passer a `bootstrap_mode="application"` et renseigner `application_startup_script_file` (script non sensible et versionne). Le script doit rendre le vrai service disponible sur `backend_port` et `health_check_path`. Ne jamais stocker cle API, jeton ou mot de passe dans une metadata de VM ni dans Terraform state. Pour les images privees, accorder l'acces Artifact Registry seulement au service account dedie (le module ne le fait pas automatiquement). Pour une application fiable, utiliser une image immuable/versionnee, un lancement reproductible, et une politique de mise a jour du MIG. Les deux serveurs web existants ne rejoignent PAS automatiquement le MIG.
+## Identité GCP : avant toute création
 
-## Prerequis GCP (a controler avant tout plan)
+Sur l'orchestrateur, les outils `terraform` et `gcloud` sont déjà installés via `sudo autokom iac install`.
 
-- Projet `plucky-stacker-480421-c4` existe, facturation active, API Compute Engine et IAM disponibles.
-- VPC/sous-reseau existent dans `us-central1` et les zones `us-central1-a` et `us-central1-f` sont disponibles avec quota suffisant ; adapter `terraform.tfvars` si besoin.
-- Identite Terraform ayant les permissions necessaires pour Compute Engine, load balancing et creation/association de service account. Ne pas reutiliser la cle d'un compte de service privee dans le depot.
-- Quotas, prix des VM 24/7, LB, IP globale et trafic verifiés. Les VMs du MIG et le load balancer generent des frais meme si les visiteurs sont peu nombreux.
-- Verifier les autres regles firewall de la VPC par defaut : la nouvelle regle n'autorise que les sources du LB, mais les anciennes regles de la VPC pourraient ouvrir d'autres ports (dont SSH). Preferer VPC dediee en production.
-- L'etat Terraform est local dans cette premiere phase. Pour l'exploitation multi-admin, configurer un backend GCS protege avec versioning/controle d'acces avant un premier apply collaboratif.
+L'identité actuellement attachée est le compte de service Compute Engine par défaut `589474515954-compute@developer.gserviceaccount.com`. **Ne lui accorder aucun rôle administrateur supplémentaire sans analyser les autres VM qui le partagent**, notamment la VM temporaire du stagiaire. Les permissions et les **OAuth access scopes** sont tous deux déterminants pour l'authentification depuis une VM Compute Engine.
 
-## Execution sur Kali ou Cloud Shell : PAS sur l'orchestrateur en production sans raison
+**Recommandation :** créer sur GCP un service account utilisateur dédié `autokom-iac@plucky-stacker-480421-c4.iam.gserviceaccount.com`, avec les droits minimaux pour le provisionnement et l'accès au bucket d'état. Son rattachement à la VM principale demande normalement un arrêt/redémarrage de celle-ci ; planifier séparément cette opération, sans arrêt du serveur de production dans ce correctif. Ne pas utiliser de clé JSON téléchargée ni enregistrer des tokens dans le dépôt.
+
+Droits à définir par un administrateur IAM selon les ressources du `terraform plan` : permissions Compute Engine pour VM, MIG, autoscaling, réseau et load balancing ; création/gestion du compte de service web ; droit `iam.serviceAccounts.actAs` pour attacher ce compte de service au modèle de VM ; accès au bucket GCS d'état. Le service account IaC ne doit pas être celui des VM web.
+
+## État Terraform obligatoire dans GCS
+
+**Ne pas lancer `apply` avec un état local volatile dans `/opt/autokom/source`.** Un bucket GCS privé, protégé par accès uniforme et versioning, doit exister et être accessible par l'identité Terraform.
+
+Un administrateur peut créer ce bucket une seule fois depuis Kali (où `gcloud` est déjà connecté), **après vérification qu'il n'existe pas déjà** :
 
 ```bash
-cd /home/raph/SOUTENANCE/AUTOKOM/terraform/environments/gcp-ha
-cp terraform.tfvars.example terraform.tfvars
-# Editer project_id, network_name, subnetwork_name, region, zones, etc.
-# Auth GCP avec ADC: gcloud auth application-default login (si travail sur Kali)
+PROJECT=plucky-stacker-480421-c4
+BUCKET=autokom-tfstate-589474515954
+# Ne pas recréer si le bucket existe ; le nom GCS est globalement unique.
+gcloud storage buckets create "gs://$BUCKET" --project="$PROJECT" \
+  --location=us-central1 --uniform-bucket-level-access --public-access-prevention
+# Activer l'historique des objets
+gcloud storage buckets update "gs://$BUCKET" --versioning
+```
+
+Accorder l'accès au bucket **uniquement à l'identité Terraform autorisée** (et aux administrateurs habilités). Ne pas accorder un rôle admin au compte Compute Engine par défaut pour contourner un manque de droits.
+
+Sur le serveur principal, après synchronisation du dépôt :
+
+```bash
+cd /opt/autokom/source/terraform/environments/gcp-ha
+cp -n backend.hcl.example backend.hcl
+cp -n terraform.tfvars.example terraform.tfvars
+chmod 600 backend.hcl terraform.tfvars
+# Vérifier les deux fichiers : project, zones, 2..4 VM, CPU 0.80, bucket GCS.
+./preflight.sh
 ./manage.sh init
-./manage.sh fmt
 ./manage.sh validate
 ```
 
-Avant un plan, realiser ces verifications dans Cloud Shell (lecture seule) :
+`backend.hcl` n'est pas versionné. Si des ressources ont déjà été créées avec un état local, **ne pas exécuter init en reconfigure ni supprimer cet état** ; planifier une migration contrôlée vers GCS, après sauvegarde du `.tfstate`.
+
+## Étapes contrôlées de déploiement
+
+1. Vérifier quotas, API Compute/IAM, permissions du service account orchestrateur, facturation et ressources déjà créées. Le preflight est en lecture seule.
+2. `terraform.tfvars` : conserver le VPC et le sous-réseau `default`, `min_replicas=2`, `max_replicas=4`, `cpu_target=0.80`, `restrict_mig_ingress=true`, `bootstrap_mode="validation"`, `enable_https=false`.
+3. Après acceptation explicite des frais prévisionnels, changer `confirm_billable_resources=true` (le champ est à `false` par défaut).
+4. Depuis le serveur principal : `./manage.sh plan`, puis `./manage.sh show`. Vérifier qu'aucune VM existante n'est dans le plan.
+5. Seulement après validation du plan : `./manage.sh apply` ; confirmation interactive obligatoire.
+6. `./manage.sh output` ; puis vérifications avec `gcloud` :
 
 ```bash
-gcloud config set project plucky-stacker-480421-c4
-gcloud compute networks list
-gcloud compute networks subnets list --regions=us-central1
-gcloud compute instance-groups managed list
-gcloud compute forwarding-rules list --global
-gcloud compute addresses list --global
+gcloud compute instance-groups managed list-instances autokom-ha-rmig --region=us-central1 --project=plucky-stacker-480421-c4
+gcloud compute autoscalers describe autokom-ha-autoscaler --region=us-central1 --project=plucky-stacker-480421-c4
+gcloud compute backend-services get-health autokom-ha-backend --global --project=plucky-stacker-480421-c4
+gcloud compute forwarding-rules describe autokom-ha-http --global --project=plucky-stacker-480421-c4 --format='value(IPAddress)'
 ```
 
-Une fois facturation, quotas, reseau, impact et cout controles, mettre **explicitement** `confirm_billable_resources = true` dans `terraform.tfvars` (sinon le plan est bloque) :
+Le Load Balancer ne sera considéré opérationnel qu'une fois le health check `HEALTHY` et la réponse HTTP du service de validation constatés. L'IP/nom de domaine existant de la plateforme AUTOKOM **n'est pas modifié**.
 
-```bash
-./manage.sh plan
-terraform show autokom-ha.tfplan  # inspection avant execution
-./manage.sh apply                 # confirmation supplementaire au terminal
-./manage.sh output
-```
+## Mise en production ultérieure
 
-**Pas de `terraform apply -auto-approve`, `terraform destroy` ou import automatique de VM existantes.** Le plan peut creer **de nouvelles** VM facturables, des regles de firewall et un Load Balancer. La gestion regionale ne bascule aucun domaine existant ; il faudra changer DNS volontairement quand le service sera verifie.
+Une fois l'infrastructure validée, préparer la vraie application pour la VM modèle (image versionnée ou startup script reproductible), health check applicatif, secrets hors metadata et gestion des données persistantes. Ensuite seulement passer `bootstrap_mode` à `application`. Les mises à jour d'instance template peuvent créer/renouveler des VM : procéder avec une politique de rolling update et validation de santé.
 
-## Controle GCP apres application
-
-```bash
-gcloud compute instance-groups managed list --regions=us-central1
-gcloud compute instance-groups managed list-instances autokom-ha-rmig --region=us-central1
-gcloud compute autoscalers list --regions=us-central1
-gcloud compute backend-services get-health autokom-ha-backend --global
-gcloud compute forwarding-rules describe autokom-ha-http --global --format='value(IPAddress)'
-```
-
-Verifier la health check a l'etat `HEALTHY`, consulter `terraform output validation_url_http`, puis `curl -i http://<IP_DU_LB>/healthz` (le remplacement `<IP_DU_LB>` est manuel). Pour tester la HA, simuler une panne **uniquement sur une instance de MIG de validation** et examiner l'autohealing ; le principal orchestrateur n'est jamais concerne.
-
-## HTTPS et domaine public
-
-L'IP globale du LB doit etre connue avant modification DNS. Creer un A record vers cette IP pour un **nouveau sous-domaine reserve** sans ecraser `auto.ikom.mg` ou `backend.auto.ikom.mg` existants. Puis configurer `enable_https=true` et `domain_name="nouveau-domaine"` et replanifier. L'emission du certificat gere Google peut necessiter du temps ; surveiller son etat. HTTP/80 reste actif dans cette version : une redirection HTTPS ne doit pas etre declaree sans etre configuree.
-
-## Captures pour le memoire
-
-1. Fichier `terraform/modules/gcp_regional_ha/main.tf` : instance template, role du MIG, Autoscaler et health checks (capturer deux zones significatives du code si necessaire).
-2. Fichier `terraform/modules/gcp_regional_ha/main.tf` : backend service, IP globale, URL map et forwarding rule ; montrer le Load Balancer.
-3. Terminal `./manage.sh plan` : plan de creation des trois services (pas une installation Ubuntu).
-4. Console GCP apres un apply reel et approuve : MIG regional (instances par zone), politique d'autoscaling, backend `HEALTHY` et IP LB (2 captures d'ecran si necessaire).
+HTTPS du Load Balancer est optionnel et doit être activé uniquement après création d'un nouveau sous-domaine spécifique pointant vers l'IP du LB ; ne pas écraser les domaines existants `auto.ikom.mg` ou `backend.auto.ikom.mg`.

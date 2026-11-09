@@ -6,8 +6,9 @@ terraform {
       version = ">= 6.0, < 9.0"
     }
   }
-  # Etat local pour le premier controle; pour utilisation equipee, migrer vers GCS
-  # (bucket cree et protege au prealable) AVANT tout terraform apply partage.
+  # Etat centralise sur GCS : bucket deja cree et droits IAM verifies.
+  # manage.sh init injecte le bucket via backend.hcl local (non commite).
+  backend "gcs" {}
 }
 provider "google" {
   project = var.project_id

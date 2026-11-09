@@ -51,7 +51,7 @@ variable "max_replicas" {
 }
 variable "cpu_target" {
   type    = number
-  default = 0.60
+  default = 0.80
 }
 variable "cooldown_seconds" {
   type    = number
@@ -75,6 +75,12 @@ variable "domain_name" {
   default  = null
   nullable = true
 }
+variable "restrict_mig_ingress" {
+  type        = bool
+  default     = true
+  description = "Bloquer les autres flux entrants aux seules nouvelles VM du MIG; n'affecte pas les VM existantes."
+}
+
 variable "confirm_billable_resources" {
   type        = bool
   default     = false

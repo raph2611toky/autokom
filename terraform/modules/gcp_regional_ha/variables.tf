@@ -74,7 +74,7 @@ variable "max_replicas" {
 }
 variable "cpu_target" {
   type    = number
-  default = 0.60
+  default = 0.80
   validation {
     condition     = var.cpu_target >= 0.1 && var.cpu_target <= 0.9
     error_message = "cpu_target doit etre compris entre 0.1 et 0.9."
@@ -110,6 +110,12 @@ variable "domain_name" {
   nullable    = true
   description = "FQDN pour certificat gere GCP, exemple www.exemple.mg."
 }
+variable "restrict_mig_ingress" {
+  type        = bool
+  default     = true
+  description = "Refuser les flux entrants vers les seuls workers MIG, sauf le trafic Load Balancer explicitement autorise."
+}
+
 variable "labels" {
   type    = map(string)
   default = { managed_by = "terraform", component = "autokom-web" }

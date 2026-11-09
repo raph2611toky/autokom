@@ -25,6 +25,7 @@ module "regional_web_ha" {
   min_replicas          = var.min_replicas
   max_replicas          = var.max_replicas
   cpu_target            = var.cpu_target
+  restrict_mig_ingress  = var.restrict_mig_ingress
   cooldown_seconds      = var.cooldown_seconds
   bootstrap_mode        = var.bootstrap_mode
   application_startup_script = trimspace(var.application_startup_script_file) != "" ? file(abspath(var.application_startup_script_file)) : null
