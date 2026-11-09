@@ -2,13 +2,11 @@
 **/.terraform/
 **/*.tfstate
 **/*.tfstate.*
-**/terraform.tfvars
+# **/terraform.tfvars
 **/*.auto.tfvars
 **/*.tfplan
 **/crash.log
 **/crash.*.log
-# Commit only examples, never real tfvars or plans
-# Configuration de backend (sans secret, mais locale a l'environnement)
 **/backend.hcl
 **/autokom-ha.tfplan
 **/autokom-ha.tfplan.*
