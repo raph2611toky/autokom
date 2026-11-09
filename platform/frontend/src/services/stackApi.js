@@ -10,4 +10,9 @@ export const stackApi = Object.freeze({
   preflightDomains: projectId => api.post(`/projects/${uuid(projectId)}/stack/domains/preflight/`, {}),
   launch: (projectId, idempotencyKey) => api.post(`/projects/${uuid(projectId)}/stack/launch/`, { idempotency_key:idempotencyKey }),
   publication: (projectId, runId) => api.get(`/projects/${uuid(projectId)}/stack/deployments/${uuid(runId)}/`),
+  history: (projectId, page = 1, pageSize = 20) => {
+    if (!Number.isSafeInteger(page) || page < 1 || page > 100000) throw new TypeError('Page invalide.')
+    if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) throw new TypeError('Taille de page invalide.')
+    return api.get(`/projects/${uuid(projectId)}/stack/history/?page=${page}&page_size=${pageSize}`)
+  },
 })

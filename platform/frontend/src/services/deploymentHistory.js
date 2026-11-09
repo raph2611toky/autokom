@@ -1,5 +1,5 @@
 /** Uniquement les statuts renvoyés par Django. Aucun faux état de publication. */
-export const isPublishing = status => ['QUEUED','RUNNING'].includes(String(status || '').toUpperCase())
+export const isPublishing = status => ['QUEUED','RUNNING','PREPARING','ACTIVATING'].includes(String(status || '').toUpperCase())
 export function sortRecentRuns(runs) {
   return [...(Array.isArray(runs) ? runs : [])].sort((a,b) => {
     const x = Date.parse(a?.created_at || '') || 0

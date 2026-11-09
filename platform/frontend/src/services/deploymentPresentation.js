@@ -2,6 +2,9 @@
 export const publicationStatus = Object.freeze({
   QUEUED: ['En attente', 'waiting'],
   RUNNING: ['En cours', 'running'],
+  PREPARING: ['Construction en cours', 'running'],
+  ACTIVATING: ['Activation HTTPS', 'running'],
+  PREPARED: ['Prêt à activer', 'success'],
   SUCCEEDED: ['En ligne', 'success'],
   SUCCESS: ['Terminé', 'success'],
   FAILED: ['Échec', 'danger'],

@@ -8,6 +8,7 @@ import { PRICING_PLANS, formatAr } from '../config/pricing.js'
 import { parseStackEnv, stackEnvPayload, publicEnvName, sensitiveEnvName, existingFrontendStackDefaults, existingServiceKind, stackOutputDirectory } from '../services/stackEnv.js'
 import { stackHosts, frontendApiVariable, withoutManagedFields, MANAGED_BACKEND_ENV, MANAGED_FRONTEND_API, validFrontendApiKey, validBackendOriginKey } from '../services/stackDomains.js'
 import '../styles/stack-deploy.css'
+import StackPublicationProgress from '../components/StackPublicationProgress.jsx'
 
 const INITIAL = { branch:'main', root_directory:'', profile:'', hostname:'', output_directory:'build', healthcheck:'/', api_env_key:'', origin_env_key:'', rows:[] }
 const PROFILES = {
@@ -202,14 +203,6 @@ export default function StackDeploy({navigate,projectId}) {
     return()=>{active=false;window.clearTimeout(timer)}
   },[install,repo,frontend.branch,frontend.root_directory,backend.branch,backend.root_directory])
 
-  useEffect(()=>{
-    if (!deployment || !['QUEUED','PREPARING','ACTIVATING'].includes(deployment.status))return
-    let active=true
-    const poll=()=>stackApi.publication(projectId,deployment.id).then(r=>{if(active)setDeployment(r.deployment)}).catch(()=>{})
-    const timer=window.setInterval(poll,4500)
-    return()=>{active=false;window.clearInterval(timer)}
-  },[projectId,deployment?.id,deployment?.status])
-
   const readySource = Boolean(probe.frontend.status==='ready' && probe.backend.status==='ready' &&
     PROFILES.frontend.some(([key])=>key===frontend.profile) && PROFILES.backend.some(([key])=>key===backend.profile) &&
     validPath(normalizeFolder(frontend.root_directory)) && validPath(normalizeFolder(backend.root_directory)))
@@ -248,7 +241,7 @@ export default function StackDeploy({navigate,projectId}) {
       idem.current=null
       setDeployment({...result.stack_deployment,status:result.stack_deployment.status})
       setStep(2)
-      setNotice('DNS vérifié. Construction des deux services et validation HTTPS en cours.')
+      setNotice('')
     } catch(err){setError(errorText(err))} finally{setBusy(false)}
   }
 
@@ -289,10 +282,6 @@ export default function StackDeploy({navigate,projectId}) {
       <div className="ak-stack-footer"><button type="button" className="button-outline" disabled={busy} onClick={()=>setStep(0)}><ArrowLeft size={15}/> Modifier</button>
         <button type="button" className="button-primary" disabled={busy||!ready} onClick={publish}>{busy?<LoaderCircle size={16} className="ak-spin"/>:<CloudUpload size={16}/>} Enregistrer et déployer</button></div>
     </section>}
-    {step===2 && <section className="ak-stack-component" role="status"><h2>Publication groupée</h2><div className="ak-stack-status">
-      <span className={`ak-stack-state ${deployment?.status==='SUCCEEDED'?'ready':deployment?.status==='FAILED'?'error':'loading'}`}>{deployment?.status==='SUCCEEDED'?'En ligne':deployment?.status==='FAILED'?'Échec':deployment?.status==='BLOCKED'?'À réconcilier':'En cours'}</span>
-      <p>Backend : {deployment?.backend?.status||'Préparation'} · Frontend : {deployment?.frontend?.status||'En attente'}</p>
-      {deployment?.error_code && <p role="alert">Diagnostic : {deployment.error_code}</p>}
-    </div><div className="ak-stack-footer"><button type="button" className="button-outline" onClick={()=>navigate(`/projects/${projectId}`)}>Voir le projet <ArrowRight size={16}/></button></div></section>}
+    {step===2 && deployment?.id && <StackPublicationProgress projectId={projectId} runId={deployment.id} navigate={navigate}/>}
   </div>
 }

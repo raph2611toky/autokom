@@ -8,6 +8,7 @@ import { publicSiteUrl } from '../services/sitePresentation.js'
 import { sortRecentRuns, isPublishing, canPublish } from '../services/deploymentHistory.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
 import { stackApi } from '../services/stackApi.js'
+import { publicationPath, publicationKind } from '../services/stackHistory.js'
 
 function formatDate(value) {
   if (!value) return 'Non renseignée'
@@ -32,10 +33,17 @@ export default function LiveProjects({ navigate, projectId = null }) {
   useEffect(() => {
     let alive = true
     setLoading(true); setError(''); setLaunchError(''); setDetail(null); setStackEnabled(false)
-    const request = projectId ? Promise.all([getRemoteProjectDetail(projectId), stackApi.detail(projectId).catch(() => ({stack:null}))]) : listRemoteProjectRecords()
+    const request = projectId
+      ? Promise.all([getRemoteProjectDetail(projectId), stackApi.detail(projectId)]).then(async ([info, settings]) => {
+          const enabled = Boolean(settings?.stack)
+          if (!enabled) return {info, enabled}
+          const feed = await stackApi.history(projectId, 1, 10)
+          return {info:{...info, runs:feed?.runs || [], runCount:feed?.count ?? 0},enabled}
+        })
+      : listRemoteProjectRecords()
     request.then(result => {
       if (!alive) return
-      if (projectId) { setDetail(result[0]); setStackEnabled(Boolean(result[1]?.stack)) }
+      if (projectId) { setDetail(result.info); setStackEnabled(result.enabled) }
       else setProjects(result)
     }).catch(err => { if (alive) setError(errorText(err)) })
       .finally(() => { if (alive) setLoading(false) })
@@ -46,12 +54,12 @@ export default function LiveProjects({ navigate, projectId = null }) {
     if (!projectId || !detail?.runs?.some(run => isPublishing(run.status))) return
     let alive = true
     const timer = window.setInterval(() => {
-      deploymentsApi.list(projectId, detail.environment.id, 1, 10).then(next => {
+      (stackEnabled ? stackApi.history(projectId, 1, 10) : deploymentsApi.list(projectId, detail.environment.id, 1, 10)).then(next => {
         if (alive) setDetail(previous => previous ? {...previous, runs:next?.runs || [], runCount: next?.count ?? previous.runCount} : previous)
       }).catch(() => {})
     }, 12000)
     return () => { alive = false; window.clearInterval(timer) }
-  }, [projectId, detail?.environment?.id, detail?.runs?.map(run => run.status).join('|')])
+  }, [projectId, stackEnabled, detail?.environment?.id, detail?.runs?.map(run => run.status).join('|')])
 
   // Re-read the authoritative HTTPS state while an old deployed site's DNS
   // is being reconciled. Refreshing does not launch Jenkins or change domains.
@@ -129,9 +137,9 @@ export default function LiveProjects({ navigate, projectId = null }) {
           return <article className="ak-deployment-card" key={run.id}>
             <div className="ak-deployment-summary">
               <div className="ak-deployment-symbol"><Workflow size={19}/></div>
-              <div className="ak-deployment-summary-text"><strong>Publication du {formatDate(run.created_at)}</strong><small>{run.trigger_type === 'GIT_PUSH' ? 'Mise à jour automatique' : 'Lancement manuel'} · Réf. {String(run.id).slice(0,8)}</small></div>
+              <div className="ak-deployment-summary-text"><strong>Publication du {formatDate(run.created_at)}</strong><small>{publicationKind(run)} · {run.trigger_type === 'GIT_PUSH' ? 'Mise à jour automatique' : 'Lancement manuel'} · Réf. {String(run.id).slice(0,8)}</small></div>
               <span className={`ak-publication-pill state-${tone}`}>{label}</span>
-              <button type="button" className="button-outline" onClick={() => navigate(`/projects/${project.id}/deployments/${run.id}`)}>Voir les détails <ArrowRight size={15}/></button>
+              <button type="button" className="button-outline" onClick={() => navigate(publicationPath(project.id, run))}>Voir les détails <ArrowRight size={15}/></button>
             </div>
           </article>
         })}</div>

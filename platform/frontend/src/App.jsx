@@ -12,6 +12,7 @@ import StackDeploy from './pages/StackDeploy.jsx'
 import Sites from './pages/Sites.jsx'
 import Projects from './pages/Projects.jsx'
 import LiveRuns from './pages/LiveRuns.jsx'
+import StackPublicationProgress from './components/StackPublicationProgress.jsx'
 import LiveProjectSettings from './pages/LiveProjectSettings.jsx'
 import Pricing from './pages/Pricing.jsx'
 import { API_AVAILABLE } from './config/runtime.js'
@@ -90,6 +91,15 @@ export default function App() {
 
   if (API_AVAILABLE && /^\/(?:dashboard|deploy|projects|sites)(?:\/|$)/.test(route) && status !== 'authenticated') {
     return <div className="app-shell"><main className="container workspace" role="status">Vérification de votre session…</main></div>
+  }
+
+  if (API_AVAILABLE && /^\/projects\/[^/]+\/stack\/deployments\/[^/]+$/.test(route)) {
+    const parts = route.split('/')
+    return <div className="app-shell"><Header route="/projects" {...commonProps}/><main className="container workspace" id="main-content">
+      <div className="ak-back-line"><button type="button" className="button-quiet" onClick={() => navigate(`/projects/${parts[2]}`)}>Retour au projet</button></div>
+      <section className="page-hero ak-workspace-hero"><div><h1>Publication groupée</h1><p>Suivi du frontend et du backend</p></div></section>
+      <StackPublicationProgress key={`${parts[2]}:${parts[5]}`} projectId={parts[2]} runId={parts[5]} navigate={navigate}/>
+    </main><footer className="container footer">AUTOKOM · Déploiement et gestion des applications</footer></div>
   }
 
   if (API_AVAILABLE && /^\/projects\/[^/]+\/stack$/.test(route)) {
