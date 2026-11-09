@@ -152,4 +152,4 @@ class StackDeployment(models.Model):
 
     class Meta:
         db_table = 'deployments_stackdeployment'
-        indexes = [models.Index(fields=['stack', 'created_at'])]
+        indexes = [models.Index(fields=['stack', 'created_at'], name='stack_created_idx')]
