@@ -1,0 +1,82 @@
+variable "project_id" {
+  type = string
+}
+variable "region" {
+  type    = string
+  default = "us-central1"
+}
+variable "zones" {
+  type    = list(string)
+  default = ["us-central1-a", "us-central1-f"]
+}
+variable "network_name" {
+  type    = string
+  default = "default"
+}
+variable "subnetwork_name" {
+  type    = string
+  default = "default"
+}
+variable "name_prefix" {
+  type    = string
+  default = "autokom-ha"
+}
+variable "machine_type" {
+  type    = string
+  default = "e2-small"
+}
+variable "boot_image" {
+  type    = string
+  default = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64"
+}
+variable "assign_external_ip" {
+  type    = bool
+  default = false
+}
+variable "backend_port" {
+  type    = number
+  default = 8080
+}
+variable "health_check_path" {
+  type    = string
+  default = "/healthz"
+}
+variable "min_replicas" {
+  type    = number
+  default = 2
+}
+variable "max_replicas" {
+  type    = number
+  default = 4
+}
+variable "cpu_target" {
+  type    = number
+  default = 0.60
+}
+variable "cooldown_seconds" {
+  type    = number
+  default = 180
+}
+variable "bootstrap_mode" {
+  type    = string
+  default = "validation"
+}
+variable "application_startup_script_file" {
+  type        = string
+  default     = ""
+  description = "Chemin d'un script de demarrage applicatif ; jamais de secret dans metadata."
+}
+variable "enable_https" {
+  type    = bool
+  default = false
+}
+variable "domain_name" {
+  type     = string
+  default  = null
+  nullable = true
+}
+variable "confirm_billable_resources" {
+  type        = bool
+  default     = false
+  description = "Doit etre true pour autoriser un plan et un deploiement des ressources GCP payantes."
+}

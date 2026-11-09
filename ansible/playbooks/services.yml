@@ -11,8 +11,6 @@
           - ansible_facts['distribution'] == 'Ubuntu'
           - autokom_db_engine in ['postgresql', 'mysql', 'oracle', 'none']
   roles:
-    # Defense en profondeur : meme --only services ne peut installer Jenkins
-    # et lui donner le groupe docker AVANT un moteur Docker fonctionnel.
     - role: docker_engine
     - role: jenkins_server
     - role: database_server
