@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, ArrowRight, GitBranch, FolderGit2, Globe, Info, LoaderCircle, FileUp, Plus, Trash2, Save, CloudUpload, CheckCircle2, AlertTriangle, Layers3 } from 'lucide-react'
+import { ArrowLeft, ArrowRight, GitBranch, FolderGit2, Globe, Info, LoaderCircle, FileUp, Plus, Trash2, Save, CloudUpload, CheckCircle2, AlertTriangle, Layers3, X } from 'lucide-react'
 import { getRemoteProjectDetail, errorText } from '../services/projectWorkflow.js'
 import { gitApi } from '../services/projectsApi.js'
 import { stackApi } from '../services/stackApi.js'
 import { detectSource, frontendProfile, availableFrontendProfiles, BACKEND_PROFILES } from '../services/sourceAnalysis.js'
 import { PRICING_PLANS, formatAr } from '../config/pricing.js'
-import { parseStackEnv, stackEnvPayload, publicEnvName, sensitiveEnvName, existingFrontendStackDefaults, existingServiceKind } from '../services/stackEnv.js'
+import { parseStackEnv, stackEnvPayload, publicEnvName, sensitiveEnvName, existingFrontendStackDefaults, existingServiceKind, stackOutputDirectory } from '../services/stackEnv.js'
 import { stackHosts, frontendApiVariable, withoutManagedFields, MANAGED_BACKEND_ENV, MANAGED_FRONTEND_API, validFrontendApiKey, validBackendOriginKey } from '../services/stackDomains.js'
 import '../styles/stack-deploy.css'
 
@@ -66,7 +66,8 @@ function Variables({kind, rows, onChange, managed, onManagedKeyChange}) {
       {kind === 'backend' && <label className="ak-stack-secret"><input type="checkbox" checked={Boolean(item.secret)} onChange={e=>edit(index,{secret:e.target.checked})}/> Secret</label>}
       <button type="button" className="button-outline" aria-label="Supprimer variable" onClick={()=>onChange(rows.filter((_,i)=>i!==index))}><Trash2 size={15}/></button>
     </div>)}
-    {error && <p className="feedback error" role="alert">{error}</p>}
+    {error && <div className="feedback error ak-stack-dismissible" role="alert"><span>{error}</span>
+      <button type="button" className="ak-stack-dismiss" aria-label="Fermer l’erreur .env" onClick={()=>setError('')}><X size={17}/></button></div>}
   </section>
 }
 
@@ -97,6 +98,7 @@ function ComponentCard({kind,data,onChange,branches,probe,host,apiHost}) {
       const nextProfile=e.target.value
       const previousDefault=frontendApiVariable(data.profile,apiHost).key
       onChange({...data,profile:nextProfile,
+        output_directory:stackOutputDirectory(nextProfile,data.output_directory,kind),
         ...(kind==='frontend' && (!data.api_env_key || data.api_env_key===previousDefault) ? {api_env_key:''} : {})})
     }}>
       <option value="">Choisir un profil</option>
@@ -150,7 +152,7 @@ export default function StackDeploy({navigate,projectId}) {
         const branch = singleService.branch
         const existing = stackResponse?.stack
         const asForm = (data, fallback, kind) => ({...INITIAL,branch:data?.branch||fallback,root_directory:data?.root_directory||'',hostname:data?.domain||'',
-          profile:data?.profile||'',output_directory:data?.output_directory||'build',healthcheck:data?.healthcheck||'/',
+          profile:data?.profile||'',output_directory:stackOutputDirectory(data?.profile,data?.output_directory,kind),healthcheck:data?.healthcheck||'/',
           api_env_key:kind==='frontend'?(data?.api_env_key||''):'',origin_env_key:kind==='backend'?(data?.origin_env_key||''):'',
           rows:withoutManagedFields((data?.variables||[]).map(x=>({key:x.key,value:x.value,secret:false})),kind)
             .filter(row=>row.key !== (kind==='frontend'?data?.api_env_key:data?.origin_env_key))})
@@ -192,7 +194,7 @@ export default function StackDeploy({navigate,projectId}) {
           if (allowed.includes(guessed)) {
             const apply = kind==='frontend' ? setFrontend : setBackend
             apply(old=>old.profile ? old : {...old,profile:guessed,
-              output_directory:guessed==='npm_static' && analysis.framework==='Vue'?'dist':old.output_directory})
+              output_directory:stackOutputDirectory(guessed,analysis.framework==='Vue'?'dist':'build',kind)})
           }
         }).catch(err=>{if(active)setProbe(old=>({...old,[kind]:{status:'error',message:errorText(err)}}))})
       }
@@ -228,7 +230,7 @@ export default function StackDeploy({navigate,projectId}) {
     return {branch:data.branch,root_directory:normalizeFolder(data.root_directory),profile:data.profile,
       hostname:kind==='frontend'?frontHost:backendHost,
       ...(kind==='frontend'?{api_env_key:frontApiKey}:{origin_env_key:backOriginKey}),
-      output_directory:data.output_directory,healthcheck:data.healthcheck,...stackEnvPayload(data.rows,kind)}
+      output_directory:stackOutputDirectory(data.profile,data.output_directory,kind),healthcheck:data.healthcheck,...stackEnvPayload(data.rows,kind)}
   }
   async function publish() {
     if (busy || !ready)return
@@ -256,8 +258,10 @@ export default function StackDeploy({navigate,projectId}) {
     <div className="ak-back-line"><button type="button" className="button-quiet" onClick={()=>navigate(`/projects/${projectId}`)}><ArrowLeft size={16}/> Retour au projet</button></div>
     <section className="page-hero ak-workspace-hero"><div><h1>Configuration des services</h1><p>{record.project.repository_name} · dépôt GitHub conservé · une offre commune.</p></div></section>
     <div className="ak-stack-progress"><span className={step===0?'active':''}>1 · Configuration</span><span className={step===1?'active':''}>2 · Récapitulatif</span><span className={step===2?'active':''}>3 · Publication</span></div>
-    {error && <p className="feedback error" role="alert">{error}</p>}
-    {notice && <p className="feedback success" role="status">{notice}</p>}
+    {error && <div className="feedback error ak-stack-dismissible" role="alert"><span>{error}</span>
+      <button type="button" className="ak-stack-dismiss" aria-label="Fermer la notification d’erreur" onClick={()=>setError('')}><X size={17}/></button></div>}
+    {notice && <div className="feedback success ak-stack-dismissible" role="status"><span>{notice}</span>
+      <button type="button" className="ak-stack-dismiss" aria-label="Fermer la notification d’information" onClick={()=>setNotice('')}><X size={17}/></button></div>}
     {dnsProof && error && <div className="ak-stack-warning" role="alert">
       <AlertTriangle size={17}/> Vérifiez les enregistrements DNS : A vers l’IP publique {ingressIPv4 || 'de votre serveur'}. Le domaine externe nécessite aussi une preuve TXT.
       {[dnsProof.frontend,dnsProof.backend].filter(item=>item?.verification?.type==='TXT').map((item,index)=>

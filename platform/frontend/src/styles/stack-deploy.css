@@ -32,3 +32,12 @@
 .ak-stack-env-managed input[readonly]{opacity:.76;cursor:default;border-style:dashed}
 .ak-stack-env-managed input[readonly]:focus-visible{outline:none}
 .ak-stack-env-fixed-spacer{width:0}
+
+/* Dismissible configuration errors and progress notices. */
+.ak-stack-dismissible { display:flex; align-items:center; justify-content:space-between; gap:12px; overflow-wrap:anywhere; }
+.ak-stack-dismissible > span { min-width:0; flex:1; }
+.ak-stack-dismiss { display:inline-flex; align-items:center; justify-content:center; flex:0 0 30px;
+  min-width:30px; min-height:30px; padding:4px; border:1px solid transparent; background:transparent;
+  color:inherit; cursor:pointer; border-radius:4px; }
+.ak-stack-dismiss:hover { background:rgba(127,127,127,.14); border-color:currentColor; }
+.ak-stack-dismiss:focus-visible { outline:2px solid currentColor; outline-offset:2px; }

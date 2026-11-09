@@ -50,7 +50,10 @@ class StackComponentSerializer(serializers.Serializer):
     profile = serializers.CharField(max_length=50)
     healthcheck = serializers.CharField(max_length=128, default='/')
     hostname = serializers.CharField(max_length=253, allow_blank=True, required=False, default='')
-    output_directory = serializers.ChoiceField(choices=['dist', 'build'], default='build', required=False)
+    # Accept legacy recipe outputs (.next, out), then validate per profile.
+    # A Next.js SSR build produces .next internally: not a static publication directory.
+    output_directory = serializers.ChoiceField(choices=['dist', 'build', '.next', 'out', ''],
+                                               default='build', required=False, allow_blank=True)
     variables = serializers.DictField(child=serializers.CharField(allow_blank=True, max_length=32768), required=False)
     secrets = serializers.DictField(child=serializers.CharField(allow_blank=False, max_length=10000), required=False, write_only=True)
     api_env_key = serializers.CharField(max_length=100, allow_blank=True, default='', required=False)
@@ -79,6 +82,18 @@ class StackComponentSerializer(serializers.Serializer):
         profile = attrs['profile']
         if profile not in (FRONT_PROFILES if kind == 'frontend' else BACKEND_RUNTIMES):
             raise serializers.ValidationError({'profile': 'Recette non autorisée pour ce service.'})
+        # Old single-service configurations may contain .next for SSR or out for
+        # a static Next export; both are valid only with the matching recipe.
+        # The actual published path is always derived by _component_config.
+        compatible_outputs = ({
+            'vite': {'', 'build', 'dist'},
+            'npm_static': {'build', 'dist'},
+            'next_server': {'', 'build', '.next'},
+            'next_export': {'', 'build', 'out'},
+            'html': {'', 'build'},
+        }[profile] if kind == 'frontend' else {'', 'build'})
+        if attrs['output_directory'] not in compatible_outputs:
+            raise serializers.ValidationError({'output_directory': 'Dossier incompatible avec la recette sélectionnée.'})
         values, secrets_dict = attrs.get('variables', {}), attrs.get('secrets', {})
         if len(values) + len(secrets_dict) > 50 or set(values) & set(secrets_dict):
             raise serializers.ValidationError('Variables dupliquées ou trop nombreuses.')

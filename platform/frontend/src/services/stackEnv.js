@@ -53,3 +53,12 @@ export function existingFrontendStackDefaults(detail) {
       .map(row => ({ key:row.key, value:row.value || '' })),
   }
 }
+
+/** Normalize inherited single-service build folders for the two-service stack.
+ * Next.js SSR uses .next internally; it is never a user-selected static output.
+ * Only the npm_static recipe supports a build/dist choice.
+ */
+export function stackOutputDirectory(profile, directory, kind = 'frontend') {
+  if (kind !== 'frontend' || profile !== 'npm_static') return ''
+  return directory === 'dist' ? 'dist' : 'build'
+}
