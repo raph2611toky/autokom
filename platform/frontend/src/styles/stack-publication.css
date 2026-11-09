@@ -12,3 +12,7 @@
 .ak-stack-publication-panel .ak-log-console{max-height:460px;overflow:auto}
 .ak-stack-publication-panel .ak-run-detail-sheet{margin-bottom:16px}
 @media(max-width:680px){.ak-stack-service-tabs{grid-template-columns:1fr}.ak-stack-service-tabs button{padding:12px}}
+
+/* Chaque publication groupée reste une seule entrée, mais expose clairement
+   le statut individuel des deux services, y compris sur petit écran. */
+.ak-stack-run-services {display:block;margin-top:5px;color:var(--text-secondary, #a8afbc);font-size:.79rem;line-height:1.35}

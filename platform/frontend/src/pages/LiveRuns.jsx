@@ -7,7 +7,7 @@ import { isPublishing, sortRecentRuns } from '../services/deploymentHistory.js'
 import { technicalTimeline, formatTechnicalFileLine } from '../services/deploymentLogTimeline.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
 import { stackApi } from '../services/stackApi.js'
-import { publicationPath, publicationKind } from '../services/stackHistory.js'
+import { publicationPath, publicationKind, publicationServices } from '../services/stackHistory.js'
 
 const PAGE_SIZE = 20
 function dateTime(value) {
@@ -170,7 +170,6 @@ function RunDetails({ navigate, projectId, runId }) {
 
 function RunHistory({ navigate, projectId }) {
   const [info,setInfo] = useState(null)
-  const [stackEnabled,setStackEnabled] = useState(false)
   const [runs,setRuns] = useState([])
   const [page,setPage] = useState(1)
   const [count,setCount] = useState(0)
@@ -178,8 +177,8 @@ function RunHistory({ navigate, projectId }) {
   const [error,setError] = useState('')
   useEffect(() => {
     let alive = true
-    Promise.all([getRemoteProjectDetail(projectId), stackApi.detail(projectId)])
-      .then(([result, stack]) => { if (alive) { setInfo(result); setStackEnabled(Boolean(stack?.stack)) } })
+    getRemoteProjectDetail(projectId)
+      .then(result => { if (alive) setInfo(result) })
       .catch(err => { if (alive) { setError(errorText(err)); setLoading(false) } })
     return () => { alive = false }
   },[projectId])
@@ -187,24 +186,28 @@ function RunHistory({ navigate, projectId }) {
     if (!info?.environment?.id) return
     let alive = true
     setLoading(true); setError('')
-    (stackEnabled ? stackApi.history(projectId,page,PAGE_SIZE) : deploymentsApi.list(projectId,info.environment.id,page,PAGE_SIZE)).then(result => {
+    stackApi.history(projectId,page,PAGE_SIZE).then(result => {
       if (!alive) return
       setRuns(sortRecentRuns(result?.runs || [])); setCount(result?.count || 0)
     }).catch(err => { if (alive) setError(errorText(err)) })
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
-  },[projectId,info?.environment?.id,page,stackEnabled])
+  },[projectId,info?.environment?.id,page])
   useEffect(() => {
-    if (!info?.environment?.id || !runs.some(run=>isPublishing(run.status))) return
+    if (!info?.environment?.id) return
     let alive = true
     const timer = window.setInterval(() => {
-      (stackEnabled ? stackApi.history(projectId,page,PAGE_SIZE) : deploymentsApi.list(projectId,info.environment.id,page,PAGE_SIZE))
+      stackApi.history(projectId,page,PAGE_SIZE)
         .then(result => {
           if (alive) {setRuns(sortRecentRuns(result?.runs || []));setCount(result?.count ?? 0)}
         }).catch(err=>{if(alive)setError(errorText(err))})
-    },12000)
-    return () => {alive=false;window.clearInterval(timer)}
-  },[projectId,info?.environment?.id,stackEnabled,page,runs.map(run=>run.status).join('|')])
+    },runs.some(run=>isPublishing(run.status)) ? 10000 : 20000)
+    const onFocus = () => stackApi.history(projectId,page,PAGE_SIZE).then(result => {
+      if (alive) {setRuns(sortRecentRuns(result?.runs || []));setCount(result?.count ?? 0)}
+    }).catch(err => {if (alive) setError(errorText(err))})
+    window.addEventListener('focus', onFocus)
+    return () => {alive=false;window.clearInterval(timer);window.removeEventListener('focus',onFocus)}
+  },[projectId,info?.environment?.id,page,runs.map(run=>run.status).join('|')])
   const pages = Math.max(1,Math.ceil(count / PAGE_SIZE))
   return <>
     <div className="ak-back-line"><button className="button-quiet" onClick={() => navigate(`/projects/${projectId}`)}><ArrowLeft size={16}/> Retour au projet</button></div>
@@ -212,7 +215,7 @@ function RunHistory({ navigate, projectId }) {
     {error && <p className="feedback error" role="alert">{error}</p>}
     {info?.project && <ProjectPublicSite site={info.project.public_site} onManage={() => navigate(`/sites/${projectId}`)}/>}
     <section className="ak-workspace-sheet"><div className="ak-workspace-sheet-heading"><h2>Toutes les publications</h2><span className="ak-project-state">Page {page} / {pages}</span></div>
-      {loading ? <div className="ak-workspace-empty" role="status"><LoaderCircle className="ak-spin"/> Chargement…</div> : runs.length ? <div className="ak-deployment-list">{runs.map(run => <article className="ak-deployment-card" key={run.id}><div className="ak-deployment-summary"><div className="ak-deployment-symbol"><Workflow size={19}/></div><div className="ak-deployment-summary-text"><strong>{dateTime(run.created_at)}</strong><small>{publicationKind(run)} · {displayTrigger(run.trigger_type)} · Réf. {String(run.id).slice(0,8)}</small></div>{statusPill(run.status)}<button className="button-outline" type="button" onClick={() => navigate(publicationPath(projectId,run))}>Détails <ArrowRight size={16}/></button></div></article>)}</div> : <p className="ak-deployment-hint">Aucune publication enregistrée.</p>}
+      {loading ? <div className="ak-workspace-empty" role="status"><LoaderCircle className="ak-spin"/> Chargement…</div> : runs.length ? <div className="ak-deployment-list">{runs.map(run => <article className="ak-deployment-card" key={run.id}><div className="ak-deployment-summary"><div className="ak-deployment-symbol"><Workflow size={19}/></div><div className="ak-deployment-summary-text"><strong>{dateTime(run.created_at)}</strong><small>{publicationKind(run)} · {displayTrigger(run.trigger_type)} · Réf. {String(run.id).slice(0,8)}</small>{publicationServices(run) && <small className="ak-stack-run-services">{publicationServices(run)}</small>}</div>{statusPill(run.status)}<button className="button-outline" type="button" onClick={() => navigate(publicationPath(projectId,run))}>Détails <ArrowRight size={16}/></button></div></article>)}</div> : <p className="ak-deployment-hint">Aucune publication enregistrée.</p>}
       {count > PAGE_SIZE && <nav className="ak-run-pager" aria-label="Pages des publications"><button type="button" className="button-outline" disabled={page<=1 || loading} onClick={() => setPage(x=>Math.max(1,x-1))}>Précédente</button><span>{page} / {pages}</span><button type="button" className="button-outline" disabled={page>=pages || loading} onClick={() => setPage(x=>Math.min(pages,x+1))}>Suivante <ArrowRight size={14}/></button></nav>}
     </section>
   </>

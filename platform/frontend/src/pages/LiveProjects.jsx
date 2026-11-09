@@ -8,7 +8,7 @@ import { publicSiteUrl } from '../services/sitePresentation.js'
 import { sortRecentRuns, isPublishing, canPublish } from '../services/deploymentHistory.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
 import { stackApi } from '../services/stackApi.js'
-import { publicationPath, publicationKind } from '../services/stackHistory.js'
+import { publicationPath, publicationKind, publicationServices } from '../services/stackHistory.js'
 
 function formatDate(value) {
   if (!value) return 'Non renseignée'
@@ -34,12 +34,13 @@ export default function LiveProjects({ navigate, projectId = null }) {
     let alive = true
     setLoading(true); setError(''); setLaunchError(''); setDetail(null); setStackEnabled(false)
     const request = projectId
-      ? Promise.all([getRemoteProjectDetail(projectId), stackApi.detail(projectId)]).then(async ([info, settings]) => {
-          const enabled = Boolean(settings?.stack)
-          if (!enabled) return {info, enabled}
-          const feed = await stackApi.history(projectId, 1, 10)
-          return {info:{...info, runs:feed?.runs || [], runCount:feed?.count ?? 0},enabled}
-        })
+      ? Promise.all([getRemoteProjectDetail(projectId), stackApi.detail(projectId), stackApi.history(projectId, 1, 10)])
+          .then(([info, settings, feed]) => {
+            // L'historique consolidé est systématique, même si l'ancienne configuration
+            // du projet ne permet pas de détecter le mode frontend + backend.
+            const enabled = Boolean(settings?.stack)
+            return { info:{...info, runs:feed?.runs || [], runCount:feed?.count ?? 0}, enabled }
+          })
       : listRemoteProjectRecords()
     request.then(result => {
       if (!alive) return
@@ -51,15 +52,19 @@ export default function LiveProjects({ navigate, projectId = null }) {
   }, [projectId])
 
   useEffect(() => {
-    if (!projectId || !detail?.runs?.some(run => isPublishing(run.status))) return
+    if (!projectId || !detail?.environment?.id) return
     let alive = true
-    const timer = window.setInterval(() => {
-      (stackEnabled ? stackApi.history(projectId, 1, 10) : deploymentsApi.list(projectId, detail.environment.id, 1, 10)).then(next => {
+    const refresh = () => {
+      // Recharger également les publications terminées : un autre onglet ou un
+      // webhook GitHub peuvent créer un groupe pendant que cette page est ouverte.
+      stackApi.history(projectId, 1, 10).then(next => {
         if (alive) setDetail(previous => previous ? {...previous, runs:next?.runs || [], runCount: next?.count ?? previous.runCount} : previous)
       }).catch(() => {})
-    }, 12000)
-    return () => { alive = false; window.clearInterval(timer) }
-  }, [projectId, stackEnabled, detail?.environment?.id, detail?.runs?.map(run => run.status).join('|')])
+    }
+    const timer = window.setInterval(refresh, detail.runs.some(run => isPublishing(run.status)) ? 10000 : 20000)
+    window.addEventListener('focus', refresh)
+    return () => { alive = false; window.clearInterval(timer); window.removeEventListener('focus', refresh) }
+  }, [projectId, detail?.environment?.id, detail?.runs?.map(run => run.status).join('|')])
 
   // Re-read the authoritative HTTPS state while an old deployed site's DNS
   // is being reconciled. Refreshing does not launch Jenkins or change domains.
@@ -123,7 +128,7 @@ export default function LiveProjects({ navigate, projectId = null }) {
         <div className="ak-project-hero-actions">
           <span className={`ak-publication-pill state-${latest.length ? statusTone : 'muted'}`} role="status">{latest.length ? statusText : 'Non publié'}</span>
           <button type="button" className="ak-project-settings-icon" onClick={() => navigate(`/projects/${project.id}/settings`)} title="Paramètres du projet" aria-label="Paramètres du projet"><Settings2 size={18}/></button>
-          {active && !stackEnabled ? <button type="button" className="button-primary" onClick={() => navigate(`/projects/${project.id}/deployments/${active.id}`)}><Clock3 size={17}/> Suivre la publication</button> : <button type="button" className="button-primary" disabled={busy || (!ready && !stackEnabled)} onClick={publishNow}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <Rocket size={17}/>} {busy ? 'Préparation…' : 'Déployer maintenant'}</button>}
+          {active ? <button type="button" className="button-primary" onClick={() => navigate(publicationPath(project.id, active))}><Clock3 size={17}/> Suivre la publication</button> : <button type="button" className="button-primary" disabled={busy || (!ready && !stackEnabled)} onClick={publishNow}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <Rocket size={17}/>} {busy ? 'Préparation…' : 'Déployer maintenant'}</button>}
         </div>
       </section>
       {launchError && <p className="feedback error" role="alert">{launchError}</p>}
@@ -137,7 +142,7 @@ export default function LiveProjects({ navigate, projectId = null }) {
           return <article className="ak-deployment-card" key={run.id}>
             <div className="ak-deployment-summary">
               <div className="ak-deployment-symbol"><Workflow size={19}/></div>
-              <div className="ak-deployment-summary-text"><strong>Publication du {formatDate(run.created_at)}</strong><small>{publicationKind(run)} · {run.trigger_type === 'GIT_PUSH' ? 'Mise à jour automatique' : 'Lancement manuel'} · Réf. {String(run.id).slice(0,8)}</small></div>
+              <div className="ak-deployment-summary-text"><strong>Publication du {formatDate(run.created_at)}</strong><small>{publicationKind(run)} · {run.trigger_type === 'GIT_PUSH' ? 'Mise à jour automatique' : 'Lancement manuel'} · Réf. {String(run.id).slice(0,8)}</small>{publicationServices(run) && <small className="ak-stack-run-services">{publicationServices(run)}</small>}</div>
               <span className={`ak-publication-pill state-${tone}`}>{label}</span>
               <button type="button" className="button-outline" onClick={() => navigate(publicationPath(project.id, run))}>Voir les détails <ArrowRight size={15}/></button>
             </div>

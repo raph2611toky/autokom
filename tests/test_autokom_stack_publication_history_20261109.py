@@ -89,6 +89,25 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(feed['runs'][0]['frontend_status'],'PENDING')
         self.assertTrue(self.scoped_projects)
 
+    def test_five_old_deployments_do_not_hide_completed_backend_and_frontend_group(self):
+        self.legacy.extend(SimpleNamespace(
+            id=f'legacy-{i}',pk=f'legacy-{i}',environment=self.production,is_child=False,
+            created_at=self.now-timedelta(hours=i+1),status='SUCCEEDED',branch='main'
+        ) for i in range(4))
+        self.context['DeploymentRun'] = SimpleNamespace(objects=Query([*self.legacy,self.child]))
+        self.group.status = 'SUCCEEDED'
+        self.group.finished_at = self.now + timedelta(minutes=10)
+        self.group.backend_run.status = 'SUCCEEDED'
+        self.group.frontend_run = SimpleNamespace(
+            id='frontend-run',environment_id='frontend-env',status='SUCCEEDED')
+        feed = self.run_method('StackPublicationHistoryAPIView')
+        self.assertEqual(feed['count'], 6)
+        self.assertEqual(feed['runs'][0]['kind'], 'stack')
+        self.assertEqual(feed['runs'][0]['status'], 'SUCCEEDED')
+        self.assertEqual(feed['runs'][0]['backend_status'], 'SUCCEEDED')
+        self.assertEqual(feed['runs'][0]['frontend_status'], 'SUCCEEDED')
+        self.assertEqual(sum(row['kind']=='single' for row in feed['runs']), 5)
+
     def test_feed_page_two_is_stable(self):
         self.requests.query_params = {'page':'2','page_size':'1'}
         feed = self.run_method('StackPublicationHistoryAPIView')
