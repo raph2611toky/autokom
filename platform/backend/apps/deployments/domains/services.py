@@ -173,3 +173,29 @@ def deactivate_domain(user, project_id, environment_id, domain_id):
     domain.verified_at=None
     domain.save(update_fields=['status','tls_status','verified_at','is_disabled','activation_error_code'])
     return domain
+
+
+def activate_stack_domain_for_release(environment, hostname):
+    """Activate one owned stack name; do not affect legacy domains or aliases."""
+    if not hostname:
+        raise ValidationError({'domain': 'Nom de domaine du service absent.'})
+    domain = Domain.objects.filter(environment=environment, hostname=hostname, is_disabled=False).first()
+    if domain is None:
+        raise ValidationError({'domain': 'Domaine non réservé à ce service.'})
+    token = _challenge(domain)
+    managed = _managed(domain.hostname)
+    if (domain.domain_type == Domain.Type.SUBDOMAIN) != managed:
+        raise ValidationError({'domain': 'Type DNS non conforme.'})
+    if managed:
+        request_control('domain.dns.create', {'hostname': domain.hostname}, timeout=22)
+    # DNS A + ownership TXT (external) are checked before HTTPS certificate issuance.
+    request_control('domain.verify', {'hostname': domain.hostname,
+        'managed': managed, 'token': token}, timeout=20)
+    request_control('domain.activate', {'hostname': domain.hostname,
+        'environment_id': str(environment.id), 'managed': managed, 'token': token}, timeout=720)
+    domain.verified_at = timezone.now()
+    domain.status = Domain.Status.ACTIVE
+    domain.tls_status = 'ACTIVE'
+    domain.activation_error_code = ''
+    domain.save(update_fields=['verified_at', 'status', 'tls_status', 'activation_error_code'])
+    return domain

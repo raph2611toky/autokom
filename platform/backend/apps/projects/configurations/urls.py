@@ -2,11 +2,12 @@ from django.urls import path
 from apps.projects.configurations.views import (ConfigurationListAPIView, ConfigurationCreateAPIView,
     ConfigurationDetailAPIView, ConfigurationUpdateAPIView, ConfigurationFinalizeAPIView, ConfigurationOffersAPIView)
 
-from apps.projects.configurations.stack_views import StackAPIView, StackLaunchAPIView, StackDeploymentDetailAPIView
+from apps.projects.configurations.stack_views import StackAPIView, StackLaunchAPIView, StackDeploymentDetailAPIView, StackDomainPreflightAPIView
 
 app_name = 'project_configurations'
 urlpatterns = [
     path('<uuid:project_id>/stack/', StackAPIView.as_view(), name='stack'),
+    path('<uuid:project_id>/stack/domains/preflight/', StackDomainPreflightAPIView.as_view(), name='stack-domain-preflight'),
     path('<uuid:project_id>/stack/launch/', StackLaunchAPIView.as_view(), name='stack-launch'),
     path('<uuid:project_id>/stack/deployments/<uuid:stack_run_id>/', StackDeploymentDetailAPIView.as_view(), name='stack-run'),
     path('<uuid:project_id>/environments/<uuid:environment_id>/configurations/', ConfigurationListAPIView.as_view(), name='list'),

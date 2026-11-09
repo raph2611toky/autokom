@@ -393,6 +393,11 @@ def _release_docker_and_proxy(run, *, stack=None, stack_role=None):
                          'stack_role': stack_role}
         if stack_role == 'frontend':
             stack_options['stack_backend_environment_id'] = str(stack.stack.backend_environment_id)
+            backend_cfg = (DeploymentConfig.objects.filter(environment=stack.stack.backend_environment,
+                           is_draft=False).order_by('-version').first())
+            from apps.projects.configurations.stack_services import stack_domain_hostname
+            stack_options['stack_backend_hostname'] = stack_domain_hostname(
+                stack.stack.backend_environment, backend_cfg)
     result=request_control('runtime.deploy',{
         **stack_options,
         'run_id':str(run.pk),'environment_id':str(run.environment_id),

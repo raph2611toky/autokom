@@ -57,7 +57,7 @@ def validate_backend_source(path, profile, cfg):
     # SQLite is an advisory risk (ephemeral data), not a reason to reject a valid profile.
     if profile not in BACKEND_PROFILES:
         raise ValueError('Profil backend non autorisé.')
-    if cfg.get('port') != 8080 or cfg.get('runtime') != BACKEND_RUNTIME[profile]:
+    if cfg.get('port') not in (8000, 8080) or cfg.get('runtime') != BACKEND_RUNTIME[profile]:
         raise ValueError('Runtime ou port interne incompatible avec la recette approuvée.')
     if cfg.get('build_command') or cfg.get('start_command') or cfg.get('output_directory'):
         raise ValueError('Les commandes personnalisées ne sont pas autorisées pour les recettes backend automatiques.')
@@ -109,11 +109,11 @@ def validate_backend_source(path, profile, cfg):
     return None
 
 
-def _php_nginx(public_root):
+def _php_nginx(public_root, port=8080):
     return ('worker_processes 1; pid /tmp/nginx.pid; events { worker_connections 1024; }\n'
             'http { include /etc/nginx/mime.types; default_type application/octet-stream;\n'
             'access_log /dev/stdout; error_log /dev/stderr warn;\n'
-            'server { listen 8080; server_name _; root ' + public_root + '; index index.php index.html;\n'
+            f'server {{ listen {port}; server_name _; root ' + public_root + '; index index.php index.html;\n'
             'location / { rewrite ^ /index.php last; }\n'
             'location ~* \\.(?:css|js|mjs|map|svg|png|jpg|jpeg|gif|webp|ico|woff|woff2|ttf|otf|pdf|txt)$ { try_files $uri =404; }\n'
             'location = /index.php { include fastcgi_params; fastcgi_param SCRIPT_FILENAME $document_root/index.php; '
@@ -126,17 +126,18 @@ def _php_nginx(public_root):
 def backend_recipe(profile, path, cfg):
     """Return a trusted Dockerfile and its non-secret accompanying runtime config."""
     entry = validate_backend_source(path, profile, cfg)
+    port = int(cfg['port'])
     files = {}
     if profile in PYTHON:
         image = 'python:3.12-slim'
         install = ('FROM ' + image + '\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1\n'
                    'WORKDIR /app\nCOPY requirements.txt ./\n'
                    'RUN pip install --no-cache-dir -r requirements.txt gunicorn==23.0.0 uvicorn==0.37.0\n'
-                   'COPY --chown=10001:10001 . .\nUSER 10001:10001\nEXPOSE 8080\n')
+                   f'COPY --chown=10001:10001 . .\nUSER 10001:10001\nEXPOSE {port}\n')
         if profile == 'python_fastapi':
-            cmd = ['python', '-m', 'uvicorn', entry, '--host', '0.0.0.0', '--port', '8080']
+            cmd = ['python', '-m', 'uvicorn', entry, '--host', '0.0.0.0', '--port', str(port)]
         else:
-            cmd = ['gunicorn', '--bind', '0.0.0.0:8080', '--workers', '2', entry]
+            cmd = ['gunicorn', '--bind', f'0.0.0.0:{port}', '--workers', '2', entry]
         return install + 'CMD ' + json.dumps(cmd) + '\n', files
     if profile in NODE:
         base = ('FROM node:22-alpine AS builder\nWORKDIR /app\n'
@@ -145,8 +146,8 @@ def backend_recipe(profile, path, cfg):
         if profile == 'node_nest':
             base += 'RUN npm run build\n'
         base += 'RUN npm prune --omit=dev --ignore-scripts --no-audit --no-fund\n'
-        base += ('FROM node:22-alpine\nWORKDIR /app\nENV NODE_ENV=production PORT=8080 HOST=0.0.0.0\n'
-                 'COPY --chown=node:node --from=builder /app/ ./\nUSER node\nEXPOSE 8080\n')
+        base += (f'FROM node:22-alpine\nWORKDIR /app\nENV NODE_ENV=production PORT={port} HOST=0.0.0.0\n'
+                 f'COPY --chown=node:node --from=builder /app/ ./\nUSER node\nEXPOSE {port}\n')
         cmd = 'start:prod' if profile == 'node_nest' else 'start'
         return base + 'CMD ["npm", "run", "' + cmd + '"]\n', files
     if profile in JAVA:
@@ -162,11 +163,11 @@ def backend_recipe(profile, path, cfg):
                     'find build/libs -maxdepth 1 -name "*.jar" ! -name "*-plain.jar" -print -quit '
                     '| xargs -r -I{} cp "{}" /tmp/autokom-app.jar && test -s /tmp/autokom-app.jar\n')
         return (base + 'FROM eclipse-temurin:21-jre-alpine\nWORKDIR /app\n'
-                'ENV SERVER_PORT=8080\n'
+                f'ENV SERVER_PORT={port} PORT={port}\n'
                 'COPY --chown=10001:10001 --from=builder /tmp/autokom-app.jar /app/app.jar\n'
-                'USER 10001:10001\nEXPOSE 8080\nCMD ["java","-jar","/app/app.jar"]\n'), files
+                f'USER 10001:10001\nEXPOSE {port}\nCMD ["java","-jar","/app/app.jar"]\n'), files
     php_root = '/app' if profile == 'php_plain' else '/app/public'
-    files['autokom-php-nginx.conf'] = _php_nginx(php_root)
+    files['autokom-php-nginx.conf'] = _php_nginx(php_root, port)
     files['autokom-php-fpm.conf'] = '[www]\nlisten = 127.0.0.1:9000\n'
     # Both Nginx and PHP-FPM run under the non-privileged www-data user.
     base = ('FROM php:8.3-fpm-alpine AS php-base\n'
@@ -186,6 +187,6 @@ def backend_recipe(profile, path, cfg):
     base += ('COPY autokom-php-nginx.conf /etc/nginx/nginx.conf\n'
              'COPY autokom-php-fpm.conf /usr/local/etc/php-fpm.d/zzzz-autokom.conf\n'
              'RUN chown -R www-data:www-data /app /run/nginx /var/cache/nginx /tmp/php-fpm\n'
-             'USER www-data\nEXPOSE 8080\n'
+             f'USER www-data\nEXPOSE {port}\n'
              "CMD [\"sh\",\"-c\",\"php-fpm -D && exec nginx -g 'daemon off;'\"]\n")
     return base, files

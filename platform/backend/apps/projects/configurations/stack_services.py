@@ -5,11 +5,12 @@ Dockerfiles, shell commands, public ports or cross-project environments.
 """
 import re
 import secrets
+import time
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError, PermissionDenied
-from apps.projects.common import get_project, safe_relative_path
+from apps.projects.common import get_project, safe_relative_path, validate_hostname
 from apps.projects.configurations.models import DeploymentConfig, ServiceStack
 from apps.projects.configurations.services import (
     BACKEND_RUNTIMES, check_configuration, check_entitlement, validate_branch, create_config,
@@ -19,7 +20,7 @@ from apps.projects.project.services import free_entitlement
 from apps.projects.secrets.models import SecretReference
 from apps.projects.git.services import encrypt
 from apps.deployments.domains.models import Domain
-from apps.deployments.domains.services import claim_domain
+from apps.deployments.domains.services import claim_domain, domain_summary, _challenge
 from apps.deployments.runs.models import StackDeployment, DeploymentRun
 from apps.deployments.runs.services import (
     plan_deployment, ensure_runner_ready, _select_branch_commit, _create_run,
@@ -37,9 +38,13 @@ class StackComponentSerializer(serializers.Serializer):
     root_directory = serializers.CharField(max_length=300, allow_blank=True, default='')
     profile = serializers.CharField(max_length=50)
     healthcheck = serializers.CharField(max_length=128, default='/')
+    hostname = serializers.CharField(max_length=253, allow_blank=True, required=False, default='')
     output_directory = serializers.ChoiceField(choices=['dist', 'build'], default='build', required=False)
     variables = serializers.DictField(child=serializers.CharField(allow_blank=True, max_length=32768), required=False)
     secrets = serializers.DictField(child=serializers.CharField(allow_blank=False, max_length=10000), required=False, write_only=True)
+
+    def validate_hostname(self, value):
+        return validate_hostname(value) if value else ''
 
     def validate_branch(self, value):
         if not value.strip() or value.startswith('-') or '..' in value or '\x00' in value:
@@ -64,6 +69,10 @@ class StackComponentSerializer(serializers.Serializer):
         values, secrets_dict = attrs.get('variables', {}), attrs.get('secrets', {})
         if len(values) + len(secrets_dict) > 50 or set(values) & set(secrets_dict):
             raise serializers.ValidationError('Variables dupliquées ou trop nombreuses.')
+        reserved = ({'PORT', 'FRONTEND_ORIGIN', 'NODE_ENV', 'BACKEND_INTERNAL_URL'} if kind == 'backend'
+                    else {'VITE_API_URL', 'REACT_APP_API_URL', 'VUE_APP_API_URL', 'NEXT_PUBLIC_API_URL'})
+        if reserved.intersection(values) or reserved.intersection(secrets_dict):
+            raise serializers.ValidationError({'variables': 'Variable gérée automatiquement par AUTOKOM : ne pas la modifier.'})
         for name, value in {**values, **secrets_dict}.items():
             if not ENV_KEY.fullmatch(name) or name.startswith(('AUTOKOM_', 'DOCKER_')):
                 raise serializers.ValidationError({'variables': 'Nom de variable réservé ou invalide.'})
@@ -105,11 +114,12 @@ def _component_config(env, user, data, kind):
     cfg.branch = data['branch']
     cfg.root_directory = data['root_directory']
     cfg.mode = 'DEVOPS'
-    cfg.internal_port = 8080
+    # Only the opt-in stack backend listens on 8000. Legacy services stay on 8080.
+    cfg.internal_port = 8000 if kind == 'backend' else 8080
     cfg.healthcheck_path = data['healthcheck']
     cfg.auto_deploy = False  # Stack pushes are coordinated, never standalone.
     cfg.auto_deploy_branch = ''
-    cfg.settings = {'frontend_profile': profile}
+    cfg.settings = {'frontend_profile': profile, 'stack_hostname': data['hostname']}
     if kind == 'frontend':
         cfg.runtime_type = 'NODE' if profile == 'next_server' else 'STATIC'
         cfg.build_method = 'AUTO' if profile == 'next_server' else 'STATIC'
@@ -139,7 +149,14 @@ def _sync_variables(project, env, data, kind, *, api_url):
         prefix = ('NEXT_PUBLIC_' if profile.startswith('next_') else
                   'REACT_APP_' if profile == 'npm_static' else 'VITE_')
         # Explicit generated public route, rather than exposing the backend bridge IP.
-        values[f'{prefix}API_URL'] = '/__autokom_backend'
+        # Public build-time value: never expose a private Docker IP or a secret.
+        values[f'{prefix}API_URL'] = 'https://' + api_url + '/api'
+    else:
+        # Runtime settings are authoritative and cannot be changed by an imported .env.
+        values['PORT'] = '8000'
+        values['FRONTEND_ORIGIN'] = 'https://' + api_url
+        if data['profile'].startswith('node_'):
+            values['NODE_ENV'] = 'production'
     for key, value in values.items():
         item, _ = EnvironmentVariable.objects.get_or_create(environment=env, key=key)
         if item.secret_id:
@@ -164,11 +181,25 @@ def _sync_variables(project, env, data, kind, *, api_url):
         item.save(update_fields=['value', 'secret', 'updated_at'])
 
 
+def stack_domain_hostname(environment, cfg):
+    """Current selected name, with compatibility for stacks saved before host editing."""
+    configured = (cfg.settings or {}).get('stack_hostname') if cfg else None
+    if configured:
+        return configured
+    legacy = (Domain.objects.filter(environment=environment, is_primary=True).first()
+              or Domain.objects.filter(environment=environment, domain_type=Domain.Type.SUBDOMAIN)
+                   .order_by('created_at').first()
+              or Domain.objects.filter(environment=environment).order_by('created_at').first())
+    return legacy.hostname if legacy else ''
+
+
 def stack_summary(stack):
     fcfg = DeploymentConfig.objects.filter(environment=stack.frontend_environment, is_draft=False).order_by('-version').first()
     bcfg = DeploymentConfig.objects.filter(environment=stack.backend_environment, is_draft=False).order_by('-version').first()
-    fdomain = Domain.objects.filter(environment=stack.frontend_environment, domain_type='SUBDOMAIN').first()
-    bdomain = Domain.objects.filter(environment=stack.backend_environment, domain_type='SUBDOMAIN').first()
+    fhost = stack_domain_hostname(stack.frontend_environment, fcfg)
+    bhost = stack_domain_hostname(stack.backend_environment, bcfg)
+    fdomain = Domain.objects.filter(environment=stack.frontend_environment, hostname=fhost).first()
+    bdomain = Domain.objects.filter(environment=stack.backend_environment, hostname=bhost).first()
     latest = stack.deployments.order_by('-created_at').first()
     fvars = list(EnvironmentVariable.objects.filter(environment=stack.frontend_environment, secret__isnull=True)
                  .order_by('key').values('key', 'value'))
@@ -182,11 +213,15 @@ def stack_summary(stack):
         'frontend': {'environment_id': str(stack.frontend_environment_id),
                      'branch': fcfg.branch if fcfg else '', 'root_directory': fcfg.root_directory if fcfg else '',
                      'profile': (fcfg.settings or {}).get('frontend_profile') if fcfg else '',
-                     'domain': fdomain.hostname if fdomain else '', 'variables': fvars},
+                     'domain': fdomain.hostname if fdomain else '',
+                     'verification': domain_summary(fdomain, include_challenge=True).get('verification') if fdomain else None,
+                     'variables': fvars},
         'backend': {'environment_id': str(stack.backend_environment_id),
                     'branch': bcfg.branch if bcfg else '', 'root_directory': bcfg.root_directory if bcfg else '',
                     'profile': (bcfg.settings or {}).get('frontend_profile') if bcfg else '',
-                    'domain': bdomain.hostname if bdomain else '', 'variables': bvars, 'secret_names': bsecrets},
+                    'domain': bdomain.hostname if bdomain else '',
+                    'verification': domain_summary(bdomain, include_challenge=True).get('verification') if bdomain else None,
+                    'internal_port': bcfg.internal_port if bcfg else 8080, 'variables': bvars, 'secret_names': bsecrets},
         'latest': {'id': str(latest.id), 'status': latest.status,
                    'backend_run_id': str(latest.backend_run_id),
                    'frontend_run_id': str(latest.frontend_run_id) if latest.frontend_run_id else None,
@@ -213,6 +248,23 @@ def configure_stack(user, project_id, attrs):
         raise ValidationError('Projet actif connecté à GitHub requis.')
     if project.pk is None:
         raise ValidationError('Projet invalide.')
+    # Resolve and validate hostnames before reserving any domain.
+    from django.conf import settings
+    from apps.projects.common import default_hostname
+    from apps.deployments.domains.services import _managed
+    from apps.deployments.runs.autokom_socket import request_control
+    default_front = default_hostname(project.slug)
+    fhost = validate_hostname(attrs['frontend'].get('hostname') or default_front)
+    bhost = validate_hostname(attrs['backend'].get('hostname') or ('backend.' + fhost))
+    if fhost == bhost:
+        raise ValidationError({'domain': 'Le frontend et le backend doivent avoir deux domaines distincts.'})
+    # Only the configured managed zone may be created automatically. External
+    # domains require the existing TXT ownership proof before publication.
+    managed = [host for host in (fhost,bhost) if _managed(host)]
+    if managed:
+        request_control('domain.config.check', {'managed_suffix': settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX,
+                                                'managed_hosts': managed}, timeout=15)
+    attrs['frontend']['hostname'], attrs['backend']['hostname'] = fhost, bhost
     # Remote branch verification is performed before database write/locks.
     # This validates that both commits belong to the authorized installation.
     installation_id = project.git_connection.installation_id
@@ -259,19 +311,59 @@ def configure_stack(user, project_id, attrs):
                                                 backend_environment=backend_env)
         frontend_cfg = _component_config(frontend_env, user, attrs['frontend'], 'frontend')
         backend_cfg = _component_config(backend_env, user, attrs['backend'], 'backend')
-        primary = Domain.objects.filter(environment=frontend_env, domain_type='SUBDOMAIN').first()
-        if primary is None:
-            raise ValidationError('Domaine frontend géré AUTOKOM manquant.')
-        backend_hostname = 'backend.' + primary.hostname
-        if len(backend_hostname) > 253:
-            raise ValidationError('Le domaine backend serait trop long.')
-        if not Domain.objects.filter(environment=backend_env, hostname=backend_hostname).exists():
-            claim_domain(user, project.pk, backend_env.pk, backend_hostname, Domain.Type.SUBDOMAIN)
-        _sync_variables(project, frontend_env, attrs['frontend'], 'frontend', api_url=backend_hostname)
-        _sync_variables(project, backend_env, attrs['backend'], 'backend', api_url=backend_hostname)
+        # Claim both names under their own environment. An existing domain in a
+        # different project/environment is never adopted or overwritten.
+        for kind, env, host in (('frontend', frontend_env, fhost), ('backend', backend_env, bhost)):
+            if not Domain.objects.filter(environment=env, hostname=host).exists():
+                claim_domain(user, project.pk, env.pk, host,
+                             Domain.Type.SUBDOMAIN if _managed(host) else Domain.Type.CUSTOM)
+        _sync_variables(project, frontend_env, attrs['frontend'], 'frontend', api_url=bhost)
+        _sync_variables(project, backend_env, attrs['backend'], 'backend', api_url=fhost)
         stack.auto_deploy = attrs['auto_deploy']
         stack.save(update_fields=['auto_deploy', 'updated_at'])
         return stack
+
+
+def preflight_stack_domains(stack):
+    """Verify both owned hostnames against the public origin before a build.
+
+    Managed DNS can be created by the root-only broker. External domains must
+    already have a matching _autokom-challenge TXT proof and an A record to the
+    correct ingress IP. A proxied Cloudflare record intentionally does not pass
+    the existing broker check (it resolves to Cloudflare rather than origin).
+    """
+    from apps.deployments.runs.autokom_socket import request_control
+    from apps.deployments.domains.services import _challenge, _managed
+    checked = []
+    for kind, env in (('backend', stack.backend_environment),
+                      ('frontend', stack.frontend_environment)):
+        cfg = (DeploymentConfig.objects.filter(environment=env, is_draft=False)
+               .order_by('-version').first())
+        host = stack_domain_hostname(env, cfg)
+        domain = Domain.objects.filter(environment=env, hostname=host, is_disabled=False).first()
+        if not domain or domain.organization_id != stack.project.organization_id:
+            raise ValidationError({kind: 'Domaine non réservé pour ce service.'})
+        managed = _managed(domain.hostname)
+        if (domain.domain_type == Domain.Type.SUBDOMAIN) != managed:
+            raise ValidationError({kind: 'Type de domaine incompatible avec sa zone DNS.'})
+        if managed:
+            request_control('domain.dns.create', {'hostname': domain.hostname}, timeout=25)
+        from apps.deployments.runs.autokom_socket import AutokomControlUnavailable
+        dns_result = None
+        for attempt in range(4 if managed else 1):
+            try:
+                dns_result = request_control('domain.verify', {
+                    'hostname': domain.hostname, 'managed': managed,
+                    'token': _challenge(domain),
+                }, timeout=25)
+                break
+            except AutokomControlUnavailable:
+                if attempt == (3 if managed else 0):
+                    raise
+                time.sleep((attempt + 1) * 3)
+        checked.append({'service': kind, 'hostname': domain.hostname, 'verified': True,
+                        'ipv4': dns_result.get('ipv4') if dns_result else None})
+    return checked
 
 
 def _split_resources(backend, frontend):
@@ -300,6 +392,8 @@ def launch_stack(user, stack, *, idempotency_key=None, trigger=DeploymentRun.Tri
     existing = StackDeployment.objects.filter(idempotency_key=idem).first()
     if existing:
         return existing, False
+    # Enforce DNS/ownership checks server-side, even when the UI was bypassed.
+    preflight_stack_domains(stack)
     backend_cfg, back_resources = plan_deployment(stack.backend_environment)
     frontend_cfg, front_resources = plan_deployment(stack.frontend_environment)
     resources = _split_resources(back_resources, front_resources)

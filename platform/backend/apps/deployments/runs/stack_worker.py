@@ -31,7 +31,7 @@ def _rollback_pair(group):
             result = request_control('runtime.rollback', {'run_id': str(run.id),
                 'environment_id': str(run.environment_id)}, timeout=35)
             if result.get('rolled_back') and not result.get('previous_available'):
-                Domain.objects.filter(environment_id=run.environment_id, domain_type='SUBDOMAIN').update(
+                Domain.objects.filter(environment_id=run.environment_id).update(
                     status='PENDING', tls_status='', is_primary=False)
         except Exception as exc:
             ok = False
@@ -78,15 +78,20 @@ def _new_frontend_run(group):
 
 def _activate_group(group):
     """Domains only become public when BOTH isolated candidates are healthy."""
-    from apps.deployments.domains.services import activate_managed_domains_for_release
+    from apps.deployments.domains.services import activate_stack_domain_for_release
+    from apps.projects.configurations.stack_services import stack_domain_hostname
     from apps.deployments.runs.autokom_socket import request_control
     from apps.deployments.runs.worker import register_release, add_log
     group.status = 'ACTIVATING'
     group.save(update_fields=['status'])
     try:
         # The backend must have its own public HTTPS name first.
-        activate_managed_domains_for_release(group.stack.backend_environment)
-        activate_managed_domains_for_release(group.stack.frontend_environment)
+        backend_cfg = (DeploymentConfig.objects.filter(environment=group.stack.backend_environment,
+                      is_draft=False).order_by('-version').first())
+        activate_stack_domain_for_release(group.stack.backend_environment,
+                                         stack_domain_hostname(group.stack.backend_environment, backend_cfg))
+        activate_stack_domain_for_release(group.stack.frontend_environment,
+                                         stack_domain_hostname(group.stack.frontend_environment, group.frontend_configuration))
     except Exception as exc:
         logger.warning('Refus HTTPS groupé pour %s (%s)', group.pk, type(exc).__name__)
         return _fail_group(group, code='AUTOKOM_STACK_HTTPS_FAILED')
@@ -114,6 +119,19 @@ def _activate_group(group):
             add_log(run, 'AUTOKOM_STAGE:release:SUCCESS')
             add_log(run, 'AUTOKOM_STAGE:health:SUCCESS')
             add_log(run, 'AUTOKOM_LOG: Les deux services et domaines HTTPS sont en ligne.')
+        # Promote the selected public hosts only after both services were
+        # committed; on database failure leave explicit BLOCKED for reconciliation.
+        from apps.deployments.domains.models import Domain
+        with transaction.atomic():
+            for env, cfg in ((group.stack.frontend_environment, group.frontend_configuration),
+                             (group.stack.backend_environment, backend_cfg)):
+                host = stack_domain_hostname(env, cfg)
+                desired = Domain.objects.select_for_update().get(environment=env, hostname=host,
+                                          status='ACTIVE', tls_status='ACTIVE')
+                Domain.objects.filter(environment=env, is_primary=True).exclude(pk=desired.pk).update(is_primary=False)
+                if not desired.is_primary:
+                    desired.is_primary = True
+                    desired.save(update_fields=['is_primary'])
     except Exception as exc:
         group.status = 'BLOCKED'
         group.error_code = 'AUTOKOM_STACK_DATABASE_RECONCILE_REQUIRED'

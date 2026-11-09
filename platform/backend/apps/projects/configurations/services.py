@@ -49,9 +49,10 @@ def check_configuration(cfg):
             if cfg.start_command not in ('', 'npm run start'):
                 issues['start_command'] = 'Démarrage Next.js : npm run start.'
         elif profile in BACKEND_RUNTIMES:
-            if (cfg.runtime_type != BACKEND_RUNTIMES[profile] or cfg.internal_port != 8080 or
+            if (cfg.runtime_type != BACKEND_RUNTIMES[profile] or
+                    cfg.internal_port != (8000 if options.get('stack_hostname') else 8080) or
                     cfg.output_directory or cfg.build_command or cfg.start_command):
-                issues['build_method'] = 'Profil backend : port privé 8080 et recettes sans commandes libres obligatoires.'
+                issues['build_method'] = 'Profil backend : port privé géré (8000 en mode duo) et aucune commande libre.'
         else:
             issues['build_method'] = 'Recette serveur non autorisée.'
     elif cfg.build_method == DeploymentConfig.BuildMethod.DOCKERFILE:

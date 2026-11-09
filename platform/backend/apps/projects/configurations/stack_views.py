@@ -7,7 +7,7 @@ from apps.accounts.user.permissions import IsClientUser
 from apps.projects.common import get_project
 from apps.projects.configurations.models import ServiceStack
 from apps.projects.configurations.stack_services import (
-    StackConfigureSerializer, configure_stack, stack_summary, launch_stack,
+    StackConfigureSerializer, configure_stack, stack_summary, launch_stack, preflight_stack_domains,
 )
 from helpers.responses import api_success
 from helpers.errors import handle_error
@@ -34,6 +34,38 @@ class StackAPIView(APIView):
             return api_success({'stack': stack_summary(stack)}, 'Deux services configurés. Aucun déploiement lancé.')
         except Exception as exc:
             return handle_error(exc, 'stack_configure')
+
+
+class StackDomainPreflightAPIView(APIView):
+    parser_classes = [JSONParser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'domains'
+    permission_classes = [IsClientUser]
+
+    def get(self, request, project_id):
+        try:
+            from django.conf import settings
+            from apps.deployments.runs.autokom_socket import request_control
+            get_project(request.user, project_id)
+            info = request_control('domain.config.check', {
+                'managed_suffix': settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX,
+            }, timeout=15)
+            return api_success({'ingress_ipv4': info['ingress_ipv4'],
+                                'managed_suffix': info['managed_suffix']},
+                               'Adresse DNS attendue pour les domaines de votre projet.')
+        except Exception as exc:
+            return handle_error(exc, 'stack_domain_settings')
+
+    def post(self, request, project_id):
+        try:
+            project = get_project(request.user, project_id, write=True)
+            stack = ServiceStack.objects.filter(project=project).first()
+            if not stack:
+                raise NotFound('Configurer les deux services et leurs domaines avant validation DNS.')
+            checks = preflight_stack_domains(stack)
+            return api_success({'domains': checks}, 'DNS vérifié pour les deux services ; aucun conteneur publié.')
+        except Exception as exc:
+            return handle_error(exc, 'stack_domain_preflight')
 
 
 class StackLaunchAPIView(APIView):

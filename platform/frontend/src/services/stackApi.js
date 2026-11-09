@@ -6,6 +6,8 @@ const uuid = value => {
 export const stackApi = Object.freeze({
   detail: projectId => api.get(`/projects/${uuid(projectId)}/stack/`),
   configure: (projectId, payload) => api.put(`/projects/${uuid(projectId)}/stack/`, payload),
+  domainSettings: projectId => api.get(`/projects/${uuid(projectId)}/stack/domains/preflight/`),
+  preflightDomains: projectId => api.post(`/projects/${uuid(projectId)}/stack/domains/preflight/`, {}),
   launch: (projectId, idempotencyKey) => api.post(`/projects/${uuid(projectId)}/stack/launch/`, { idempotency_key:idempotencyKey }),
   publication: (projectId, runId) => api.get(`/projects/${uuid(projectId)}/stack/deployments/${uuid(runId)}/`),
 })

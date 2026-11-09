@@ -337,6 +337,7 @@ def _docker_deploy_inner(params):
         network = 'autokom-' + environment.replace('-', '')[:20]
     gateway_port = None
     backend_alias = None
+    backend_hostname = None
     if stack_role == 'frontend':
         backend_environment = valid_id(params.get('stack_backend_environment_id'))
         back_state = _load_state(backend_environment)
@@ -347,6 +348,7 @@ def _docker_deploy_inner(params):
             raise BrokerError('AUTOKOM_STACK_BACKEND_RELAY_UNAVAILABLE')
         gateway_port = back_state['port']
         backend_alias = 'backend-' + back_state['run_id'].replace('-', '')[:20]
+        backend_hostname = valid_hostname(params.get('stack_backend_hostname'))
     inspect=subprocess.run(['docker','network','inspect',network],capture_output=True,text=True,timeout=10)
     if inspect.returncode:
         run(['docker','network','create','--internal','--driver','bridge',network],timeout=30)
@@ -361,7 +363,7 @@ def _docker_deploy_inner(params):
     if backend_alias:
         if 'BACKEND_INTERNAL_URL' in variables:
             raise BrokerError('AUTOKOM_STACK_RESERVED_VARIABLE')
-        variables['BACKEND_INTERNAL_URL'] = 'http://' + backend_alias + ':8080'
+        variables['BACKEND_INTERNAL_URL'] = 'http://' + backend_alias + ':' + str(back_state.get('internal_port', 8080))
     envfile=_env_file(environment,rid,variables)
     # Customer processes run as UID 10001, without extra capabilities, mounts or Docker socket.
     argv=['docker','run','-d','--name',name,'--network',network]
@@ -397,12 +399,13 @@ def _docker_deploy_inner(params):
             time.sleep(2)
         else:raise BrokerError('AUTOKOM_CONTAINER_HEALTHCHECK_FAILED: Application non disponible sur son port interne. Ancienne version conservée.')
         previous=_load_state(environment)
-        doc={'environment_id':environment,'run_id':rid,'port':external_port,'name':name,'network':network,'healthcheck':health,**relay}
+        doc={'environment_id':environment,'run_id':rid,'internal_port':port,'port':external_port,'name':name,'network':network,'healthcheck':health,**relay}
         if stack_project:
             doc['stack_project_id'] = stack_project
             doc['stack_role'] = stack_role
             if gateway_port:
                 doc['gateway_port'] = gateway_port
+                doc['gateway_hostname'] = backend_hostname
         # Persist previous BEFORE current so a failed snapshot cannot corrupt the active state.
         prior_path=STATE/environment/'previous.json'
         if previous:
@@ -456,7 +459,7 @@ def _rollback(params):
                 raise BrokerError('AUTOKOM_ROLLBACK_VHOST_INVALID: Vhost modifié hors AUTOKOM.')
             with tempfile.NamedTemporaryFile('w', dir=PROXY, delete=False,
                                              prefix='.autokom-rollback-', encoding='utf-8') as fd:
-                fd.write(_nginx_config(host, previous['port'], tls=True, gateway_port=previous.get('gateway_port')))
+                fd.write(_nginx_config(host, previous['port'], tls=True, gateway_port=previous.get('gateway_port'),gateway_hostname=previous.get('gateway_hostname')))
                 tmp = Path(fd.name)
             try:
                 os.chmod(tmp, 0o644)
@@ -568,9 +571,9 @@ def _check_dns(host,token,managed):
         if not isinstance(token,str) or not re.fullmatch(r'[A-Za-z0-9_-]{32,128}',token):
             raise BrokerError('Preuve de domaine manquante.')
         if 'autokom-verification='+token not in _dig('TXT','_autokom-challenge.'+host):
-            raise BrokerError('Enregistrement TXT de propriété manquant.')
+            raise BrokerError('AUTOKOM_DNS_TXT_PROOF_MISSING: Enregistrement TXT de propriété manquant.')
     if ingress not in _dig('A',host):
-        raise BrokerError('A record DNS ne pointe pas vers l’ingress AUTOKOM.')
+        raise BrokerError('AUTOKOM_DNS_A_MISMATCH: A record DNS ne pointe pas vers l’ingress AUTOKOM.')
     return {'verified':True,'ipv4':ingress}
 
 def _runtime_dns_env():
@@ -717,7 +720,7 @@ def _cloudflare_record(host):
     cloudflare(req)
     return {'created':True}
 
-def _nginx_config(host,port,tls=False,*,gateway_port=None):
+def _nginx_config(host,port,tls=False,*,gateway_port=None,gateway_hostname=None):
     if type(port)!=int or not 1024<=port<=65535:raise BrokerError('Port upstream invalide.')
     safe_host=valid_hostname(host)
     extra = ''
@@ -730,7 +733,7 @@ def _nginx_config(host,port,tls=False,*,gateway_port=None):
             '    location = /__autokom_backend { return 308 /__autokom_backend/; }\n'
             '    location ^~ /__autokom_backend/ {\n'
             f'        proxy_pass http://127.0.0.1:{gateway_port}/;\n'
-            f'        proxy_set_header Host backend.{safe_host};\n'
+            f'        proxy_set_header Host {valid_hostname(gateway_hostname or ("backend." + safe_host))};\n'
             '        proxy_set_header X-Real-IP $remote_addr;\n'
             '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n'
             '        proxy_set_header X-Forwarded-Proto https;\n'
@@ -1112,14 +1115,14 @@ def _proxy_apply(host, environment, *, managed=False):
                 _prepare_public_acme_webroot()
                 phase = 'nginx_http'
                 logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started host=%s', phase, host)
-                publish(_nginx_config(host, state['port'], tls=False, gateway_port=state.get('gateway_port')))
+                publish(_nginx_config(host, state['port'], tls=False, gateway_port=state.get('gateway_port'),gateway_hostname=state.get('gateway_hostname')))
                 _preflight_public_acme_challenge(host)
             phase = 'certificate'
             logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started host=%s', phase, host)
             _issue_customer_certificate(host, managed=managed)
         phase = 'nginx_https'
         logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started host=%s', phase, host)
-        publish(_nginx_config(host, state['port'], tls=True, gateway_port=state.get('gateway_port')))
+        publish(_nginx_config(host, state['port'], tls=True, gateway_port=state.get('gateway_port'),gateway_hostname=state.get('gateway_hostname')))
         phase = 'https_verify'
         try:
             _verify_customer_https(host, state.get('healthcheck', '/'))

@@ -37,7 +37,7 @@ test('fichier env frontend uniquement public, env backend sépare secrets', () =
 
 test('interface indique les deux URL et la route interne avec retour de progression',()=>{
   const page=read('pages/StackDeploy.jsx')
-  assert.match(page,/backend\.\$\{frontHost\}/)
+  assert.match(page,/stackHosts\(frontend.hostname, backend.hostname, defaultHost\)/)
   assert.match(page,/__autokom_backend/)
   assert.match(page,/BACKEND_INTERNAL_URL/)
   assert.match(page,/deployment\.status/)

@@ -29,6 +29,15 @@ class TestStackBroker(unittest.TestCase):
         self.assertIn('proxy_pass http://127.0.0.1:20500;', frontend)
         self.assertIn('ssl_certificate /etc/letsencrypt/live/portfolio.auto.ikom.mg/fullchain.pem;',frontend)
 
+    def test_custom_backend_hostname_is_used_only_in_opt_in_gateway(self):
+        output = broker._nginx_config('site.example.com', 20500, tls=True,
+                                      gateway_port=20501, gateway_hostname='api.example.com')
+        self.assertIn('proxy_set_header Host api.example.com;', output)
+        self.assertNotIn('backend.site.example.com', output)
+        with self.assertRaises(broker.BrokerError):
+            broker._nginx_config('site.example.com', 20500, tls=True,
+                                 gateway_port=20501, gateway_hostname='bad-domain\nHost: localhost')
+
     def test_reject_bad_gateway(self):
         with self.assertRaises(broker.BrokerError):
             broker._nginx_config('portfolio.auto.ikom.mg', 20500, tls=True, gateway_port=80)

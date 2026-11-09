@@ -6,9 +6,10 @@ import { stackApi } from '../services/stackApi.js'
 import { detectSource, frontendProfile, availableFrontendProfiles, BACKEND_PROFILES } from '../services/sourceAnalysis.js'
 import { PRICING_PLANS, formatAr } from '../config/pricing.js'
 import { parseStackEnv, stackEnvPayload, publicEnvName, sensitiveEnvName, existingFrontendStackDefaults, existingServiceKind } from '../services/stackEnv.js'
+import { stackHosts, frontendApiVariable, withoutManagedFields, MANAGED_BACKEND_ENV, MANAGED_FRONTEND_API } from '../services/stackDomains.js'
 import '../styles/stack-deploy.css'
 
-const INITIAL = { branch:'main', root_directory:'', profile:'', output_directory:'build', healthcheck:'/', rows:[] }
+const INITIAL = { branch:'main', root_directory:'', profile:'', hostname:'', output_directory:'build', healthcheck:'/', rows:[] }
 const PROFILES = {
   frontend: [ ['vite','React/Vue/Svelte + Vite'], ['npm_static','React/Vue — build npm'], ['next_server','Next.js SSR'], ['next_export','Next.js statique'], ['html','HTML / CSS / JS'] ],
   backend: [ ['python_fastapi','FastAPI'], ['python_flask','Flask'], ['python_django','Django'], ['python_wsgi','Python WSGI'],
@@ -23,19 +24,30 @@ function configLabel(profile) { return PROFILES.frontend.concat(PROFILES.backend
 function Variables({kind, rows, onChange}) {
   const inputRef = useRef(null)
   const [error,setError] = useState('')
+  const [managedNotice,setManagedNotice] = useState('')
+  function setNoticeReserved(kind) { setManagedNotice(kind === 'backend'
+    ? 'PORT, FRONTEND_ORIGIN et NODE_ENV sont définis automatiquement pour la production.'
+    : 'L’URL API publique est calculée à partir du domaine backend choisi.') }
   async function upload(event) {
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
     try {
       if (file.size > 32768) throw new Error('Fichier .env trop volumineux.')
-      const parsed = parseStackEnv(await file.text(), kind)
+      const parsed = withoutManagedFields(parseStackEnv(await file.text(), kind),kind)
+      setNoticeReserved(kind)
       const merged = new Map(rows.map(row => [row.key,row]))
       for (const row of parsed) merged.set(row.key,row)
       onChange([...merged.values()]); setError('')
     } catch (err) { setError(err.message || 'Import impossible.') }
   }
-  function edit(index, data) { onChange(rows.map((row,i) => index === i ? {...row,...data} : row)) }
+  function edit(index, data) {
+    if (data.key && (kind === 'backend' ? MANAGED_BACKEND_ENV : MANAGED_FRONTEND_API).includes(data.key)) {
+      setError(`${data.key} est gérée automatiquement par AUTOKOM et ne peut pas être modifiée.`)
+      return
+    }
+    setError(''); onChange(rows.map((row,i) => index === i ? {...row,...data} : row))
+  }
   return <section className="ak-stack-env">
     <div className="ak-stack-inline"><h3>Variables {kind === 'frontend' ? 'frontend publiques' : 'backend'}</h3>
       <input type="file" ref={inputRef} accept=".env,.txt,text/plain" hidden onChange={upload}/>
@@ -52,11 +64,12 @@ function Variables({kind, rows, onChange}) {
       {kind === 'backend' && <label className="ak-stack-secret"><input type="checkbox" checked={Boolean(item.secret)} onChange={e=>edit(index,{secret:e.target.checked})}/> Secret</label>}
       <button type="button" className="button-outline" aria-label="Supprimer variable" onClick={()=>onChange(rows.filter((_,i)=>i!==index))}><Trash2 size={15}/></button>
     </div>)}
+    {managedNotice && <p className="ak-stack-subtle" role="status"><Info size={14}/>{managedNotice}</p>}
     {error && <p className="feedback error" role="alert">{error}</p>}
   </section>
 }
 
-function ComponentCard({kind,data,onChange,branches,probe}) {
+function ComponentCard({kind,data,onChange,branches,probe,host,apiHost}) {
   const label = kind === 'frontend' ? 'Frontend' : 'Backend'
   const choices = PROFILES[kind]
   const bad = probe.status === 'error'
@@ -80,8 +93,24 @@ function ComponentCard({kind,data,onChange,branches,probe}) {
     </select></label>
     {kind === 'frontend' && data.profile === 'npm_static' && <label><span>Dossier de sortie de compilation</span><select value={data.output_directory} onChange={e=>onChange({...data,output_directory:e.target.value})}><option value="build">build (React classique)</option><option value="dist">dist (Vue CLI)</option></select></label>}
     <p className="ak-stack-subtle">{probe.analysis ? `Détecté : ${probe.analysis.framework} · ${probe.analysis.runtime}` : 'Sélectionnez une branche et un dossier existant.'} Les commandes approuvées sont choisies automatiquement.</p>
+    <section className="ak-stack-domain">
+      <label><span><Globe size={14}/> Domaine HTTPS {label}</span>
+        <input aria-label={`Domaine ${label}`} value={host} spellCheck={false}
+          onChange={e=>onChange({...data,hostname:e.target.value})} placeholder={kind==='backend'?'backend.votre-projet.auto.ikom.mg':'votre-projet.auto.ikom.mg'}/>
+      </label>
+      <p className="ak-stack-subtle"><Info size={14}/> Adresse prévue : <strong>https://{host || 'à définir'}</strong>.
+        {host.endsWith('.auto.ikom.mg') ? ' DNS géré par AUTOKOM, vérifié avant le build.' : ' Domaine externe : les enregistrements A et TXT doivent prouver la propriété avant publication.'}</p>
+    </section>
+    {kind==='backend' && <div className="ak-stack-runtime-contract"><strong>PORT=8000</strong> · Écoute interne fixe sur 0.0.0.0 (gérée par AUTOKOM). <span>Le port relais Nginx est attribué automatiquement.</span></div>}
+    {kind==='frontend' && <div className="ak-stack-runtime-contract">
+      <strong>{frontendApiVariable(data.profile,apiHost).key}</strong> = <code>{frontendApiVariable(data.profile,apiHost).value}</code>
+      <span>Valeur publique intégrée pendant la compilation. Ne pas utiliser localhost en production.</span></div>}
+    {kind==='backend' && <div className="ak-stack-runtime-contract">
+      <strong>FRONTEND_ORIGIN</strong> = <code>https://{apiHost}</code>
+      <span>Variable injectée au démarrage ; votre code Express doit la lire pour configurer CORS.</span></div>}
     <label><span>Chemin de vérification HTTP</span><input value={data.healthcheck} onChange={e=>onChange({...data,healthcheck:e.target.value})} placeholder="/"/></label>
     <Variables kind={kind} rows={data.rows} onChange={rows=>onChange({...data,rows})}/>
+    {kind==='backend' && data.rows.some(row=>row.key==='DB_PATH' && /^\.\/?/.test(row.value||'')) && <p className="ak-stack-warning"><AlertTriangle size={15}/> DB_PATH relatif : le conteneur est en lecture seule. Prévoir par exemple /tmp/app.db (données éphémères) ou un stockage persistant externe.</p>}
   </section>
 }
 
@@ -98,6 +127,8 @@ export default function StackDeploy({navigate,projectId}) {
   const [error,setError] = useState('')
   const [notice,setNotice] = useState('')
   const [deployment,setDeployment] = useState(null)
+  const [dnsProof,setDnsProof] = useState(null)
+  const [ingressIPv4,setIngressIPv4] = useState('')
   const idem = useRef(null)
   const install = record?.project?.github_installation_id
   const repo = record?.project?.repository_external_id
@@ -112,10 +143,10 @@ export default function StackDeploy({navigate,projectId}) {
         const primaryKind = existingServiceKind(detail)
         const branch = singleService.branch
         const existing = stackResponse?.stack
-        const asForm = (data, fallback) => ({...INITIAL,branch:data?.branch||fallback,root_directory:data?.root_directory||'',
-          profile:data?.profile||'',output_directory:data?.output_directory||'build',healthcheck:data?.healthcheck||'/',rows:(data?.variables||[]).map(x=>({key:x.key,value:x.value,secret:false}))})
-        setFrontend(asForm(existing?.frontend || (primaryKind==='frontend' ? singleService : null),branch))
-        setBackend(asForm(existing?.backend || (primaryKind==='backend' ? singleService : null),branch))
+        const asForm = (data, fallback, kind) => ({...INITIAL,branch:data?.branch||fallback,root_directory:data?.root_directory||'',hostname:data?.domain||'',
+          profile:data?.profile||'',output_directory:data?.output_directory||'build',healthcheck:data?.healthcheck||'/',rows:withoutManagedFields((data?.variables||[]).map(x=>({key:x.key,value:x.value,secret:false})),kind)})
+        setFrontend(asForm(existing?.frontend || (primaryKind==='frontend' ? singleService : null),branch,'frontend'))
+        setBackend(asForm(existing?.backend || (primaryKind==='backend' ? singleService : null),branch,'backend'))
         setAuto(existing ? Boolean(existing.auto_deploy) : Boolean(detail.configurations?.find(item => !item.is_draft)?.auto_deploy))
         if (detail.project.github_installation_id && detail.project.repository_external_id) {
           try {
@@ -124,6 +155,12 @@ export default function StackDeploy({navigate,projectId}) {
           } catch { /* Existing branch remains selectable. */ }
         }
       }).catch(err=>{if(active)setError(errorText(err))}).finally(()=>{if(active)setLoading(false)})
+    return()=>{active=false}
+  },[projectId])
+
+  useEffect(()=>{
+    let active=true
+    stackApi.domainSettings(projectId).then(data=>{ if(active)setIngressIPv4(data.ingress_ipv4||'') }).catch(()=>{})
     return()=>{active=false}
   },[projectId])
 
@@ -162,16 +199,20 @@ export default function StackDeploy({navigate,projectId}) {
     return()=>{active=false;window.clearInterval(timer)}
   },[projectId,deployment?.id,deployment?.status])
 
-  const ready = Boolean(probe.frontend.status==='ready' && probe.backend.status==='ready' &&
+  const readySource = Boolean(probe.frontend.status==='ready' && probe.backend.status==='ready' &&
     PROFILES.frontend.some(([key])=>key===frontend.profile) && PROFILES.backend.some(([key])=>key===backend.profile) &&
     validPath(normalizeFolder(frontend.root_directory)) && validPath(normalizeFolder(backend.root_directory)))
-  // The paired backend name is always derived from the AUTOKOM-managed
-  // hostname, never from an unrelated user-owned custom primary domain.
-  const frontHost = record?.domains?.find(domain => (domain.domain_type||domain.type)==='SUBDOMAIN')?.hostname ||
+  // Domain previews are available BEFORE .env editing. Server-side ownership
+  // and real DNS validation remain mandatory and cannot be bypassed by JS.
+  const defaultHost = record?.domains?.find(domain => (domain.domain_type||domain.type)==='SUBDOMAIN')?.hostname ||
     record?.project?.public_site?.hostname || `${record?.project?.slug||'app'}.auto.ikom.mg`
-  const backendHost = `backend.${frontHost}`
+  const hosts = stackHosts(frontend.hostname, backend.hostname, defaultHost)
+  const frontHost = hosts.frontend
+  const backendHost = hosts.backend
+  const ready = readySource && hosts.valid
   function componentPayload(data,kind) {
     return {branch:data.branch,root_directory:normalizeFolder(data.root_directory),profile:data.profile,
+      hostname:kind==='frontend'?frontHost:backendHost,
       output_directory:data.output_directory,healthcheck:data.healthcheck,...stackEnvPayload(data.rows,kind)}
   }
   async function publish() {
@@ -179,7 +220,10 @@ export default function StackDeploy({navigate,projectId}) {
     setBusy(true);setError('');setNotice('')
     try {
       const payload={frontend:componentPayload(frontend,'frontend'),backend:componentPayload(backend,'backend'),auto_deploy:auto}
-      await stackApi.configure(projectId,payload)
+      const resultConfig = await stackApi.configure(projectId,payload)
+      setDnsProof(resultConfig?.stack || null)
+      setNotice('Contrôle des domaines et de leur pointage DNS avant construction…')
+      await stackApi.preflightDomains(projectId)
       const key=idem.current || crypto.randomUUID()
       idem.current=key
       const result=await stackApi.launch(projectId,key)
@@ -187,7 +231,7 @@ export default function StackDeploy({navigate,projectId}) {
       idem.current=null
       setDeployment({...result.stack_deployment,status:result.stack_deployment.status})
       setStep(2)
-      setNotice('Deux services enregistrés : construction et vérification en cours.')
+      setNotice('DNS vérifié. Construction des deux services et validation HTTPS en cours.')
     } catch(err){setError(errorText(err))} finally{setBusy(false)}
   }
 
@@ -199,9 +243,17 @@ export default function StackDeploy({navigate,projectId}) {
     <div className="ak-stack-progress"><span className={step===0?'active':''}>1 · Configuration</span><span className={step===1?'active':''}>2 · Récapitulatif</span><span className={step===2?'active':''}>3 · Publication</span></div>
     {error && <p className="feedback error" role="alert">{error}</p>}
     {notice && <p className="feedback success" role="status">{notice}</p>}
+    {dnsProof && error && <div className="ak-stack-warning" role="alert">
+      <AlertTriangle size={17}/> Vérifiez les enregistrements DNS : A vers l’IP publique {ingressIPv4 || 'de votre serveur'}. Le domaine externe nécessite aussi une preuve TXT.
+      {[dnsProof.frontend,dnsProof.backend].filter(item=>item?.verification?.type==='TXT').map((item,index)=>
+        <code key={index}>{item.verification.hostname} : {item.verification.value}</code>)}
+    </div>}
     {step===0 && <>
-      <div className="ak-stack-grid"><ComponentCard kind="frontend" data={frontend} onChange={setFrontend} branches={branches} probe={probe.frontend}/>
-      <ComponentCard kind="backend" data={backend} onChange={setBackend} branches={branches} probe={probe.backend}/></div>
+      <div className="ak-stack-domain-preview"><Globe size={17}/> <span>Adresses publiques prévues avant la configuration .env :</span>
+        <strong>https://{frontHost}</strong><strong>https://{backendHost}</strong>
+        {ingressIPv4 && <span className="ak-stack-ingress-ip">DNS A attendu : <strong>{ingressIPv4}</strong></span>}</div>
+      <div className="ak-stack-grid"><ComponentCard kind="frontend" data={frontend} onChange={setFrontend} branches={branches} probe={probe.frontend} host={frontHost} apiHost={backendHost}/>
+      <ComponentCard kind="backend" data={backend} onChange={setBackend} branches={branches} probe={probe.backend} host={backendHost} apiHost={frontHost}/></div>
       <section className="ak-stack-component ak-stack-common-hosting" aria-label="Offre d'hébergement commune">
         <div className="ak-stack-inline"><h2>Offre d’hébergement commune</h2><span className="ak-stack-common-tag"><Layers3 size={14}/> Une seule offre pour deux services</span></div>
         <div className="ak-stack-plan-list">{PRICING_PLANS.map(plan => <div key={plan.id} className={`ak-stack-plan-card ${plan.id==='free'?'current':'unavailable'}`} aria-label={`${plan.name} : ${plan.id==='free'?'offre actuelle':'non disponible'}`}>
@@ -215,7 +267,9 @@ export default function StackDeploy({navigate,projectId}) {
     {step===1 && <section className="ak-stack-component"><h2>Vérification avant publication</h2>
       <div className="ak-stack-review"><div><strong>Frontend</strong><span>{frontend.branch} · /{normalizeFolder(frontend.root_directory)}</span><span>{configLabel(frontend.profile)}</span><span><Globe size={14}/> https://{frontHost}</span></div>
       <div><strong>Backend</strong><span>{backend.branch} · /{normalizeFolder(backend.root_directory)}</span><span>{configLabel(backend.profile)}</span><span><Globe size={14}/> https://{backendHost}</span></div></div>
+      <p className="ak-stack-subtle"><Info size={15}/> Contrôle DNS obligatoire avant la publication : domaine géré AUTOKOM ou A + TXT pour un domaine externe. La vérification HTTPS du domaine est effectuée avant la mise en ligne. </p>
       <p className="ak-stack-subtle"><Info size={15}/> Le navigateur peut accéder à l'API par /__autokom_backend/ sur le domaine frontend. Les appels serveur utilisent BACKEND_INTERNAL_URL sur le réseau Docker privé. Les secrets backend ne sont jamais incorporés au build frontend.</p>
+      <div className="ak-stack-runtime-contract">Backend : <strong>PORT=8000</strong> (non modifiable), relais local privé attribué automatiquement. <strong>{frontendApiVariable(frontend.profile,backendHost).key}={frontendApiVariable(frontend.profile,backendHost).value}</strong></div>
       <p className="ak-stack-subtle"><Layers3 size={15}/> Offre d’hébergement commune : ressources du projet existant, réparties entre frontend et backend.</p>
       <p className="ak-stack-subtle"><AlertTriangle size={15}/> Les deux services partagent les ressources du plan actif. Le runtime refusera de réserver plus que les quotas autorisés.</p>
       <div className="ak-stack-footer"><button type="button" className="button-outline" disabled={busy} onClick={()=>setStep(0)}><ArrowLeft size={15}/> Modifier</button>
