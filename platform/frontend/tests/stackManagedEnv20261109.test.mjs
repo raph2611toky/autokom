@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {readFileSync} from 'node:fs'
-import {frontendApiVariable, validFrontendApiKey, validBackendOriginKey} from '../src/services/stackDomains.js'
+import {frontendApiVariable, validFrontendApiKey, validBackendOriginKey, withoutManagedFields} from '../src/services/stackDomains.js'
 
 const source = file => readFileSync(new URL(`../src/${file}`,import.meta.url), 'utf8')
 
@@ -41,13 +41,22 @@ test('éditeur .env affiche les valeurs calculées non modifiables et verrouille
   assert.ok(page.indexOf('stackApi.preflightDomains(projectId)') < page.indexOf('stackApi.launch(projectId,key)'))
 })
 
-test('le backend accepte les noms choisis tout en dérivant les valeurs et en nettoyant les anciens noms',()=>{
-  const server=readFileSync(new URL('../../../platform/backend/apps/projects/configurations/stack_services.py',import.meta.url),'utf8')
-  assert.match(server,/api_env_key = serializers\.CharField/)
-  assert.match(server,/origin_env_key = serializers\.CharField/)
-  assert.match(server,/values\[generated_key\] = 'https:\/\/'.*api_url/)
-  assert.match(server,/values\['PORT'\] = '8000'/)
-  assert.match(server,/previous_managed_key != generated_key/)
-  assert.match(server,/stack_api_env_key/)
-  assert.match(server,/stack_origin_env_key/)
+// This file also runs inside AUTOKOM's isolated frontend build, where backend
+// source files are deliberately absent. The backend .env persistence contract
+// is verified separately in tests/test_autokom_stack_managed_env_20261109.py.
+test('les variables libres restent éditables et les variables générées sont réservées',()=>{
+  assert.deepEqual(withoutManagedFields([
+    {key:'PORT',value:'9000'},
+    {key:'FRONTEND_ORIGIN',value:'https://wrong.example'},
+    {key:'CUSTOM_SETTING',value:'ok'},
+  ],'backend'), [{key:'CUSTOM_SETTING',value:'ok'}])
+  assert.deepEqual(withoutManagedFields([
+    {key:'NEXT_PUBLIC_API_URL',value:'https://wrong.example/api'},
+    {key:'NEXT_PUBLIC_TITLE',value:'Mon application'},
+  ],'frontend'), [{key:'NEXT_PUBLIC_TITLE',value:'Mon application'}])
+  const page=source('pages/StackDeploy.jsx')
+  assert.match(page,/api_env_key:frontApiKey/)
+  assert.match(page,/origin_env_key:backOriginKey/)
+  assert.match(page,/validFrontendApiKey/)
+  assert.match(page,/validBackendOriginKey/)
 })
