@@ -31,6 +31,17 @@ FRONT_PROFILES = {'vite', 'npm_static', 'html', 'next_export', 'next_server'}
 ENV_KEY = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,159}$')
 PUBLIC_PREFIXES = ('VITE_', 'REACT_APP_', 'VUE_APP_', 'NEXT_PUBLIC_')
 DANGEROUS_KEYS = ('PASSWORD', 'SECRET', 'TOKEN', 'PRIVATE_KEY', 'API_KEY', 'DATABASE_URL', 'REDIS_URL')
+MANAGED_KEY = re.compile(r'^[A-Z][A-Z0-9_]{0,99}$')
+
+
+def _frontend_api_key(profile):
+    prefix = ('NEXT_PUBLIC_' if profile.startswith('next_') else
+              'REACT_APP_' if profile == 'npm_static' else 'VITE_')
+    return prefix + 'API_URL'
+
+
+def _valid_managed_name(name):
+    return (bool(MANAGED_KEY.fullmatch(name)) and not name.startswith(('AUTOKOM_', 'DOCKER_')))
 
 
 class StackComponentSerializer(serializers.Serializer):
@@ -42,6 +53,8 @@ class StackComponentSerializer(serializers.Serializer):
     output_directory = serializers.ChoiceField(choices=['dist', 'build'], default='build', required=False)
     variables = serializers.DictField(child=serializers.CharField(allow_blank=True, max_length=32768), required=False)
     secrets = serializers.DictField(child=serializers.CharField(allow_blank=False, max_length=10000), required=False, write_only=True)
+    api_env_key = serializers.CharField(max_length=100, allow_blank=True, default='', required=False)
+    origin_env_key = serializers.CharField(max_length=100, allow_blank=True, default='', required=False)
 
     def validate_hostname(self, value):
         return validate_hostname(value) if value else ''
@@ -73,6 +86,26 @@ class StackComponentSerializer(serializers.Serializer):
                     else {'VITE_API_URL', 'REACT_APP_API_URL', 'VUE_APP_API_URL', 'NEXT_PUBLIC_API_URL'})
         if reserved.intersection(values) or reserved.intersection(secrets_dict):
             raise serializers.ValidationError({'variables': 'Variable gérée automatiquement par AUTOKOM : ne pas la modifier.'})
+        # Only the name is chosen by the user; the value always comes from the
+        # validated domain or the fixed internal port, never from the browser.
+        if kind == 'frontend':
+            generated = attrs.get('api_env_key') or _frontend_api_key(profile)
+            allowed = (('NEXT_PUBLIC_',) if profile.startswith('next_') else
+                       ('REACT_APP_', 'VUE_APP_', 'VITE_') if profile == 'npm_static' else ('VITE_',))
+            if (not _valid_managed_name(generated) or
+                    not any(generated.startswith(prefix) and len(generated) > len(prefix) for prefix in allowed) or
+                    any(marker in generated for marker in ('SECRET', 'PASSWORD', 'TOKEN', 'PRIVATE', 'CREDENTIAL',
+                                                            'API_KEY', 'ACCESS_KEY', 'SESSION', 'AUTH_KEY'))):
+                raise serializers.ValidationError({'api_env_key': 'Nom de variable publique invalide pour ce profil.'})
+            attrs['api_env_key'] = generated
+        else:
+            generated = attrs.get('origin_env_key') or 'FRONTEND_ORIGIN'
+            if (not _valid_managed_name(generated) or generated in reserved - {'FRONTEND_ORIGIN'} or
+                    any(marker in generated for marker in DANGEROUS_KEYS)):
+                raise serializers.ValidationError({'origin_env_key': 'Nom de variable backend invalide.'})
+            attrs['origin_env_key'] = generated
+        if generated in values or generated in secrets_dict:
+            raise serializers.ValidationError({'variables': 'Nom réservé par une variable automatique.'})
         for name, value in {**values, **secrets_dict}.items():
             if not ENV_KEY.fullmatch(name) or name.startswith(('AUTOKOM_', 'DOCKER_')):
                 raise serializers.ValidationError({'variables': 'Nom de variable réservé ou invalide.'})
@@ -119,7 +152,9 @@ def _component_config(env, user, data, kind):
     cfg.healthcheck_path = data['healthcheck']
     cfg.auto_deploy = False  # Stack pushes are coordinated, never standalone.
     cfg.auto_deploy_branch = ''
-    cfg.settings = {'frontend_profile': profile, 'stack_hostname': data['hostname']}
+    cfg.settings = {'frontend_profile': profile, 'stack_hostname': data['hostname'],
+                    **({'stack_api_env_key': data['api_env_key']} if kind == 'frontend'
+                       else {'stack_origin_env_key': data['origin_env_key']})}
     if kind == 'frontend':
         cfg.runtime_type = 'NODE' if profile == 'next_server' else 'STATIC'
         cfg.build_method = 'AUTO' if profile == 'next_server' else 'STATIC'
@@ -141,22 +176,25 @@ def _component_config(env, user, data, kind):
     return cfg
 
 
-def _sync_variables(project, env, data, kind, *, api_url):
-    """Update only explicitly supplied values; no destructive secret replacement."""
+def _sync_variables(project, env, data, kind, *, api_url, previous_managed_key=None):
+    """Persist generated .env values from trusted configuration, without exposing secrets."""
     values = dict(data.get('variables', {}))
     if kind == 'frontend':
-        profile = data['profile']
-        prefix = ('NEXT_PUBLIC_' if profile.startswith('next_') else
-                  'REACT_APP_' if profile == 'npm_static' else 'VITE_')
-        # Explicit generated public route, rather than exposing the backend bridge IP.
-        # Public build-time value: never expose a private Docker IP or a secret.
-        values[f'{prefix}API_URL'] = 'https://' + api_url + '/api'
+        generated_key = data['api_env_key']
+        # Always point at the public HTTPS backend, never an internal Docker IP.
+        values[generated_key] = 'https://' + api_url + '/api'
     else:
-        # Runtime settings are authoritative and cannot be changed by an imported .env.
+        # PORT is immutable even if an imported .env tries to override it.
+        generated_key = data['origin_env_key']
         values['PORT'] = '8000'
-        values['FRONTEND_ORIGIN'] = 'https://' + api_url
+        values[generated_key] = 'https://' + api_url
         if data['profile'].startswith('node_'):
             values['NODE_ENV'] = 'production'
+    # Renaming a managed key should not leave the previous generated default in
+    # the build/runtime environment. Never delete other keys or secret entries.
+    if previous_managed_key and previous_managed_key != generated_key:
+        EnvironmentVariable.objects.filter(environment=env, key=previous_managed_key,
+                                           secret__isnull=True).delete()
     for key, value in values.items():
         item, _ = EnvironmentVariable.objects.get_or_create(environment=env, key=key)
         if item.secret_id:
@@ -213,12 +251,16 @@ def stack_summary(stack):
         'frontend': {'environment_id': str(stack.frontend_environment_id),
                      'branch': fcfg.branch if fcfg else '', 'root_directory': fcfg.root_directory if fcfg else '',
                      'profile': (fcfg.settings or {}).get('frontend_profile') if fcfg else '',
+                     'api_env_key': ((fcfg.settings or {}).get('stack_api_env_key') or
+                                     _frontend_api_key((fcfg.settings or {}).get('frontend_profile', '')))
+                                    if fcfg else '',
                      'domain': fdomain.hostname if fdomain else '',
                      'verification': domain_summary(fdomain, include_challenge=True).get('verification') if fdomain else None,
                      'variables': fvars},
         'backend': {'environment_id': str(stack.backend_environment_id),
                     'branch': bcfg.branch if bcfg else '', 'root_directory': bcfg.root_directory if bcfg else '',
                     'profile': (bcfg.settings or {}).get('frontend_profile') if bcfg else '',
+                    'origin_env_key': (bcfg.settings or {}).get('stack_origin_env_key', 'FRONTEND_ORIGIN') if bcfg else '',
                     'domain': bdomain.hostname if bdomain else '',
                     'verification': domain_summary(bdomain, include_challenge=True).get('verification') if bdomain else None,
                     'internal_port': bcfg.internal_port if bcfg else 8080, 'variables': bvars, 'secret_names': bsecrets},
@@ -309,6 +351,14 @@ def configure_stack(user, project_id, attrs):
                     environment=backend_env)
             stack = ServiceStack.objects.create(project=project, frontend_environment=frontend_env,
                                                 backend_environment=backend_env)
+        previous_front = (DeploymentConfig.objects.filter(environment=frontend_env, is_draft=False)
+                          .order_by('-version').first())
+        previous_back = (DeploymentConfig.objects.filter(environment=backend_env, is_draft=False)
+                         .order_by('-version').first())
+        previous_front_key = (previous_front.settings or {}).get('stack_api_env_key') if previous_front else None
+        if previous_front and not previous_front_key and (previous_front.settings or {}).get('stack_hostname'):
+            previous_front_key = _frontend_api_key((previous_front.settings or {}).get('frontend_profile', ''))
+        previous_back_key = (previous_back.settings or {}).get('stack_origin_env_key', 'FRONTEND_ORIGIN') if previous_back and (previous_back.settings or {}).get('stack_hostname') else None
         frontend_cfg = _component_config(frontend_env, user, attrs['frontend'], 'frontend')
         backend_cfg = _component_config(backend_env, user, attrs['backend'], 'backend')
         # Claim both names under their own environment. An existing domain in a
@@ -317,8 +367,10 @@ def configure_stack(user, project_id, attrs):
             if not Domain.objects.filter(environment=env, hostname=host).exists():
                 claim_domain(user, project.pk, env.pk, host,
                              Domain.Type.SUBDOMAIN if _managed(host) else Domain.Type.CUSTOM)
-        _sync_variables(project, frontend_env, attrs['frontend'], 'frontend', api_url=bhost)
-        _sync_variables(project, backend_env, attrs['backend'], 'backend', api_url=fhost)
+        _sync_variables(project, frontend_env, attrs['frontend'], 'frontend', api_url=bhost,
+                        previous_managed_key=previous_front_key)
+        _sync_variables(project, backend_env, attrs['backend'], 'backend', api_url=fhost,
+                        previous_managed_key=previous_back_key)
         stack.auto_deploy = attrs['auto_deploy']
         stack.save(update_fields=['auto_deploy', 'updated_at'])
         return stack

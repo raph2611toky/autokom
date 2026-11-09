@@ -27,3 +27,8 @@
 
 .ak-stack-ingress-ip{width:100%;font-size:12px;color:var(--ak-muted)}
 .ak-stack-ingress-ip strong{color:var(--ak-success)}
+
+/* Default .env values are visible but regenerated from validated hostnames. */
+.ak-stack-env-managed input[readonly]{opacity:.76;cursor:default;border-style:dashed}
+.ak-stack-env-managed input[readonly]:focus-visible{outline:none}
+.ak-stack-env-fixed-spacer{width:0}

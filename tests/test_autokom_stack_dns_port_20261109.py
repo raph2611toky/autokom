@@ -54,7 +54,7 @@ class StackDnsPortTests(unittest.TestCase):
         broker=(ROOT/'scripts/lib/autokom_platform_broker.py').read_text()
         self.assertIn('preflight_stack_domains(stack)',source)
         self.assertIn("values['PORT'] = '8000'",source)
-        self.assertIn("values['FRONTEND_ORIGIN'] = 'https://' + api_url",source)
+        self.assertIn("values[generated_key] = 'https://' + api_url",source)
         self.assertIn("'stack_hostname': data['hostname']",source)
         self.assertIn("'domain.verify'",source)
         self.assertIn("'domain.dns.create'",source)
