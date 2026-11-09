@@ -180,10 +180,11 @@ def isolated_agent_status(env):
         if 'autokom-isolated' not in labels:
             continue
         found = True
-        if (node.get('offline') is False and node.get('temporarilyOffline') is not True
-                and type(node.get('numExecutors')) is int and node['numExecutors'] > 0):
+        if (node.get('displayName') == 'autokom-builder-01'
+                and node.get('offline') is False and node.get('temporarilyOffline') is not True
+                and type(node.get('numExecutors')) is int and node['numExecutors'] >= 2):
             return True, 'online'
-    return False, 'offline' if found else 'missing'
+    return False, 'offline-ou-moins-de-2-exécuteurs' if found else 'missing'
 
 
 def jenkins_view_xml(job):
@@ -495,7 +496,7 @@ except (OSError,ValueError,KeyError,TypeError):
     if not ready:
         print('  ✗ Agent autokom-isolated : '+reason)
         raise SetupError('Agent de compilation isolé absent ou hors ligne. N’ajouter aucun label au contrôleur Jenkins.')
-    print('  ✓ Agent autokom-isolated connecté avec au moins un exécuteur.')
+    print('  ✓ Agent autokom-isolated connecté avec deux exécuteurs (builds parallèles).')
     from autokom_buildkit_admin import healthcheck, smoke_test, BuildkitError
     try:
         healthcheck()

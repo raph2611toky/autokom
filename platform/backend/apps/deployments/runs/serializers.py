@@ -1,4 +1,5 @@
 from rest_framework import serializers
+import re
 from apps.deployments.runs.models import DeploymentRun, PipelineStageRun, DeploymentLogEntry
 
 class DeploymentStageSerializer(serializers.ModelSerializer):
@@ -13,14 +14,29 @@ class DeploymentRunSerializer(serializers.ModelSerializer):
     def get_error_message(self, instance):
         if not instance.error_message:
             return ''
-        return 'La publication a échoué ou a été bloquée. Consultez le journal technique et les étapes pour plus de détails.'
+        # Never echo an arbitrary exception, repository output or a credential.
+        # Known AUTOKOM diagnostic IDs are safe and help users locate the real
+        # failure in the per-service technical journal.
+        code = re.search(r'\bAUTOKOM_[A-Z0-9_]{3,80}\b', instance.error_message)
+        message = 'La publication a échoué ou a été bloquée. Consultez le journal technique et les étapes pour plus de détails.'
+        return message + (' Code : ' + code.group(0) if code else '')
 
+    def get_jenkins_reference(self, instance):
+        # Display ONLY the numeric queue/build reference, never Jenkins URL,
+        # credentials, private internal paths or raw external IDs.
+        reference = instance.external_run_id or ''
+        match = re.fullmatch(r'([BQ]):([1-9][0-9]{0,9})', reference)
+        if not match:
+            return ''
+        return ('Build Jenkins #' if match.group(1) == 'B' else 'File Jenkins #') + match.group(2)
+
+    jenkins_reference = serializers.SerializerMethodField()
     stages = DeploymentStageSerializer(many=True, read_only=True)
     class Meta:
         model = DeploymentRun
         fields = ('id','environment','configuration','trigger_type','mode_snapshot','resources_snapshot',
                   'branch','commit_sha','status','created_at','started_at',
-                  'finished_at','cancel_requested','error_message','stages')
+                  'finished_at','cancel_requested','error_message','jenkins_reference','stages')
         read_only_fields = fields
 
 class DeploymentLogSerializer(serializers.ModelSerializer):

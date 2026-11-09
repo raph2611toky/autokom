@@ -447,7 +447,7 @@ def _split_resources(backend, frontend):
 
 def launch_stack(user, stack, *, idempotency_key=None, trigger=DeploymentRun.Trigger.MANUAL,
                  event=None, commits=None):
-    """Queue the backend. Worker prepares both candidates before HTTPS cutover."""
+    """Queue both isolated builds atomically; promote only after both are healthy."""
     from apps.deployments.runs.services import IDEMPOTENCY_RE
     if idempotency_key and not IDEMPOTENCY_RE.fullmatch(idempotency_key):
         raise ValidationError('Clé d’idempotence invalide.')
@@ -483,11 +483,16 @@ def launch_stack(user, stack, *, idempotency_key=None, trigger=DeploymentRun.Tri
         if (backend_cfg.pk != DeploymentConfig.objects.filter(environment=stack.backend_environment, is_draft=False).order_by('-version').first().pk or
                 frontend_cfg.pk != DeploymentConfig.objects.filter(environment=stack.frontend_environment, is_draft=False).order_by('-version').first().pk):
             raise DeploymentConflict('Configuration modifiée pendant la validation.')
+        # Two durable, independent Jenkins runs are created inside the SAME
+        # transaction. If either insert fails, neither deployment is queued.
         backend_run = _create_run(stack.backend_environment, backend_cfg, resources,
                                   actor=user, trigger=trigger, sha=back_sha,
                                   idem=idem + ':backend', event=event)
+        frontend_run = _create_run(stack.frontend_environment, frontend_cfg, resources,
+                                   actor=user, trigger=trigger, sha=front_sha,
+                                   idem=idem + ':frontend', event=event)
         group = StackDeployment.objects.create(
-            stack=stack, backend_run=backend_run,
+            stack=stack, backend_run=backend_run, frontend_run=frontend_run,
             frontend_configuration=frontend_cfg, frontend_sha=front_sha,
             frontend_resources=resources, idempotency_key=idem,
         )

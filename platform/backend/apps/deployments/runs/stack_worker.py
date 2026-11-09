@@ -46,13 +46,26 @@ def _fail_group(group, *, code):
     group.finished_at = timezone.now() if rolled_back else None
     group.save(update_fields=['status', 'error_code', 'finished_at'])
     for run in (group.frontend_run, group.backend_run):
-        if run and run.status == 'PREPARED':
+        if not run:
+            continue
+        if run.status == 'PREPARED':
             DeploymentRun.objects.filter(pk=run.pk).update(
                 status='FAILED' if rolled_back else 'BLOCKED', finished_at=timezone.now() if rolled_back else None,
                 error_message='La publication groupée a échoué ; les anciens services sont conservés.' if rolled_back
                               else 'Retour arrière non confirmé : intervention administrative nécessaire.')
             PipelineStageRun.objects.filter(deployment=run,stage_key__in=('release','health')).update(
                 status='FAILED' if rolled_back else 'BLOCKED', finished_at=timezone.now())
+        elif run.status == 'QUEUED':
+            # Never dispatch the second Jenkins build after the pair failed.
+            DeploymentRun.objects.filter(pk=run.pk, status='QUEUED').update(
+                status='CANCELLED', cancel_requested=True, finished_at=timezone.now(),
+                error_message='L’autre service a échoué ; publication groupée annulée.')
+            PipelineStageRun.objects.filter(deployment=run, status='PENDING').update(
+                status='SKIPPED', finished_at=timezone.now())
+        elif run.status == 'RUNNING':
+            # A running build is cancelled by the ordinary Jenkins poller.
+            # Do not mark SUCCEEDED or promote its runtime after the pair fails.
+            DeploymentRun.objects.filter(pk=run.pk, status='RUNNING').update(cancel_requested=True)
     return True
 
 
@@ -154,7 +167,9 @@ def reconcile_stack_deployments(limit=4):
         front = group.frontend_run.status if group.frontend_run else None
         if back in TERMINAL or front in TERMINAL:
             changed = _fail_group(group, code='AUTOKOM_STACK_BUILD_FAILED') or changed
-        elif back == 'PREPARED' and group.frontend_run_id is None:
+        elif group.frontend_run_id is None:
+            # Legacy groups created before parallel queueing also get their
+            # second build without waiting for the backend to be prepared.
             changed = _new_frontend_run(group) or changed
         elif back == 'PREPARED' and front == 'PREPARED':
             changed = _activate_group(group) or changed

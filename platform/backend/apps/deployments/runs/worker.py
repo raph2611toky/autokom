@@ -191,10 +191,18 @@ def poll_one(client, run_id):
         return False
     try:
         if run.cancel_requested:
-            client.cancel(run.external_run_id)
+            # Another member of the same group may have failed while this
+            # build completed in Jenkins. Do not send an abort request for an
+            # already-finished build: Jenkins can reject it, leaving RUNNING
+            # forever. Neither path is allowed to activate a candidate.
+            cancel_state = client.get_state(run.external_run_id)
+            if cancel_state['status'] == 'RUNNING':
+                client.cancel(run.external_run_id)
             DeploymentRun.objects.filter(pk=run_id, status='RUNNING').update(
                 status='CANCELLED', finished_at=timezone.now())
-            add_log(run, 'AUTOKOM_LOG: Annulation demandée par un utilisateur autorisé.')
+            PipelineStageRun.objects.filter(deployment=run, status__in=['RUNNING', 'PENDING']).update(
+                status='SKIPPED', finished_at=timezone.now())
+            add_log(run, 'AUTOKOM_LOG: Exécution annulée suite à l’échec de la publication groupée.')
             return True
 
         state = client.get_state(run.external_run_id)
@@ -268,6 +276,17 @@ def poll_one(client, run_id):
             error_message = ('La préparation du projet a échoué. '
                              'Consultez le journal technique pour identifier l’étape concernée.')
         if status == 'SUCCEEDED':
+            from apps.deployments.runs.stack_worker import stack_execution_for_run
+            stack_execution, stack_role = stack_execution_for_run(run.pk)
+            if stack_role == 'frontend':
+                # Both Jenkins builds run independently. The frontend Docker
+                # candidate uses the *new* private backend container's alias,
+                # so its runtime phase must wait for backend PREPARED. Keep
+                # Jenkins SUCCESS in the log; DO NOT redispatch its build.
+                backend_status = DeploymentRun.objects.filter(
+                    pk=stack_execution.backend_run_id).values_list('status', flat=True).first()
+                if backend_status != DeploymentRun.Status.PREPARED:
+                    return False
             from apps.deployments.runs.autokom_socket import request_control
             try:
                 add_log(run, 'AUTOKOM_TECH:release:Publication contrôlée démarrée (Docker, DNS et HTTPS).', level='TECH')
@@ -502,7 +521,13 @@ def run_tick():
         logger.warning('Broker/Jenkins indisponible (%s). Nouvelle tentative au prochain tick.',
                        type(exc).__name__)
         return False
-    dispatched = dispatch_one(client)
+    # Dispatch up to two jobs per tick so both members of a stack can build
+    # concurrently in Jenkins (subject to its available agent executors).
+    dispatched = False
+    for _ in range(2):
+        if not dispatch_one(client):
+            break
+        dispatched = True
     # Check a bounded batch; never starve later running jobs.
     polled = False
     for run_id in DeploymentRun.objects.filter(status='RUNNING').exclude(external_run_id='').order_by('created_at').values_list('pk', flat=True)[:20]:

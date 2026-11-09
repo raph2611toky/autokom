@@ -21,7 +21,7 @@ import { useAuth } from './context/AuthContext.jsx'
 const ROUTES = ['/', '/login', '/register', '/dashboard', '/deploy', '/sites', '/projects', '/pricing', '/verify-email', '/forgot-password', '/reset-password', '/integrations/github', '/auth/github/callback']
 
 function validRoute(path) {
-  return ROUTES.includes(path) || /^\/(?:sites|projects)\/[^/]+$/.test(path) || /^\/projects\/[^/]+\/(?:settings|configure|stack|history|deployments\/[^/]+)$/.test(path)
+  return ROUTES.includes(path) || /^\/(?:sites|projects)\/[^/]+$/.test(path) || /^\/projects\/[^/]+\/(?:settings|configure|stack|history|deployments\/[^/]+|stack\/deployments\/[^/]+)$/.test(path)
 }
 
 function projectFromPath(path) {

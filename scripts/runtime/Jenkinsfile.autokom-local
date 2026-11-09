@@ -2,7 +2,10 @@
 // Runs ONLY on isolated agent with rootless BuildKit, NO Docker socket, NO host root.
 pipeline {
     agent { label 'autokom-isolated' }
-    options { timestamps(); skipDefaultCheckout(true); disableConcurrentBuilds(); timeout(time: 45, unit: 'MINUTES') }
+    // Build workspaces and image artifacts are isolated by Jenkins executor and run UUID.
+    // Both services of the same stack may build concurrently; final promotion
+    // remains gated by AUTOKOM's two-candidate commit.
+    options { timestamps(); skipDefaultCheckout(true); timeout(time: 45, unit: 'MINUTES') }
     parameters { string(name: 'AUTOKOM_RUN_ID', defaultValue: '', description: 'UUID d’une exécution AUTOKOM') }
     stages {
         stage('GitHub source') {

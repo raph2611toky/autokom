@@ -17,9 +17,9 @@ ENV = {'AUTOKOM_JENKINS_URL': 'http://127.0.0.1:8080',
        'AUTOKOM_JENKINS_USER':'AdminJenkins', 'AUTOKOM_JENKINS_API_TOKEN':'redacted'}
 
 
-def xml_config(*, label='autokom-isolated', launcher='hudson.slaves.JNLPLauncher'):
+def xml_config(*, label='autokom-isolated', launcher='hudson.slaves.JNLPLauncher', executors=2):
     return ('<slave><name>autokom-builder-01</name><remoteFS>/var/lib/autokom-jenkins-agent-v2</remoteFS>'
-            '<numExecutors>1</numExecutors><label>' + label + '</label><mode>EXCLUSIVE</mode>'
+            '<numExecutors>' + str(executors) + '</numExecutors><label>' + label + '</label><mode>EXCLUSIVE</mode>'
             '<launcher class="' + launcher + '"/></slave>').encode()
 
 
@@ -51,6 +51,31 @@ class AgentTests(unittest.TestCase):
         self.assertIn('/computer/doCreateItem',requests[1][1])
         self.assertIn(b'autokom-builder-01',requests[1][2]['data'])
         self.assertNotIn('scriptText',requests[1][1])
+
+    def test_legacy_executor_count_migrates_only_when_idle(self):
+        observed=[]
+        def fake_http(env, method, path, **kwargs):
+            observed.append((method,path,kwargs))
+            if len(observed) == 1: return 200, xml_config(executors=1)
+            if len(observed) == 2: return 200, b'{"executors":[{"currentExecutable":null}],"oneOffExecutors":[]}'
+            if len(observed) == 3: return 200, b''
+            return 200, xml_config(executors=2)
+        with patch.object(agent,'http',side_effect=fake_http):
+            self.assertTrue(agent.ensure_node(ENV))
+        self.assertEqual([c[0] for c in observed], ['GET','GET','POST','GET'])
+        self.assertIn('/config.xml', observed[2][1])
+        self.assertEqual(observed[2][2]['content_type'],'application/xml')
+        self.assertIn(b'<numExecutors>2</numExecutors>',observed[2][2]['data'])
+
+    def test_busy_legacy_executor_is_not_modified(self):
+        events=[]
+        def fake_http(env, method, path, **kwargs):
+            events.append(method)
+            if len(events)==1: return 200, xml_config(executors=1)
+            return 200, b'{"executors":[{"currentExecutable":{"id":35}}]}'
+        with patch.object(agent,'http',side_effect=fake_http):
+            with self.assertRaises(agent.AgentError): agent.ensure_node(ENV)
+        self.assertEqual(events,['GET','GET'])
 
     def test_missing_permission_does_not_install_agent(self):
         with patch.object(agent, 'http', return_value=(403,b'')):
@@ -111,9 +136,9 @@ class AgentConnectivityTests(unittest.TestCase):
     def test_new_agent_not_confused_with_legacy_node(self):
         import json
         old={'displayName':'autokom-isolated','offline':True,'temporarilyOffline':False,
-             'numExecutors':1,'assignedLabels':[{'name':'autokom-isolated'}]}
+             'numExecutors':2,'assignedLabels':[{'name':'autokom-isolated'}]}
         new={'displayName':'autokom-builder-01','offline':False,'temporarilyOffline':False,
-             'numExecutors':1,'assignedLabels':[{'name':'autokom-isolated'}]}
+             'numExecutors':2,'assignedLabels':[{'name':'autokom-isolated'}]}
         body=json.dumps({'computer':[old,new]}).encode()
         with patch.object(agent,'http',return_value=(200,body)):
             self.assertTrue(agent.exact_agent_online(ENV))
@@ -124,6 +149,6 @@ class AgentConnectivityTests(unittest.TestCase):
     def test_agent_must_be_online_not_merely_created(self):
         import json
         node={'displayName':'autokom-builder-01','offline':True,'temporarilyOffline':False,
-              'numExecutors':1,'assignedLabels':[{'name':'autokom-isolated'}]}
+              'numExecutors':2,'assignedLabels':[{'name':'autokom-isolated'}]}
         with patch.object(agent,'http',return_value=(200,json.dumps({'computer':[node]}).encode())):
             self.assertFalse(agent.exact_agent_online(ENV))

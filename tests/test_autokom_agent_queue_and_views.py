@@ -20,9 +20,9 @@ admin=load('scripts/lib/autokom_runtime_admin.py','admin_queue_hardening')
 def nodes(*values):
     return json.dumps({'computer':list(values)}).encode()
 
-def agent(online=True,label='autokom-isolated',name='autokom-isolated'):
+def agent(online=True,label='autokom-isolated',name='autokom-builder-01'):
     return {'displayName':name, 'offline':not online,'temporarilyOffline':False,
-            'numExecutors':1,'assignedLabels':[{'name':label}]}
+            'numExecutors':2,'assignedLabels':[{'name':label}]}
 
 class AgentQueueTests(TestCase):
     def test_refuses_missing_or_offline_agent(self):

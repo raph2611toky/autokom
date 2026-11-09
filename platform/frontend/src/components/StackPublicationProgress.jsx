@@ -179,7 +179,10 @@ export default function StackPublicationProgress({ projectId, runId, navigate })
             <span className="ak-run-detail-state">{label}</span>
           </li>
         })}</ol>
-        {!child?.run_id && <p className="ak-deployment-hint">{tab==='frontend' ? 'En attente de la préparation du backend avant le lancement du frontend.' : 'En attente de la mise en file.'}</p>}
+        {current?.jenkins_reference && <p className="ak-deployment-hint">{current.jenkins_reference} · Compilation isolée AUTOKOM</p>}
+        {!child?.run_id && <p className="ak-deployment-hint">{tab==='frontend' ? 'Aucune exécution frontend créée pour cette ancienne publication.' : 'En attente de la mise en file.'}</p>}
+        {tab==='frontend' && child?.run_id && group?.status==='PREPARING' && current?.status==='RUNNING' &&
+          <p className="ak-deployment-hint">Compilation indépendante du backend. L’activation du conteneur frontend attend que le backend privé soit prêt.</p>}
         {current?.error_message && <p role="alert" className="ak-deployment-error">{cleanCustomerLog(current.error_message) || 'Cette exécution a échoué. Consultez le journal.'}</p>}
       </section>
       <section className="ak-workspace-sheet ak-run-detail-sheet">

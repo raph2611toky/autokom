@@ -101,7 +101,7 @@ def expected_node_form():
     return {
         'name': NODE_NAME,
         'nodeDescription': 'AUTOKOM managed local unprivileged builder',
-        'numExecutors': 1,
+        'numExecutors': 2,
         'remoteFS': str(AGENT_ROOT),
         'labelString': LABEL,
         'mode': 'EXCLUSIVE',
@@ -112,7 +112,7 @@ def expected_node_form():
     }
 
 
-def validate_node(xml):
+def validate_node(xml, *, allow_legacy=False):
     try:
         root = ET.fromstring(xml)
     except ET.ParseError as exc:
@@ -130,7 +130,7 @@ def validate_node(xml):
     launcher = root.find('launcher')
     launcher_class = '' if launcher is None else launcher.attrib.get('class', '')
     if (actual['name'] not in (None, NODE_NAME) or actual['remoteFS'] != str(AGENT_ROOT)
-            or actual['numExecutors'] != '1' or actual['label'] != LABEL
+            or actual['numExecutors'] not in (('1', '2') if allow_legacy else ('2',)) or actual['label'] != LABEL
             or actual['mode'] != 'EXCLUSIVE'
             or 'JNLPLauncher' not in launcher_class):
         raise AgentError('Un nœud existe déjà sous ce nom avec une configuration différente. Refus de l’écraser.')
@@ -141,8 +141,39 @@ def ensure_node(env):
     endpoint = '/computer/' + quote(NODE_NAME, safe='') + '/config.xml'
     status, data = http(env, 'GET', endpoint)
     if status == 200:
-        validate_node(data)
-        return False
+        # Migrate ONLY the existing, recognized one-executor isolated node.
+        # Do not overwrite an administrator-controlled or unfamiliar Jenkins node.
+        validate_node(data, allow_legacy=True)
+        root = ET.fromstring(data)
+        # Reconfiguring or restarting a busy Jenkins node risks disrupting a
+        # customer build, even when its executor count is already compliant.
+        # The caller should finish active builds before applying the upgrade.
+        check = '/computer/' + quote(NODE_NAME, safe='') + '/api/json?tree=executors[currentExecutable],oneOffExecutors[currentExecutable]'
+        state_status, state = http(env, 'GET', check, max_size=32_768)
+        if state_status != 200:
+            raise AgentError('Impossible de confirmer que l’agent Jenkins est inactif.')
+        try:
+            details = json.loads(state)
+            lists = [details['executors'], details.get('oneOffExecutors', [])]
+            if not all(isinstance(items, list) for items in lists):
+                raise ValueError('Invalid executors')
+            if any(not isinstance(item, dict) or item.get('currentExecutable') is not None
+                   for items in lists for item in items):
+                raise AgentError('Agent occupé : terminer les builds avant migration à deux exécuteurs.')
+        except (ValueError, KeyError, TypeError) as exc:
+            raise AgentError('Impossible de confirmer les exécuteurs Jenkins disponibles.') from exc
+        if root.findtext('numExecutors') == '2':
+            return False
+        root.find('numExecutors').text = '2'
+        xml = ET.tostring(root, encoding='utf-8')
+        changed, _ = http(env, 'POST', endpoint, data=xml, content_type='application/xml')
+        if changed not in (200, 201, 204):
+            raise AgentError(f'Migration contrôlée des exécuteurs refusée (HTTP {changed}).')
+        confirmed, final = http(env, 'GET', endpoint)
+        if confirmed != 200:
+            raise AgentError('Migration Jenkins non confirmée par l’API.')
+        validate_node(final)
+        return True
     if status != 404:
         raise AgentError(f'Lecture du nœud refusée par Jenkins (HTTP {status}).')
     # Jenkins installations expose one of these two descriptor IDs.
@@ -331,7 +362,7 @@ def exact_agent_online(env):
     labels = {x.get('name') for x in node.get('assignedLabels', []) if isinstance(x, dict)}
     return (LABEL in labels and node.get('offline') is False
             and node.get('temporarilyOffline') is not True
-            and type(node.get('numExecutors')) is int and node['numExecutors'] == 1)
+            and type(node.get('numExecutors')) is int and node['numExecutors'] == 2)
 
 
 def await_online(env, *, timeout=45):
