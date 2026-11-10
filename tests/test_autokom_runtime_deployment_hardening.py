@@ -41,7 +41,8 @@ class DeploymentHardeningTests(TestCase):
         runs=(ROOT/'platform/backend/apps/deployments/runs/serializers.py').read_text()
         self.assertNotIn("'output_directory', 'internal_port'",config)
         self.assertNotIn('internal_port = serializers.IntegerField',config)
-        self.assertIn("attrs['internal_port'] = 8080",config)
+        self.assertIn("attrs['internal_port'] = (8000 if", config)
+        self.assertIn("and profile in backend_profiles else 8080)", config)
         self.assertNotIn("'tool_name'",runs)
         self.assertNotIn("'ci_provider'",runs)
 

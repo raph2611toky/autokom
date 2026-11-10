@@ -124,9 +124,11 @@ def recipe(profile, cfg, doc):
                 'COPY ./ /site/\n'
                 'RUN rm -f /site/autokom-nginx.conf\n'
                 'FROM nginxinc/nginx-unprivileged:1.29-alpine\n'
-                'COPY autokom-nginx.conf /etc/nginx/conf.d/default.conf\n'
+             'USER root\n'
+                'COPY --chmod=0644 autokom-nginx.conf /etc/nginx/conf.d/default.conf\n'
+                'RUN chmod 0755 /etc/nginx /etc/nginx/conf.d && chmod 0644 /etc/nginx/nginx.conf /etc/nginx/mime.types\n'
                 'COPY --chown=10001:10001 --from=assets /site/ /usr/share/nginx/html/\n'
-                'USER 10001:10001\nEXPOSE 8080\n'), []
+                'USER 10001:10001\nRUN nginx -t\nEXPOSE 8080\n'), []
     declarations, args = public_build_args(doc, profile)
     build_name = script_name(cfg.get('build_command'))
     base = ('FROM node:22-alpine AS builder\n'
@@ -156,7 +158,9 @@ def recipe(profile, cfg, doc):
                  './node_modules/.bin/next start -p 8080 -H 0.0.0.0; fi"]\n')
         return base, args
     base += ('FROM nginxinc/nginx-unprivileged:1.29-alpine\n'
-             'COPY autokom-nginx.conf /etc/nginx/conf.d/default.conf\n'
+             'USER root\n'
+             'COPY --chmod=0644 autokom-nginx.conf /etc/nginx/conf.d/default.conf\n'
+                'RUN chmod 0755 /etc/nginx /etc/nginx/conf.d && chmod 0644 /etc/nginx/nginx.conf /etc/nginx/mime.types\n'
              f'COPY --chown=10001:10001 --from=builder /app/{output}/ /usr/share/nginx/html/\n'
-             'USER 10001:10001\nEXPOSE 8080\n')
+             'USER 10001:10001\nRUN nginx -t\nEXPOSE 8080\n')
     return base, args

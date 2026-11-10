@@ -22,6 +22,20 @@ BACKEND_RUNTIMES = {
 _NPM_SCRIPT = __import__('re').compile(r'^npm run [A-Za-z][A-Za-z0-9:_-]{0,63}$')
 
 
+def managed_internal_port(build_method, settings):
+    """New managed backend configurations use 8000, frontend uses 8080.
+
+    Dockerfile (user-supplied) configurations are not rewritten.
+    Existing finalized configurations and their deployed endpoints are untouched.
+    """
+    options = settings if isinstance(settings, dict) else {}
+    if build_method == DeploymentConfig.BuildMethod.AUTO and options.get('frontend_profile') in BACKEND_RUNTIMES:
+        return 8000
+    if build_method in (DeploymentConfig.BuildMethod.STATIC, DeploymentConfig.BuildMethod.AUTO):
+        return 8080
+    return None
+
+
 def check_configuration(cfg):
     """Explicitly allow only the fixed trusted frontend recipes in the isolated runner."""
     issues = {}
@@ -50,9 +64,9 @@ def check_configuration(cfg):
                 issues['start_command'] = 'Démarrage Next.js : npm run start.'
         elif profile in BACKEND_RUNTIMES:
             if (cfg.runtime_type != BACKEND_RUNTIMES[profile] or
-                    cfg.internal_port != (8000 if options.get('stack_hostname') else 8080) or
+                    cfg.internal_port != 8000 or
                     cfg.output_directory or cfg.build_command or cfg.start_command):
-                issues['build_method'] = 'Profil backend : port privé géré (8000 en mode duo) et aucune commande libre.'
+                issues['build_method'] = 'Profil backend : port interne 8000, sans commande personnalisée.'
         else:
             issues['build_method'] = 'Recette serveur non autorisée.'
     elif cfg.build_method == DeploymentConfig.BuildMethod.DOCKERFILE:
@@ -94,6 +108,9 @@ def create_config(user, env, attrs):
     data = {field.name: getattr(latest, field.name) for field in DeploymentConfig._meta.fields
             if field.name not in ('id','created_at','version','environment','created_by','is_draft')} if latest else {}
     data.update(attrs)
+    port = managed_internal_port(data.get('build_method'), data.get('settings'))
+    if port is not None:
+        data['internal_port'] = port
     return DeploymentConfig.objects.create(environment=env, created_by=user,
         version=(latest.version+1) if latest else 1, is_draft=True, **data)
 

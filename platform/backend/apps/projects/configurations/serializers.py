@@ -32,7 +32,12 @@ class DeploymentConfigWriteSerializer(serializers.Serializer):
     def validate(self, attrs):
         # Port listening is a server-side runtime concern, not a public API setting.
         if attrs.get('build_method') in (DeploymentConfig.BuildMethod.STATIC, DeploymentConfig.BuildMethod.AUTO):
-            attrs['internal_port'] = 8080
+            profile = (attrs.get('settings') or {}).get('frontend_profile')
+            backend_profiles = {'python_fastapi', 'python_flask', 'python_django', 'python_wsgi',
+                                'node_express', 'node_nest', 'java_spring_maven', 'java_spring_gradle',
+                                'php_plain', 'php_laravel', 'php_symfony'}
+            attrs['internal_port'] = (8000 if attrs.get('build_method') == DeploymentConfig.BuildMethod.AUTO
+                                      and profile in backend_profiles else 8080)
         for name in ('root_directory', 'output_directory'):
             if name in attrs:
                 attrs[name] = safe_relative_path(attrs[name])

@@ -35,6 +35,11 @@ _ALLOWED = (
     re.compile(r'^(?:Application startup failed\.|Worker failed to boot\.|Traceback \(most recent call last\):|gunicorn\.errors\.HaltServer: .{1,150})$'),
     re.compile(r'^\s*File "(/app/[\w./-]{1,130})", line \d+, in [A-Za-z_][A-Za-z0-9_]{0,60}$'),
     # Nginx: only fixed, non-secret permission errors on standard writable paths.
+    # Nginx generated config is static and is not a customer secret. Preserve
+    # the exact error that caused the portfolio startup failure (UID 10001).
+    re.compile(r'^nginx: \[(?:emerg|alert|crit)\] open\(\) '
+               r'"/etc/nginx/(?:conf\.d/default\.conf|nginx\.conf|mime\.types)" '
+               r'failed \(\d+: (?:Permission denied|Read-only file system)\)$'),
     re.compile(r'^nginx: \[(?:emerg|alert|crit)\] (?:mkdir|open)\(\) '
                r'"/(?:tmp|var/cache/nginx|run)/[A-Za-z0-9/_\.-]{1,100}" '
                r'failed \(\d+: (?:Permission denied|Read-only file system)\)$'),

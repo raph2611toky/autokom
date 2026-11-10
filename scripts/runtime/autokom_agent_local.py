@@ -468,9 +468,11 @@ def build(doc):
             '"location / { try_files \\$uri \\$uri/ /index.html; }" '
             '"add_header X-Content-Type-Options nosniff always;" "}" > /tmp/autokom-nginx.conf\n'
             'FROM nginxinc/nginx-unprivileged:1.29-alpine\n'
-            'COPY --from=builder /tmp/autokom-nginx.conf /etc/nginx/conf.d/default.conf\n'
+            'USER root\n'
+            'COPY --chmod=0644 --from=builder /tmp/autokom-nginx.conf /etc/nginx/conf.d/default.conf\n'
+            'RUN chmod 0755 /etc/nginx /etc/nginx/conf.d && chmod 0644 /etc/nginx/nginx.conf /etc/nginx/mime.types\n'
             'COPY --chown=10001:10001 --from=builder /app/dist/ /usr/share/nginx/html/\n'
-            'USER 10001:10001\nEXPOSE 8080\n'
+            'USER 10001:10001\nRUN nginx -t\nEXPOSE 8080\n'
         )
     else:
         if profile in BACKEND_PROFILES:

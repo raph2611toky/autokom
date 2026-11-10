@@ -7,7 +7,7 @@ from apps.projects.common import get_environment
 from apps.projects.configurations.models import DeploymentConfig
 from apps.projects.configurations.serializers import DeploymentConfigSerializer, DeploymentConfigWriteSerializer
 from apps.projects.configurations.services import (get_config, create_config, check_configuration,
-    validate_branch, check_entitlement)
+    validate_branch, check_entitlement, managed_internal_port)
 from apps.plans.catalog.models import ResourcePlan, DeploymentModeOffer
 from helpers.responses import api_success
 from helpers.errors import handle_error
@@ -88,9 +88,15 @@ class ConfigurationUpdateAPIView(APIView):
             serializer.is_valid(raise_exception=True)
             if not serializer.validated_data:
                 raise ValidationError('Aucune modification fournie.')
-            for key, value in validate_selected_plan(serializer.validated_data).items():
+            update = validate_selected_plan(serializer.validated_data)
+            for key, value in update.items():
                 setattr(cfg, key, value)
-            cfg.save(update_fields=[*serializer.validated_data.keys()])
+            managed_port = managed_internal_port(cfg.build_method, cfg.settings)
+            fields = set(update)
+            if managed_port is not None:
+                cfg.internal_port = managed_port
+                fields.add('internal_port')
+            cfg.save(update_fields=list(fields))
             return api_success({'configuration': DeploymentConfigSerializer(cfg).data}, 'Brouillon modifié.')
         except Exception as exc:
             return handle_error(exc, 'config_update')

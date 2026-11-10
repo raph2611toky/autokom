@@ -126,7 +126,7 @@ class BuildRecipeRuntimeUserTests(unittest.TestCase):
 
     def test_vite_build_legacy_path_runtime_uid(self):
         agent=(ROOT/'scripts/runtime/autokom_agent_local.py').read_text()
-        self.assertIn("'USER 10001:10001\\nEXPOSE 8080\\n'",agent)
+        self.assertIn("'USER 10001:10001\\nRUN nginx -t\\nEXPOSE 8080\\n'",agent)
 
 
 if __name__=='__main__':unittest.main()

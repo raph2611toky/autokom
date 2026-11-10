@@ -155,13 +155,20 @@ def container_ipv4(name, network, execute, *, retries=5, delay=0.5):
 
 
 def pick_loopback_port():
-    """The broker serializes deployments; validation after Nginx reload detects races."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(('127.0.0.1', 0))
-        port = sock.getsockname()[1]
-    if not 1024 <= port <= 65535:
-        raise IngressError('AUTOKOM_INGRESS_PORT_INVALID', 'Port local alloué non conforme.')
-    return port
+    """Use an available five-digit loopback port for NEW Nginx relays.
+
+    The OS chooses an unused candidate, and the existing reload/probe checks
+    detect any race before a release can be activated. Keep older four-digit
+    relays valid for backward compatibility; never expose a Docker port.
+    """
+    for _ in range(32):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(('127.0.0.1', 0))
+            port = sock.getsockname()[1]
+        if 10000 <= port <= 65535:
+            return port
+    raise IngressError('AUTOKOM_INGRESS_PORT_INVALID',
+                       'Aucun port local à cinq chiffres disponible dans la plage système.')
 
 
 def _probe_path(name):

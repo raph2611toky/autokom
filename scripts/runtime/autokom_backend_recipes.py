@@ -190,8 +190,8 @@ def backend_recipe(profile, path, cfg):
     base += ('FROM php-base\nWORKDIR /app\nCOPY . .\n')
     if profile in {'php_laravel', 'php_symfony'}:
         base += 'COPY --from=deps /app/vendor /app/vendor\n'
-    base += ('COPY autokom-php-nginx.conf /etc/nginx/nginx.conf\n'
-             'COPY autokom-php-fpm.conf /usr/local/etc/php-fpm.d/zzzz-autokom.conf\n'
+    base += ('COPY --chmod=0644 autokom-php-nginx.conf /etc/nginx/nginx.conf\n'
+             'COPY --chmod=0644 autokom-php-fpm.conf /usr/local/etc/php-fpm.d/zzzz-autokom.conf\n'
              'RUN chown -R 10001:10001 /app /run/nginx /var/cache/nginx /tmp/php-fpm\n'
              f'USER 10001:10001\nEXPOSE {port}\n'
              "CMD [\"sh\",\"-c\",\"php-fpm -D && exec nginx -g 'daemon off;'\"]\n")
