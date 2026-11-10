@@ -4,7 +4,7 @@ import { getRemoteProjectDetail, errorText } from '../services/projectWorkflow.j
 import { gitApi } from '../services/projectsApi.js'
 import { stackApi } from '../services/stackApi.js'
 import { detectSource, frontendProfile, availableFrontendProfiles, BACKEND_PROFILES } from '../services/sourceAnalysis.js'
-import { PRICING_PLANS, formatAr } from '../config/pricing.js'
+import { billingApi } from '../services/billingApi.js'
 import { parseStackEnv, stackEnvPayload, publicEnvName, sensitiveEnvName, existingFrontendStackDefaults, existingServiceKind, stackOutputDirectory } from '../services/stackEnv.js'
 import { stackHosts, frontendApiVariable, withoutManagedFields, MANAGED_BACKEND_ENV, MANAGED_FRONTEND_API, validFrontendApiKey, validBackendOriginKey } from '../services/stackDomains.js'
 import '../styles/stack-deploy.css'
@@ -132,6 +132,7 @@ export default function StackDeploy({navigate,projectId}) {
   const [backend,setBackend] = useState(INITIAL)
   const [auto,setAuto] = useState(true)
   const [highAvailability,setHighAvailability] = useState(false)
+  const [accountPlan,setAccountPlan] = useState(null)
   const [probe,setProbe] = useState({frontend:{status:'idle'},backend:{status:'idle'}})
   const [busy,setBusy] = useState(false)
   const [error,setError] = useState('')
@@ -145,10 +146,11 @@ export default function StackDeploy({navigate,projectId}) {
 
   useEffect(() => {
     let active = true
-    Promise.all([getRemoteProjectDetail(projectId),stackApi.detail(projectId)])
-      .then(async ([detail,stackResponse])=>{
+    Promise.all([getRemoteProjectDetail(projectId),stackApi.detail(projectId),billingApi.account()])
+      .then(async ([detail,stackResponse,accountResponse])=>{
         if (!active) return
         setRecord(detail)
+        setAccountPlan(accountResponse?.subscription || null)
         const singleService = existingFrontendStackDefaults(detail)
         const primaryKind = existingServiceKind(detail)
         const branch = singleService.branch
@@ -161,7 +163,7 @@ export default function StackDeploy({navigate,projectId}) {
         setFrontend(asForm(existing?.frontend || (primaryKind==='frontend' ? singleService : null),branch,'frontend'))
         setBackend(asForm(existing?.backend || (primaryKind==='backend' ? singleService : null),branch,'backend'))
         setAuto(existing ? Boolean(existing.auto_deploy) : Boolean(detail.configurations?.find(item => !item.is_draft)?.auto_deploy))
-        setHighAvailability(Boolean(existing?.high_availability_requested))
+        setHighAvailability(Boolean(existing?.high_availability_requested) && Boolean(accountResponse?.subscription?.ha_available))
         if (detail.project.github_installation_id && detail.project.repository_external_id) {
           try {
             const result = await gitApi.branches(detail.project.github_installation_id,detail.project.repository_external_id)
@@ -267,12 +269,13 @@ export default function StackDeploy({navigate,projectId}) {
       <ComponentCard kind="backend" data={backend} onChange={setBackend} branches={branches} probe={probe.backend} host={backendHost} apiHost={frontHost}/></div>
       <section className="ak-stack-component ak-stack-common-hosting" aria-label="Offre d'hébergement commune">
         <div className="ak-stack-inline"><h2>Offre d’hébergement commune</h2><span className="ak-stack-common-tag"><Layers3 size={14}/> Une seule offre pour deux services</span></div>
-        <div className="ak-stack-plan-list">{PRICING_PLANS.map(plan => <div key={plan.id} className={`ak-stack-plan-card ${plan.id==='free'?'current':'unavailable'}`} aria-label={`${plan.name} : ${plan.id==='free'?'offre actuelle':'non disponible'}`}>
-          <strong>{plan.name}</strong><small>{plan.tagline}</small><span>{formatAr(plan.monthly)} / mois</span><small>{plan.id==='free'?'Offre disponible selon les quotas du projet':'Offre bientôt disponible'}</small>
-        </div>)}</div>
+        <div className="ak-account-offer" role="group" aria-label="Abonnement du compte en lecture seule">
+          <div><strong>{accountPlan?.plan_name || 'Découverte'}</strong><small>Formule actuelle de votre compte · {accountPlan?.max_instances || 1} instance(s) autorisée(s)</small></div>
+          <button type="button" className="button-outline" onClick={() => navigate('/account')}>Mon abonnement <ArrowRight size={15}/></button>
+        </div>
         <p className="ak-stack-subtle"><Info size={15}/> Les ressources sont réparties entre les deux conteneurs. La validation des quotas appartient au backend AUTOKOM ; aucune seconde offre n’est ajoutée automatiquement.</p>
       </section>
-      <section className="ak-stack-component ak-stack-options"><label><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)}/> Déployer automatiquement après un push sur l'une des deux branches</label><label><input type="checkbox" checked={highAvailability} onChange={e=>setHighAvailability(e.target.checked)}/> Demander la haute disponibilité pour le frontend et le backend</label><p className="ak-stack-subtle">La redondance doit être autorisée pour chacun des deux environnements et exécutée sur deux workers GCP. Aucune activation locale fictive. </p><p className="ak-stack-subtle">Le nouveau mode conserve la dernière version saine des deux services jusqu'à la validation du nouveau couple.</p></section>
+      <section className="ak-stack-component ak-stack-options"><label><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)}/> Déployer automatiquement après un push sur l'une des deux branches</label><label><input type="checkbox" checked={highAvailability} disabled={!accountPlan?.ha_available} onChange={e=>setHighAvailability(e.target.checked)}/> Demander la haute disponibilité pour le frontend et le backend</label><p className="ak-stack-subtle">La redondance doit être autorisée pour chacun des deux environnements et exécutée sur deux workers GCP. Aucune activation locale fictive. </p><p className="ak-stack-subtle">Le nouveau mode conserve la dernière version saine des deux services jusqu'à la validation du nouveau couple.</p></section>
       <div className="ak-stack-footer"><button type="button" className="button-primary" disabled={!ready} onClick={()=>setStep(1)}>Continuer <ArrowRight size={16}/></button></div>
     </>}
     {step===1 && <section className="ak-stack-component"><h2>Vérification avant publication</h2>

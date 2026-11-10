@@ -41,7 +41,10 @@ class ApplicationEntitlement(models.Model):
         if self.status == self.Status.ACTIVE and self.grant_source == self.GrantSource.TEST:
             checkout = self.sandbox_checkout if self.sandbox_checkout_id else None
             if (checkout is None or checkout.status != SandboxCheckout.Status.ACCEPTED or
-                    checkout.environment_id != self.environment_id or
+                    not (checkout.environment_id == self.environment_id or (
+                        checkout.environment_id is None and
+                        checkout.created_by_id == self.environment.project.organization.owner_id and
+                        AccountSubscription.objects.filter(user_id=checkout.created_by_id, receipt_id=checkout.id).exists())) or
                     checkout.resource_plan_id != self.resource_plan_id or
                     checkout.expires_at <= timezone.now()):
                 raise ValidationError({'sandbox_checkout': 'Reçu de test actif, conforme au plan et à l’environnement requis.'})
@@ -83,7 +86,10 @@ class HighAvailabilityOption(models.Model):
             if self.sandbox_checkout_id:
                 checkout = self.sandbox_checkout
                 if (checkout.status != SandboxCheckout.Status.ACCEPTED or
-                        checkout.environment_id != self.environment_id or
+                        not (checkout.environment_id == self.environment_id or (
+                            checkout.environment_id is None and
+                            checkout.created_by_id == self.environment.project.organization.owner_id and
+                            AccountSubscription.objects.filter(user_id=checkout.created_by_id, receipt_id=checkout.id).exists())) or
                         checkout.resource_plan.max_instances < 2 or
                         checkout.expires_at <= timezone.now() or
                         self.billing_reference != checkout.reference or not self.activated_at):
@@ -106,7 +112,7 @@ class SandboxCheckout(models.Model):
         ANNUAL = 'annual', 'Annuel'
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    environment = models.ForeignKey('environments.Environment', on_delete=models.PROTECT, related_name='sandbox_checkouts')
+    environment = models.ForeignKey('environments.Environment', on_delete=models.PROTECT, null=True, blank=True, related_name='sandbox_checkouts')
     created_by = models.ForeignKey('accounts.User', on_delete=models.PROTECT, related_name='sandbox_checkouts')
     resource_plan = models.ForeignKey('plan_catalog.ResourcePlan', on_delete=models.PROTECT, related_name='sandbox_checkouts')
     plan_code = models.CharField(max_length=16)
@@ -124,3 +130,17 @@ class SandboxCheckout(models.Model):
 
     def __str__(self):
         return f'TEST {self.plan_code} {self.environment_id} {self.reference}'
+
+
+class AccountSubscription(models.Model):
+    """Current subscription of the signed-in account, independent of projects.
+
+    Financial simulations are linked to immutable receipts and never grant
+    entitlements to organizations owned by another account.
+    """
+    user = models.OneToOneField('accounts.User', on_delete=models.PROTECT, related_name='subscription', primary_key=True)
+    receipt = models.ForeignKey('SandboxCheckout', on_delete=models.PROTECT, related_name='account_subscriptions')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'plans_accountsubscription'

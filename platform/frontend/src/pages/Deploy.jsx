@@ -64,14 +64,21 @@ export default function Deploy({ navigate, editProjectId = '' }) {
     return () => window.clearTimeout(timer)
   }, [notice])
   const [drafts, setDrafts] = useState(() => API_AVAILABLE ? [] : readDrafts())
-  const [sandboxAvailable, setSandboxAvailable] = useState(false)
-  const [sandboxReceipt, setSandboxReceipt] = useState(null)
-  const sandboxRequest = useRef(null)
+  const [accountSubscription, setAccountSubscription] = useState(null)
+  const [accountLoading, setAccountLoading] = useState(API_AVAILABLE)
   useEffect(() => {
     if (!API_AVAILABLE) return
     let active = true
-    billingApi.availability().then(info => { if (active) setSandboxAvailable(Boolean(info?.enabled)) })
-      .catch(() => { if (active) setSandboxAvailable(false) })
+    billingApi.account().then(result => {
+      if (!active) return
+      const subscription = result?.subscription
+      if (!subscription) throw new Error('Offre du compte indisponible.')
+      setAccountSubscription(subscription)
+      const activePlan = subscription.active ? subscription.plan : 'free'
+      setForm(old => ({...old, ...planToDeployment(activePlan),
+        highAvailability: activePlan === 'pro' && Boolean(old.highAvailability)}))
+    }).catch(error => { if (active) setEditError(error?.message || 'Abonnement du compte inaccessible.') })
+      .finally(() => { if (active) setAccountLoading(false) })
     return () => { active = false }
   }, [])
   const [busy, setBusy] = useState(false)
@@ -112,9 +119,6 @@ export default function Deploy({ navigate, editProjectId = '' }) {
                 granted.resource_plan_code === 'starter' ? 'free' : 'essential'
               setForm(old => ({ ...old, pricingPlan: selected, resourcePlan: selected === 'free' ? 'free' : 'adapted' }))
             }).catch(() => {})
-            billingApi.subscription(remoteId, result.environment.id).then(info => {
-              if (active && info?.receipt?.is_valid) setSandboxReceipt(info.receipt)
-            }).catch(() => {})
             setStep(1)
           }).catch(error => setEditError(errorText(error)))
             .finally(() => setEditLoading(false))
@@ -146,36 +150,7 @@ export default function Deploy({ navigate, editProjectId = '' }) {
     const sourceChanged = ['repositorySlug', 'branch', 'workdir'].some(key => safeData[key] !== undefined && safeData[key] !== old[key])
     return { ...old, ...safeData, ...(sourceChanged ? { advancedBuild: { ...old.advancedBuild, profile:'', buildCommand:'', outputDir:'' } } : {}) }
   }) }
-  const choosePlan = id => { sandboxRequest.current = null; setSandboxReceipt(null); rememberPlan(id, undefined, form.billingPeriod); update(planToDeployment(id)) }
-  async function activateSandboxSubscription() {
-    if (!API_AVAILABLE || !sandboxAvailable || busy || !['essential', 'pro'].includes(form.pricingPlan)) return
-    if (projectError || analysisStatus !== 'ready' || !staticReady) {
-      setNotice({ type: 'error', text: 'Vérifiez d’abord le dépôt et la configuration GitHub.' })
-      return
-    }
-    setBusy(true); setNotice(null)
-    try {
-      const checked = verifiedDeploymentForm(form, analysis)
-      // Enregistre un brouillon : ne lance ni Jenkins, ni la publication.
-      const saved = await saveRemoteProject({ ...checked, ...remoteIds }, {
-        onCreated: ids => { setRemoteIds(old => ({ ...old, ...ids })); setForm(old => ({ ...old, ...ids })) },
-      })
-      const key = sandboxRequest.current || crypto.randomUUID()
-      sandboxRequest.current = key
-      const result = await billingApi.checkout(saved.projectId, saved.environmentId,
-        form.pricingPlan, form.billingPeriod, key)
-      if (!result?.receipt || result.receipt.mode !== 'SANDBOX' || result.receipt.status !== 'ACCEPTED') {
-        throw new Error('Le serveur n’a pas confirmé la simulation de paiement.')
-      }
-      // Important : rafraîchit l’identifiant du plan du brouillon depuis Django.
-      await saveRemoteProject({ ...checked, backendProjectId: saved.projectId,
-        backendEnvironmentId: saved.environmentId }, { onCreated: () => {} })
-      setSandboxReceipt(result.receipt)
-      sandboxRequest.current = null
-      setNotice({ type: 'success', text: 'Abonnement TEST activé : aucun argent débité. Vous pouvez continuer le déploiement.' })
-    } catch (error) { setNotice({ type: 'error', text: errorText(error) }) }
-    finally { setBusy(false) }
-  }
+  const choosePlan = id => { if (!API_AVAILABLE) { rememberPlan(id, undefined, form.billingPeriod); update(planToDeployment(id)) } }
   const updateBuild = (key,val) => { setServerPreview(null); preparedLaunch.current = null; launchKey.current = null; setForm(old => ({...old,advancedBuild:{...old.advancedBuild,[key]:val}})) }
   const projectError = validateProjectSelection(form)
   const build = { ...(analysis?.build || {}), ...form.advancedBuild }
@@ -346,6 +321,7 @@ export default function Deploy({ navigate, editProjectId = '' }) {
   }
 
 
+  if (API_AVAILABLE && accountLoading) return <section className="ak-workspace-empty" role="status">Vérification de l’abonnement du compte…</section>
   if (API_AVAILABLE && editLoading) return <section className="ak-workspace-empty" role="status"><LoaderCircle className="ak-spin" size={20}/> Chargement de la configuration du projet…</section>
   if (API_AVAILABLE && editError) return <section className="ak-workspace-empty"><p role="alert">{editError}</p><button type="button" className="button-outline" onClick={() => navigate(`/projects/${editingProjectId}`)}>Retour au projet</button></section>
 
@@ -379,25 +355,16 @@ export default function Deploy({ navigate, editProjectId = '' }) {
           {!BACKEND_PROFILES.includes(currentProfile) ? <FrontendEnvEditor rows={form.frontendEnv || []} analysis={analysis} onChange={rows => update({frontendEnv: rows, frontendEnvTouched: true})}/> : <p className="ak-backend-env-notice">Les variables privées d’un service backend ne sont pas injectées via l’éditeur de variables frontend publiques.</p>}
           {analysis?.warnings?.length>0 && <div className="ak-analysis-warnings">{analysis.warnings.map(w=><p key={w}><Info size={15}/>{w}</p>)}</div>}
           <div className="ak-offer-header"><h3>Offre d’hébergement</h3><button className="ak-see-prices" type="button" onClick={() => navigate('/pricing')}>Comparer les tarifs <ArrowRight size={15}/></button></div>
-          <div className="ak-offers ak-offers-three">
-            {PRICING_PLANS.map(plan => <button key={plan.id} type="button" aria-pressed={inferPricingPlan(form) === plan.id} onClick={() => choosePlan(plan.id)} title={API_AVAILABLE && plan.id !== 'free' ? 'Demande soumise aux droits attribués par un administrateur (aucune activation automatique).' : ''} className={`ak-offer-card ${(inferPricingPlan(form) === plan.id) ? 'selected' : ''}`}>
-              <span className="ak-offer-top"><span className="ak-offer-name">{plan.name}</span><span className="ak-offer-tag">{plan.id === 'free' ? 'Gratuite' : 'Droit requis'}</span></span>
-              <strong>{plan.tagline}</strong>
-              <small>{plan.servers}</small>
-              <span className="ak-offer-price">{formatAr(form.billingPeriod === 'annual' ? plan.annual : plan.monthly)} / {form.billingPeriod === 'annual' ? 'an' : 'mois'}</span>
+          {API_AVAILABLE ? <div className="ak-account-offer" role="group" aria-label="Abonnement du compte en lecture seule">
+            <div><strong>{accountLoading ? 'Vérification de votre abonnement…' : accountSubscription?.plan_name || 'Découverte'}</strong>
+            <small>Offre de votre compte · {accountSubscription?.max_instances || 1} instance(s) autorisée(s) · non modifiable depuis le déploiement</small></div>
+            <button type="button" className="button-outline" onClick={() => navigate('/account')}>Mon abonnement <ArrowRight size={15}/></button>
+          </div> : <div className="ak-offers ak-offers-three">
+            {PRICING_PLANS.map(plan => <button key={plan.id} type="button" aria-pressed={inferPricingPlan(form) === plan.id} onClick={() => choosePlan(plan.id)} className={`ak-offer-card ${(inferPricingPlan(form) === plan.id) ? 'selected' : ''}`}>
+              <span className="ak-offer-top"><span className="ak-offer-name">{plan.name}</span></span><strong>{plan.tagline}</strong>
             </button>)}
-          </div>
-          {API_AVAILABLE && form.pricingPlan !== 'free' && <p className="ak-backend-env-notice" role="note">L'offre {findPricingPlan(form.pricingPlan).name} est une sélection commerciale : les droits et ressources sont accordés séparément par AUTOKOM. Choisir une offre ne valide pas automatiquement une souscription.</p>}
-          {API_AVAILABLE && sandboxAvailable && form.pricingPlan !== 'free' && <div className="ak-backend-env-notice" role="region" aria-label="Paiement de démonstration AUTOKOM">
-            <strong>Simulation de paiement — version de test</strong>
-            <p>Aucun moyen de paiement demandé et aucun argent débité. L’abonnement TEST sera enregistré uniquement pour cet environnement.</p>
-            <button type="button" className="button-outline" disabled={busy || analysisStatus !== 'ready' || !staticReady}
-              onClick={() => void activateSandboxSubscription()}>
-              {busy ? 'Activation du compte en cours…' : `Activer ${findPricingPlan(form.pricingPlan).name} en mode TEST (0 Ar débités)`}
-            </button>
-            {sandboxReceipt && <p role="status">Simulation acceptée : {sandboxReceipt.reference} · {sandboxReceipt.max_instances} instance(s) autorisée(s) · HA {sandboxReceipt.ha_option_active ? 'disponible sur demande' : 'non incluse'}.</p>}
           </div>}
-          {form.pricingPlan === 'pro' && <label className="ak-ha-choice"><span><strong>Haute disponibilité (facultative)</strong><small>Désactivée par défaut. À cocher seulement si vous souhaitez deux répliques et disposez d'un plan réellement attribué avec au moins deux instances et d'une option HA active. Sans ces droits, l'application peut être déployée en mode standard.</small></span><input type="checkbox" checked={Boolean(form.highAvailability)} onChange={e => update({highAvailability:e.target.checked})} aria-label="Activer la haute disponibilité"/></label>}
+          {(API_AVAILABLE ? accountSubscription?.ha_available : form.pricingPlan === 'pro') && <label className="ak-ha-choice"><span><strong>Haute disponibilité (facultative)</strong><small>Désactivée par défaut. À cocher seulement si vous souhaitez deux répliques et disposez d'un plan réellement attribué avec au moins deux instances et d'une option HA active. Sans ces droits, l'application peut être déployée en mode standard.</small></span><input type="checkbox" checked={Boolean(form.highAvailability)} onChange={e => update({highAvailability:e.target.checked})} aria-label="Activer la haute disponibilité"/></label>}
           <div className="ak-essentials"><label className="field"><span>Type de publication</span><select value={form.pipelineMode} onChange={e=>update({pipelineMode:e.target.value})}><option value="devsecops">Protection renforcée</option><option value="devops">Standard</option></select></label><label className="field"><span>Environnement</span><select value={form.environment} onChange={e=>update({environment:e.target.value})}><option value="development">Développement</option><option value="staging">Préproduction</option><option value="production">Production</option></select></label><label className="field"><span>Domaine</span><select value={form.domainMode} onChange={e=>update({domainMode:e.target.value})}><option value="autokom">Sous-domaine AUTOKOM</option><option value="custom">Domaine personnalisé</option></select></label>{form.domainMode==='custom'&&<label className="field"><span>Nom de domaine</span><input value={form.domain} onChange={e=>update({domain:e.target.value})} placeholder="app.exemple.com"/></label>}</div>
           <details className="ak-advanced-settings"><summary><Settings2 size={17}/> Paramètres avancés <span>facultatif</span></summary><div className="ak-advanced-grid">{(!API_AVAILABLE ? BUILD_FIELDS : []).map(([key,label])=><label className="field" key={key}><span>{label}</span><input value={form.advancedBuild[key]??''} placeholder={analysis?.build?.[key] || 'Détection automatique'} onChange={e=>updateBuild(key,e.target.value)}/></label>)}</div><label className="ak-simple-checkbox"><input type="checkbox" checked={form.autoDeploy} onChange={e=>update({autoDeploy:e.target.checked})}/> Déploiement automatique sur push</label>{!API_AVAILABLE && <ServiceCatalog services={form.services || DEFAULT_SERVICES} capabilities={[]} capabilitiesLoaded={false} onChange={(group, choice)=>update({services:{...(form.services || DEFAULT_SERVICES),[group]:choice}})}/>}</details>
         </>}

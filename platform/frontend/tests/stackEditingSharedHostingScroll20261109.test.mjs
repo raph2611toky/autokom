@@ -38,7 +38,8 @@ test('une seule offre d’hébergement commune est affichée après les configur
   assert.match(stack, /Offre d’hébergement commune/)
   assert.match(stack, /ak-stack-grid.*ComponentCard kind="frontend"/s)
   assert.match(stack, /ComponentCard kind="backend"/)
-  assert.match(stack, /ak-stack-plan-list/)
+  assert.match(stack, /Abonnement du compte en lecture seule/)
+  assert.doesNotMatch(stack, /ak-stack-plan-list/)
   assert.match(stack, /existingFrontendStackDefaults\(detail\)/)
 })
 

@@ -6,6 +6,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from apps.accounts.user.permissions import IsClientUser
 from apps.projects.common import get_environment
 from apps.plans.entitlements.models import SandboxCheckout
+from apps.plans.entitlements.account import account_status, checkout_account
 from apps.plans.entitlements.sandbox import TEST_PLANS, checkout, enabled_for, receipt_summary, require_billing_owner
 from helpers.errors import handle_error
 from helpers.responses import api_success
@@ -22,21 +23,20 @@ class SandboxAvailabilityAPIView(APIView):
 
 
 class SandboxCheckoutAPIView(APIView):
+    """Legacy endpoint retained for clients; payments now belong to accounts.
+
+    A user must not bypass their account subscription by buying a different
+    plan for a single environment via an old API route.
+    """
     parser_classes = [JSONParser]
     permission_classes = [IsClientUser]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'sandbox_checkout'
+
     def post(self, request, project_id, environment_id):
-        try:
-            project, env = get_environment(request.user, project_id, environment_id, write=True)
-            if not isinstance(request.data, dict):
-                raise ValidationError('Corps JSON attendu.')
-            receipt = checkout(request.user, project, env, request.data.get('plan'),
-                               request.data.get('period'), request.data.get('idempotency_key'))
-            return api_success({'receipt': receipt_summary(receipt)},
-                'Paiement simulé accepté. Aucun argent débité : droits TEST activés.', 201)
-        except Exception as exc:
-            return handle_error(exc, 'sandbox_checkout')
+        return handle_error(ValidationError(
+            'Le parcours de souscription a été déplacé dans Mon compte.'),
+            'legacy_environment_checkout')
 
 
 class SandboxSubscriptionAPIView(APIView):
@@ -60,3 +60,31 @@ class SandboxAccountSubscriptionsAPIView(APIView):
         return api_success({'enabled': enabled_for(request.user), 'sandbox': True,
             'subscriptions': [dict(receipt_summary(row), environment_id=str(row.environment_id)) for row in records]},
             'Historique de vos abonnements simulés.')
+
+
+class AccountSubscriptionAPIView(APIView):
+    """Account-authoritative plan; no client-supplied project or entitlement ID."""
+    permission_classes = [IsClientUser]
+
+    def get(self, request):
+        return api_success({'subscription': account_status(request.user)}, 'Abonnement du compte.')
+
+
+class AccountCheckoutAPIView(APIView):
+    """Explicitly a simulated no-charge checkout, not a real financial payment."""
+    parser_classes = [JSONParser]
+    permission_classes = [IsClientUser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'sandbox_checkout'
+
+    def post(self, request):
+        try:
+            if not isinstance(request.data, dict):
+                raise ValidationError('Corps JSON attendu.')
+            checkout_account(request.user, request.data.get('plan'), request.data.get('period'),
+                             request.data.get('idempotency_key'))
+            return api_success({'subscription': account_status(request.user),
+                                'amount_charged_ariary': 0, 'payment_real': False},
+                               'Souscription de démonstration enregistrée. Aucun débit réel.', 201)
+        except Exception as exc:
+            return handle_error(exc, 'account_checkout')

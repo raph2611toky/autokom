@@ -23,12 +23,19 @@ def free_entitlement(environment):
     plan = ResourcePlan.objects.filter(is_default=True, is_active=True, is_premium=False).order_by('display_order').first()
     if mode is None or plan is None:
         raise MissingFreePlan()
-    return ApplicationEntitlement.objects.create(
+    entitlement = ApplicationEntitlement.objects.create(
         environment=environment, mode_offer=mode, resource_plan=plan,
         status=ApplicationEntitlement.Status.ACTIVE,
         grant_source=ApplicationEntitlement.GrantSource.SYSTEM,
         activated_at=timezone.now(),
     )
+    # New projects inherit the active subscription of their owner's account.
+    # Existing administrator-managed rights are never overwritten.
+    from apps.plans.entitlements.account import active_subscription, grant_owned_environment
+    receipt = active_subscription(environment.project.organization.owner)
+    if receipt is not None:
+        grant_owned_environment(environment, receipt)
+    return entitlement
 
 
 def reserve_domain(project, environment, selected=''):

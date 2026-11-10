@@ -42,5 +42,5 @@ test('édition : choix conservé depuis Django, et non supposé activé',()=>{
 test('le formulaire stack transmet au backend une demande explicite sans créer de répliques locales',()=>{
   const source=readFileSync(new URL('../src/pages/StackDeploy.jsx', import.meta.url),'utf8')
   assert.match(source,/high_availability_requested:highAvailability/)
-  assert.match(source,/setHighAvailability\(Boolean\(existing\?\.high_availability_requested\)\)/)
+  assert.match(source,/setHighAvailability\(Boolean\(existing\?\.high_availability_requested\) && Boolean\(accountResponse\?\.subscription\?\.ha_available\)\)/)
 })

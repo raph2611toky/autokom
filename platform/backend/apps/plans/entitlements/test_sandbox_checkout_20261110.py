@@ -114,13 +114,12 @@ class SandboxCheckoutTests(TestCase):
         with self.assertRaises(PermissionDenied):
             checkout(self.owner, self.project, self.env, 'pro', 'monthly', str(uuid.uuid4()))
 
-    def test_backend_api_creates_receipt_only_for_authorized_owner(self):
+    def test_legacy_environment_payment_cannot_bypass_account_subscription(self):
         factory = APIRequestFactory()
         url = f'/api/projects/{self.project.pk}/environments/{self.env.pk}/billing/sandbox/checkout/'
         payload = {'plan':'pro', 'period':'monthly', 'idempotency_key':str(uuid.uuid4())}
         req = factory.post(url, payload, format='json')
         force_authenticate(req, user=self.owner)
         res = SandboxCheckoutAPIView.as_view()(req, project_id=self.project.pk, environment_id=self.env.pk)
-        self.assertEqual(res.status_code, 201, res.data)
-        self.assertEqual(res.data['data']['receipt']['amount_charged_ariary'], 0)
-        self.assertEqual(res.data['data']['receipt']['mode'], 'SANDBOX')
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertFalse(SandboxCheckout.objects.exists())

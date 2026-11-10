@@ -5,6 +5,11 @@ const uuid = value => {
   return value
 }
 export const billingApi = Object.freeze({
+  account: () => api.get('/billing/account/'),
+  accountCheckout: (plan, period, key) => {
+    if (!['essential', 'pro'].includes(plan) || !['monthly', 'annual'].includes(period)) throw new TypeError('Offre ou période invalide.')
+    return api.post('/billing/account/checkout/', { plan, period, idempotency_key: uuid(key) })
+  },
   availability: () => api.get('/billing/sandbox/availability/'),
   subscription: (projectId, envId) => api.get(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/billing/sandbox/subscription/`),
   checkout: (projectId, envId, plan, period, idempotencyKey) => {

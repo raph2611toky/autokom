@@ -1,4 +1,4 @@
-import { BadgePercent, FolderKanban, Globe2, LogOut, Rocket } from 'lucide-react'
+import { BadgePercent, FolderKanban, Globe2, LogOut, Rocket, UserCircle2 } from 'lucide-react'
 import ThemeToggle from './ThemeToggle.jsx'
 import { API_AVAILABLE } from '../config/runtime.js'
 import { useAuth } from '../context/AuthContext.jsx'
@@ -8,6 +8,7 @@ const TABS = [
   { path: '/deploy', label: 'Déployer', icon: Rocket },
   { path: '/sites', label: 'Sites & domaines', icon: Globe2 },
   { path: '/pricing', label: 'Tarifs', icon: BadgePercent },
+  { path: '/account', label: 'Mon compte', icon: UserCircle2 },
 ]
 
 export default function Header({ route, navigate, theme, onToggleTheme }) {

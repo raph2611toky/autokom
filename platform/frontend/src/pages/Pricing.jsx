@@ -23,7 +23,7 @@ export default function Pricing({ navigate }) {
   const [period, setPeriod] = useState(getBillingPeriod)
   const choose = id => {
     rememberPlan(id, undefined, period)
-    navigate('/deploy')
+    navigate(id === 'free' ? '/deploy' : `/checkout/${id}`)
   }
 
   return (
@@ -56,7 +56,7 @@ export default function Pricing({ navigate }) {
               <strong>{formatAr(period === 'annual' ? plan.annual : plan.monthly)}</strong>
               <span>/ {period === 'annual' ? 'an' : 'mois'}</span>
             </div>
-            {period === 'annual' && plan.monthly > 0 ? <span className="ak-pricing-price-caption">Soit {formatAr(Math.round(plan.annual / 12))} par mois, facturé à l’année</span> : <span className="ak-pricing-price-caption">{plan.monthly ? 'Sans paiement immédiat' : 'Accès gratuit, sans paiement'}</span>}
+            {period === 'annual' && plan.monthly > 0 ? <span className="ak-pricing-price-caption">Soit {formatAr(Math.round(plan.annual / 12))} par mois, facturé à l’année</span> : <span className="ak-pricing-price-caption">{plan.monthly ? 'Souscription depuis votre compte' : 'Accès gratuit, sans paiement'}</span>}
             <button className={`ak-pricing-select ${plan.highlighted ? 'is-primary' : ''}`} type="button" onClick={() => choose(plan.id)}>{plan.cta}<ArrowRight size={18}/></button>
             <div className="ak-pricing-specs">
               <div><Server size={17}/><span>{plan.servers}</span></div>
@@ -68,7 +68,7 @@ export default function Pricing({ navigate }) {
           </article>
         ))}
       </div>
-      <p className="ak-pricing-disclaimer">Grille commerciale proposée pour AUTOKOM par IKOM, en cours de validation. Montants et quotas indicatifs, hors frais éventuels de domaine et taxes à définir. Aucune commande ni facturation n'est effectuée depuis cette interface.</p>
+      <p className="ak-pricing-disclaimer">Grille commerciale proposée pour AUTOKOM par IKOM, en cours de validation. Montants et quotas indicatifs, hors frais éventuels de domaine et taxes à définir. Une souscription requiert une confirmation. Aucun moyen de paiement réel n'est encore connecté.</p>
 
       <section className="ak-pricing-compare" aria-labelledby="ak-pricing-compare-title">
         <div className="ak-pricing-section-head"><h2 id="ak-pricing-compare-title">Comparer les offres</h2><p>Les capacités essentielles sont incluses dès la première formule.</p></div>

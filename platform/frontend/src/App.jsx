@@ -15,13 +15,15 @@ import LiveRuns from './pages/LiveRuns.jsx'
 import StackPublicationProgress from './components/StackPublicationProgress.jsx'
 import LiveProjectSettings from './pages/LiveProjectSettings.jsx'
 import Pricing from './pages/Pricing.jsx'
+import Checkout from './pages/Checkout.jsx'
+import Account from './pages/Account.jsx'
 import { API_AVAILABLE } from './config/runtime.js'
 import { useAuth } from './context/AuthContext.jsx'
 
-const ROUTES = ['/', '/login', '/register', '/dashboard', '/deploy', '/sites', '/projects', '/pricing', '/verify-email', '/forgot-password', '/reset-password', '/integrations/github', '/auth/github/callback']
+const ROUTES = ['/', '/login', '/register', '/dashboard', '/deploy', '/sites', '/projects', '/pricing', '/verify-email', '/forgot-password', '/reset-password', '/integrations/github', '/auth/github/callback', '/account']
 
 function validRoute(path) {
-  return ROUTES.includes(path) || /^\/(?:sites|projects)\/[^/]+$/.test(path) || /^\/projects\/[^/]+\/(?:settings|configure|stack|history|deployments\/[^/]+|stack\/deployments\/[^/]+)$/.test(path)
+  return ROUTES.includes(path) || /^\/checkout\/(?:essential|pro)$/.test(path) || /^\/(?:sites|projects)\/[^/]+$/.test(path) || /^\/projects\/[^/]+\/(?:settings|configure|stack|history|deployments\/[^/]+|stack\/deployments\/[^/]+)$/.test(path)
 }
 
 function projectFromPath(path) {
@@ -66,7 +68,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (API_AVAILABLE && status === 'anonymous' && /^\/(?:dashboard|deploy|projects|sites)(?:\/|$)/.test(route)) {
+    if (API_AVAILABLE && status === 'anonymous' && /^\/(?:dashboard|deploy|projects|sites|checkout|account)(?:\/|$)/.test(route)) {
       navigate('/login')
     }
     // Le retour sur /login ou /register ne doit pas demander une nouvelle connexion
@@ -89,7 +91,7 @@ export default function App() {
   const toggleTheme = () => setTheme(current => current === 'dark' ? 'light' : 'dark')
   const commonProps = { navigate, theme, onToggleTheme: toggleTheme }
 
-  if (API_AVAILABLE && /^\/(?:dashboard|deploy|projects|sites)(?:\/|$)/.test(route) && status !== 'authenticated') {
+  if (API_AVAILABLE && /^\/(?:dashboard|deploy|projects|sites|checkout|account)(?:\/|$)/.test(route) && status !== 'authenticated') {
     return <div className="app-shell"><main className="container workspace" role="status">Vérification de votre session…</main></div>
   }
 
@@ -127,6 +129,8 @@ export default function App() {
   if (route === '/verify-email') return <VerifyEmail {...commonProps} />
   if (route === '/forgot-password') return <ForgotPassword {...commonProps} />
   if (route === '/reset-password') return <ResetPassword {...commonProps} />
+  if (API_AVAILABLE && route === '/account') return <div className="app-shell"><Header route="/account" {...commonProps}/><main className="container workspace"><Account navigate={navigate}/></main></div>
+  if (API_AVAILABLE && route.startsWith('/checkout/')) return <div className="app-shell"><Header route="/pricing" {...commonProps}/><main className="container workspace"><Checkout navigate={navigate} planId={route.split('/')[2]}/></main></div>
 
   return (
     <div className="app-shell">

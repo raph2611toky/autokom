@@ -1,0 +1,17 @@
+.ak-subscription-sheet{max-width:790px;margin:50px auto 85px;display:grid;gap:22px}
+.ak-subscription-header h1{font-size:clamp(1.8rem,3vw,2.65rem);letter-spacing:-.05em;margin:0 0 10px}
+.ak-subscription-header p{color:var(--text-muted,#9ba3b3);margin:0;line-height:1.6}
+.ak-subscription-summary{border:1px solid var(--border,#303644);background:var(--surface,#101318);padding:27px;border-radius:4px;display:grid;gap:12px}
+.ak-subscription-summary h2{font-size:1.15rem;display:flex;align-items:center;gap:9px;margin:0}
+.ak-subscription-summary p{margin:0;color:var(--text-muted,#b0b7c3);line-height:1.55}
+.ak-subscription-amount,.ak-subscription-current{font-size:1.85rem;font-weight:800;color:var(--text,#e5e7eb)}
+.ak-subscription-amount span{font-size:.9rem;font-weight:400;color:var(--text-muted,#abb3c4)}
+.ak-subscription-field{display:grid;gap:7px;max-width:260px;font-weight:600}
+.ak-subscription-field select{padding:10px;background:var(--surface-secondary,#151920);color:inherit;border:1px solid var(--border,#303644)}
+.ak-subscription-disclosure{border:1px solid var(--border,#303644);border-left:3px solid #fb9858;background:var(--surface,#12151a);padding:22px}
+.ak-subscription-disclosure p{margin:8px 0 0;line-height:1.55;color:var(--text-muted,#bdc2cc)}
+.ak-subscription-consent{display:flex;gap:11px;align-items:flex-start;line-height:1.5}
+.ak-subscription-success{display:grid;gap:17px;padding:22px;border:1px solid #3b967d}
+.ak-subscription-sheet .button-primary,.ak-subscription-sheet .button-outline{width:max-content;display:inline-flex;align-items:center;gap:8px}
+.ak-account-offer{border:1px solid var(--border,#343945);background:var(--surface,#15171d);padding:18px 22px;display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
+.ak-account-offer strong{font-size:1.1rem}.ak-account-offer small{display:block;color:var(--text-muted,#a5adbd);margin-top:5px}
