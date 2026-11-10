@@ -278,8 +278,13 @@ def cmd_rights(args):
 def cmd_apps(args):
     """Inventaire par worker, état désiré + santé endpoint GCP, sans mutation."""
     from autokom_ha_apps import get_inventory, output
-    report = _report(metrics=False, details=False)
+    # L'inventaire brut pf.inventory() n'a ni IP ni sante par VM.
+    # extra.enrich() effectue les lectures GCP manquantes, comme `ha list`.
+    report = _report(metrics=False, details=True)
     data = get_inventory(report)
+    if args.diagnose and not args.worker:
+        from autokom_ha_apps import diagnostic_local_releases
+        data['local_releases'] = diagnostic_local_releases(data)
     if args.worker:
         nodes = [w for w in data['workers'] if w['name'] == args.worker]
         if not nodes:
@@ -288,7 +293,8 @@ def cmd_apps(args):
         data['workers'] = nodes
         data['applications'] = [a for a in data['applications'] if a['environment'] in selected]
         data['unassigned'] = []
-    return output(data, ha_only=args.ha_only, as_json=args.json)
+    return output(data, ha_only=args.ha_only, as_json=(args.json or args.output == 'json'),
+                  diagnose=args.diagnose, wide=args.output == 'wide')
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog='autokom iac ha', description='MIG, LB, logs, supervision et diagnostic HA')
@@ -318,6 +324,10 @@ def main(argv=None):
     apps = commands.add_parser('apps', help='Applications par worker, répliques et statut HA (lecture seule)')
     apps.add_argument('--ha-only', action='store_true', help='Afficher uniquement les applications demandant la HA')
     apps.add_argument('--json', action='store_true', help='Inventaire JSON, sans secrets')
+    apps.add_argument('-o', '--output', choices=('wide', 'json'), default='wide',
+                      help='Format tabulaire large (défaut) ou JSON')
+    apps.add_argument('--diagnose', action='store_true',
+                      help='Analyser les publications locales exclues du delivery GCP (sudo)')
     apps.add_argument('--worker', default=None, help='Limiter la vue à un worker du MIG')
     args = p.parse_args(argv)
     if args.action == 'list':

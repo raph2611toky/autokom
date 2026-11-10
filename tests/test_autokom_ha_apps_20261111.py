@@ -112,3 +112,77 @@ class HaAppsTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class HaAppsWideAndDiagnosticsTests(unittest.TestCase):
+    def test_table_wide_with_empty_workers(self):
+        data = module.assemble(MIG, {'applications': [], 'cloud_https_ready': False},
+                               {NODE_A: [], NODE_B: []})
+        data['errors'] = []
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            module.output(data)
+        output = buf.getvalue()
+        self.assertIn('WORKER', output)
+        self.assertIn('IP_PRIVEE', output)
+        self.assertIn('10.128.0.13', output)
+        self.assertIn('AUCUNE', output)
+        self.assertIn('0 application(s) GCP', output)
+
+    def test_table_with_app_reports_real_replica_health_and_ha_status(self):
+        data = module.assemble(MIG, {'applications': [DECISION], 'cloud_https_ready': False},
+                               {NODE_A: [ENTRY], NODE_B: [ENTRY]},
+                               {(NODE_A, ENV, RUN): 'HEALTHY',
+                                (NODE_B, ENV, RUN): 'UNHEALTHY'})
+        data['errors'] = []
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            module.output(data)
+        table = buf.getvalue()
+        self.assertIn('ladyportfolio.auto.ikom.mg', table)
+        self.assertIn('1/2', table)
+        self.assertIn('NON_VALIDEE', table)
+
+    def test_report_filter_identifies_broker_inputs_not_delivery_eligible(self):
+        doc = {'run_id': RUN, 'cloud_delivery_requested': True,
+               'internal_port': 8080, 'healthcheck': '/', 'memory_mb': 2048,
+               'cpu_millicores': 2000, 'variables_present': False}
+        errors = module._delivery_blocks(doc, {'run_id': RUN,
+            'image': 'us-central1-docker.pkg.dev/plucky-stacker-480421-c4/autokom-ha-images/x@sha256:'+'a'*64},
+            hosts=['ladyportfolio.auto.ikom.mg'])
+        self.assertIn('RAM_HORS_BORNE_DELIVERY', errors)
+        self.assertIn('CPU_HORS_BORNE_DELIVERY', errors)
+        self.assertNotIn('IMAGE_REGISTRY_ABSENTE', errors)
+
+    def test_no_unproven_ha_during_diagnose(self):
+        data = module.assemble(MIG, {'applications': [], 'cloud_https_ready': False},
+                               {NODE_A: [], NODE_B: []})
+        data['errors'] = []
+        data['local_releases'] = [{'environment': ENV, 'run_id': RUN,
+            'host': 'ladyportfolio.auto.ikom.mg', 'ha_requested': True,
+            'cloud_delivery_requested': True, 'delivery_eligible': False,
+            'assigned': False, 'status': 'EXCLU', 'reasons': ['RAM_HORS_BORNE_DELIVERY']}]
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            module.output(data, diagnose=True)
+        result = buf.getvalue()
+        self.assertIn('HORS MIG', result)
+        self.assertIn('RAM_HORS_BORNE_DELIVERY', result)
+        self.assertIn('0 HA publique(s) validée(s)', result)
+
+    def test_ineligible_if_domain_or_published_image_absent(self):
+        errors = module._delivery_blocks({'run_id': RUN, 'cloud_delivery_requested': True,
+            'memory_mb': 512, 'cpu_millicores': 500, 'internal_port': 8080,
+            'healthcheck': '/'}, None)
+        self.assertIn('IMAGE_REGISTRY_ABSENTE', errors)
+        self.assertIn('DOMAINE_NON_ASSOCIE', errors)
+
+    def test_json_diagnose_no_private_image_or_env_values(self):
+        data = module.assemble(MIG, {'applications': [], 'cloud_https_ready': False},
+                               {NODE_A: [], NODE_B: []})
+        data['errors'] = []
+        data['local_releases'] = [{'environment': ENV, 'run_id': RUN,
+            'host': 'ladyportfolio.auto.ikom.mg', 'ha_requested': True,
+            'cloud_delivery_requested': True, 'delivery_eligible': False,
+            'assigned': False, 'status': 'EXCLU', 'reasons': ['STACK_NON_ATOMIQUE']}]
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            module.output(data, as_json=True, diagnose=True)
+        obj = __import__('json').loads(buf.getvalue())
+        self.assertEqual(obj['local_releases'][0]['status'], 'EXCLU')
+        self.assertEqual(obj['applications'], [])
