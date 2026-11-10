@@ -2,7 +2,7 @@
 **/.terraform/
 **/*.tfstate
 **/*.tfstate.*
-# **/terraform.tfvars
+**/terraform.tfvars
 **/*.auto.tfvars
 **/*.tfplan
 **/crash.log
