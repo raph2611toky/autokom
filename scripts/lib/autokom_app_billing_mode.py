@@ -12,7 +12,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from autokom_env_manager import (EnvError, _validate, backup, file_path,
+from autokom_env_manager import (EnvError, _systemd_override, _validate, backup, file_path,
                                  read_env, require_root, write_env)
 
 BACKEND_SERVICE = 'autokom-backend.service'
@@ -50,15 +50,69 @@ def _existing(path):
     return read_env(path)
 
 
+def _loaded_environment_files():
+    """Read paths only: systemctl does not expose backend.env secret values."""
+    result = _run('/usr/bin/systemctl', 'show', '--value', '-p',
+                  'EnvironmentFiles', BACKEND_SERVICE)
+    if result.returncode:
+        raise BillingModeError('Impossible de vérifier EnvironmentFiles du backend.')
+    # systemd outputs: /path/file (ignore_errors=no) ...
+    return re.findall(r'(/[^\s]+)\s+\(ignore_errors=(?:yes|no)\)', result.stdout)
+
+
+def _ensure_service_env():
+    """Wire backend.env to the actual unit before restarting Gunicorn."""
+    expected = str(file_path('backend'))
+    files = _loaded_environment_files()
+    if files and files[-1] == expected:
+        return
+    # Repair legacy units or overrides which still reference a different env.
+    # Refuse to continue if a later override defeats the managed drop-in.
+    if not _systemd_override('autokom-backend', file_path('backend')):
+        raise BillingModeError('Unité systemd du backend absente ; exécuter autokom app deploy.')
+    if _run('/usr/bin/systemctl', 'daemon-reload').returncode:
+        raise BillingModeError('Impossible de recharger la définition systemd du backend.')
+    files = _loaded_environment_files()
+    if not files or files[-1] != expected:
+        raise BillingModeError('Le backend n’utilise pas backend.env : vérifier ses overrides systemd.')
+
+
+def _django_env_probe(expected):
+    """Verify systemd parses the secure env file and Django sees the requested mode.
+
+    Gunicorn (notably setproctitle) may overwrite /proc/MainPID/environ, so
+    that pseudo-file must never be the sole ground truth for effective settings.
+    This transient unit uses the backend's service user, env file, directory,
+    interpreter and Django settings module; it never outputs credentials.
+    """
+    from autokom_app_manager import BACKEND, VENV, USER
+    code = ('import sys; from config import settings; '
+            'want = sys.argv[1] == "true"; '
+            'actual = bool(settings.AUTOKOM_BILLING_SANDBOX_ENABLED); '
+            'allowed = settings.AUTOKOM_BILLING_SANDBOX_TEST_EMAILS; '
+            'sys.exit(0 if actual == want and (not want or bool(allowed)) else 3)')
+    args = ('/usr/bin/systemd-run', '--quiet', '--wait', '--pipe', '--collect',
+            '--unit=autokom-billing-probe-' + str(os.getpid()),
+            '--property=User=' + USER,
+            '--property=WorkingDirectory=' + str(BACKEND),
+            '--property=EnvironmentFile=' + str(file_path('backend')),
+            str(VENV / 'bin/python'), '-c', code, expected)
+    result = _run(*args)
+    if result.returncode:
+        raise BillingModeError(
+            'Vérification Django via systemd en échec : contrôler backend.env, '
+            'les droits du compte autokom et journalctl -u autokom-billing-probe-*.service. '
+            'Aucun secret affiché.')
+
+
 def _restart_and_check(expected):
+    _ensure_service_env()
     proc = _run('/usr/bin/systemctl', 'restart', BACKEND_SERVICE)
     if proc.returncode:
         raise BillingModeError('Redémarrage du backend refusé (voir journalctl -u autokom-backend.service).')
     proc = _run('/usr/bin/systemctl', 'is-active', '--quiet', BACKEND_SERVICE)
     if proc.returncode:
         raise BillingModeError('Le backend n’est pas actif après le redémarrage.')
-    # Verify the *running* Gunicorn process got the EnvironmentFile, not just
-    # that the new value was written to disk.  Never print /proc environ.
     pid_result = _run('/usr/bin/systemctl', 'show', '--value', '-p', 'MainPID', BACKEND_SERVICE)
     try:
         pid = int(pid_result.stdout.strip()) if pid_result.returncode == 0 else 0
@@ -66,17 +120,9 @@ def _restart_and_check(expected):
         pid = 0
     if pid <= 1:
         raise BillingModeError('PID du processus Django introuvable après redémarrage.')
-    try:
-        process_env = Path(f'/proc/{pid}/environ').read_bytes().split(b'\0')
-    except OSError as exc:
-        raise BillingModeError('Impossible de confirmer le mode du processus Django.') from exc
-    received = [item for item in process_env if item.startswith((ENABLED_KEY + '=').encode('ascii'))]
-    if expected is None:
-        verified = not received
-    else:
-        verified = received == [(ENABLED_KEY + '=' + expected).encode('ascii')]
-    if not verified:
-        raise BillingModeError('Django ne reçoit pas le mode demandé depuis backend.env.')
+    # Check Django settings using the same systemd environment rather than
+    # /proc/PID/environ, which process-title libraries can overwrite.
+    _django_env_probe('false' if expected is None else expected)
 
 
 def status():
@@ -155,12 +201,12 @@ def switch(mode, *, prompt=input):
                 count = len(updated[EMAIL_KEY].split(','))
                 print('  ✓ AUTOKOM · MODE TEST activé · simulation de paiement uniquement.')
                 print(f'  ✓ {count} compte(s) explicitement autorisé(s) ; aucun argent débité.')
-                print('  ✓ Backend redémarré et configuration en mémoire confirmée.')
+                print('  ✓ Backend redémarré et configuration Django vérifiée via systemd.')
             else:
                 print('  ✓ AUTOKOM · MODE PRODUCTION activé · nouveau paiement simulé interdit.')
                 print('  ✓ Les droits TEST sont refusés aux nouvelles finalisations/deploiements.')
                 print('  ✓ Les reçus TEST historiques restent en base pour audit ; les sites déjà actifs ne sont pas arrêtés.')
-                print('  ✓ Backend redémarré et configuration en mémoire confirmée.')
+                print('  ✓ Backend redémarré et configuration Django vérifiée via systemd.')
             return 0
     except OSError as exc:
         raise BillingModeError('Fichier de verrouillage indisponible : ' + type(exc).__name__) from exc
