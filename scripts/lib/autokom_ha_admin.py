@@ -274,6 +274,23 @@ def _systemd_enabled(unit):
         return False
 
 
+
+def cmd_rights(args):
+    """Root-only read-only Django entitlement inspection; no entitlement mutation."""
+    if os.geteuid() != 0:
+        raise HaError('Les droits des projets nécessitent : sudo autokom iac ha rights --list')
+    from autokom_app_manager import run_as_service, VENV
+    cmd = [str(VENV/'bin/python'), 'manage.py', 'autokom_ha_rights']
+    if args.environment:
+        cmd += ['--environment', args.environment]
+    elif args.project:
+        cmd += ['--project', args.project]
+    else:
+        cmd += ['--list']
+    run_as_service(cmd, timeout=40)
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog='autokom iac ha', description='MIG, LB, logs, supervision et diagnostic HA')
     commands = p.add_subparsers(dest='action', required=True)
@@ -289,6 +306,11 @@ def main(argv=None):
     group.add_argument('--check', action='store_true', help='Simulation, sans changement')
     group.add_argument('--apply', action='store_true', help='Provisionner (root + passphrase)')
     commands.add_parser('doctor', help='Contrôles HA end-to-end, sans faux positifs')
+    rights = commands.add_parser('rights', help='Plans et options HA réellement accordés (sudo, lecture seule)')
+    select_rights = rights.add_mutually_exclusive_group()
+    select_rights.add_argument('--environment', default=None, help='UUID environnement')
+    select_rights.add_argument('--project', default=None, help='UUID projet')
+    select_rights.add_argument('--list', action='store_true', help='Derniers environnements')
     delivery = commands.add_parser('delivery', help='Agent cloud + routage GCP HTTP de préparation')
     mode = delivery.add_mutually_exclusive_group(required=True)
     mode.add_argument('--check', action='store_true', help='Prévol sans modification')
@@ -305,6 +327,8 @@ def main(argv=None):
         return cmd_monitor(args)
     if args.action == 'doctor':
         return cmd_doctor(args)
+    if args.action == 'rights':
+        return cmd_rights(args)
     if args.action == 'delivery':
         return cmd_delivery(args)
     return 2

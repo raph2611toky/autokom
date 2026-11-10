@@ -20,7 +20,7 @@ test('trois tarifs distincts dont une formule gratuite', () => {
 test('le choix du tarif configure une offre cohérente dans Déployer', () => {
   assert.deepEqual(planToDeployment('free'), { pricingPlan:'free', resourcePlan:'free', highAvailability:false })
   assert.deepEqual(planToDeployment('essential'), { pricingPlan:'essential', resourcePlan:'adapted', highAvailability:false })
-  assert.deepEqual(planToDeployment('pro'), { pricingPlan:'pro', resourcePlan:'adapted', highAvailability:true })
+  assert.deepEqual(planToDeployment('pro'), { pricingPlan:'pro', resourcePlan:'adapted', highAvailability:false })
 })
 
 test('la formule sélectionnée est persistée pour le parcours frontend', () => {

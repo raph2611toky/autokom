@@ -9,6 +9,7 @@ from apps.projects.configurations.serializers import DeploymentConfigSerializer,
 from apps.projects.configurations.services import (get_config, create_config, check_configuration,
     validate_branch, check_entitlement, managed_internal_port)
 from apps.plans.catalog.models import ResourcePlan, DeploymentModeOffer
+from apps.plans.entitlements.models import HighAvailabilityOption
 from helpers.responses import api_success
 from helpers.errors import handle_error
 from apps.projects.configurations.swagger.config_list import schema as config_list_schema
@@ -133,15 +134,22 @@ class ConfigurationOffersAPIView(APIView):
         try:
             _, env = get_environment(request.user, project_id, environment_id)
             entitlement = getattr(env, 'entitlement', None)
+            ha_option = HighAvailabilityOption.objects.filter(environment=env).first()
             return api_success({'modes': [
                 {'id': str(o.id), 'code': o.code, 'name': o.name, 'is_premium': o.is_premium}
                 for o in DeploymentModeOffer.objects.filter(is_active=True).order_by('code')],
                 'resource_plans': [{'id': str(p.id), 'code': p.code, 'name': p.name,
                     'cpu_millicores': p.cpu_millicores, 'memory_mb': p.memory_mb,
-                    'storage_mb': p.storage_mb, 'is_premium': p.is_premium}
+                    'storage_mb': p.storage_mb, 'max_instances': p.max_instances, 'is_premium': p.is_premium}
                     for p in ResourcePlan.objects.filter(is_active=True).order_by('display_order', 'name')],
                 'entitlement': {'mode': entitlement.mode_offer.code,
-                    'resource_plan': str(entitlement.resource_plan_id), 'status': entitlement.status}
-                    if entitlement else None}, 'Offres et limites disponibles.')
+                    'resource_plan': str(entitlement.resource_plan_id),
+                    'resource_plan_code': entitlement.resource_plan.code,
+                    'max_instances': entitlement.resource_plan.max_instances,
+                    'status': entitlement.status}
+                    if entitlement else None,
+                'ha_option': ({'status': ha_option.status,
+                               'desired_replicas': ha_option.desired_replicas}
+                              if ha_option else None)}, 'Offres et limites disponibles.')
         except Exception as exc:
             return handle_error(exc, 'config_offers')

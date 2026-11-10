@@ -72,7 +72,9 @@ export function planToDeployment(id) {
   return {
     pricingPlan: plan.id,
     resourcePlan: plan.id === 'free' ? 'free' : 'adapted',
-    highAvailability: plan.id === 'pro',
+    // A paid offer is not an HA consent or a server-side entitlement.
+    // High availability must always be explicitly selected by the customer.
+    highAvailability: false,
   }
 }
 

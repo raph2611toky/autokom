@@ -118,7 +118,6 @@ def create_config(user, env, attrs):
 def check_entitlement(cfg):
     """Draft may request premium; finalization requires an actual granted entitlement."""
     from rest_framework.exceptions import PermissionDenied
-    from apps.plans.catalog.models import ResourcePlan
     from django.utils import timezone
     entitlement = getattr(cfg.environment, 'entitlement', None)
     if (entitlement is None or entitlement.status != 'ACTIVE' or
@@ -139,8 +138,19 @@ def check_entitlement(cfg):
     if getattr(cfg, 'high_availability_requested', False):
         from apps.plans.entitlements.models import HighAvailabilityOption
         option = HighAvailabilityOption.objects.filter(environment=cfg.environment).first()
+        if granted.max_instances < 2:
+            raise PermissionDenied(
+                'Haute disponibilité non autorisée : le plan réellement attribué à cet environnement '
+                'ne permet qu’une seule instance. La sélection Professionnel sur le formulaire ne '
+                'change pas les droits. Désactivez l’option HA pour déployer en standard, ou demandez '
+                'l’attribution administrative d’un plan à deux instances et de l’option HA.'
+            )
         if chosen.max_instances < 2:
-            raise PermissionDenied('Haute disponibilite : le plan accorde au moins deux instances est requis.')
+            raise PermissionDenied(
+                'Haute disponibilité non autorisée : le profil de ressources sélectionné dans la '
+                'configuration ne prévoit qu’une instance, malgré un droit supérieur. '
+                'Sélectionnez un profil autorisé à deux instances.'
+            )
         if (option is None or option.status != HighAvailabilityOption.Status.ACTIVE or
                 (option.expires_at and option.expires_at <= timezone.now())):
             raise PermissionDenied('Haute disponibilite demandee, mais option non active ou non accordee. La configuration reste en brouillon.')
