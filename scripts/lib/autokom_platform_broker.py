@@ -379,13 +379,21 @@ def _docker_deploy_inner(params):
           '--user','10001:10001',
            '--env-file',str(envfile),'--restart','unless-stopped',tag]
     relay = None
+    failure_reason = None
     try:
         try:
             run(argv,timeout=60)
         finally:
             envfile.unlink(missing_ok=True)  # secrets are never kept as host .env files after create
         # Nginx owns the trusted loopback listener. Customer has NO published ports.
-        relay = ingress.create(name, network, port, execute=run, available=PROXY, enabled=ENABLED)
+        try:
+            relay = ingress.create(name, network, port, execute=run, available=PROXY, enabled=ENABLED)
+        except ingress.IngressError as exc:
+            # Log only validated reason labels, never Docker inspect or customer content.
+            failure_reason = exc.reason
+            logger.warning('AUTOKOM_INGRESS_REJECT reason=%s role=%s',
+                           exc.reason, stack_role if stack_role else 'single')
+            raise
         external_port = relay['port']
         from urllib.request import build_opener
         health_opener = build_opener(urllib.request.ProxyHandler({}), NoRedirect())
@@ -397,7 +405,9 @@ def _docker_deploy_inner(params):
                     if 200<=resp.status<400:break
             except Exception:pass
             time.sleep(2)
-        else:raise BrokerError('AUTOKOM_CONTAINER_HEALTHCHECK_FAILED: Application non disponible sur son port interne. Ancienne version conservée.')
+        else:
+            failure_reason = 'healthcheck_no_http'
+            raise BrokerError('AUTOKOM_CONTAINER_HEALTHCHECK_FAILED: L’application ne répond pas sur son port interne. '                               'Consulter le diagnostic du run ; ancienne version conservée.')
         previous=_load_state(environment)
         doc={'environment_id':environment,'run_id':rid,'internal_port':port,'port':external_port,'name':name,'network':network,'healthcheck':health,**relay}
         if stack_project:
@@ -423,7 +433,8 @@ def _docker_deploy_inner(params):
     except Exception:
         # Snapshot the failed run BEFORE docker rm -f destroys its evidence.
         try:
-            capture_customer_diagnostics(STATE, environment, rid, name, failure='container_start_or_health')
+            capture_customer_diagnostics(STATE, environment, rid, name,
+                                         failure='container_start_or_health', reason=failure_reason)
         except Exception:
             logger.warning('AUTOKOM_CUSTOMER_DIAGNOSTIC_CAPTURE_FAILED run=%s', rid)
         if relay is not None:

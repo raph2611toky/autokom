@@ -18,6 +18,13 @@ _SECRET = re.compile(
     r'\b[A-Z_]*(?:KEY|TOKEN|PASSWORD|SECRET)\s*=|https?://\S+@)'
 )
 _OPAQUE = re.compile(r'(?<![\w])(?:[A-Za-z0-9_-]{48,}|[a-f0-9]{32,})(?![\w])', re.I)
+# Fixed, safe diagnostic labels supplied by the trusted broker only.
+_REASONS = frozenset({'network_attach_pending', 'network_id_pending', 'ipv4_pending',
+                      'inspect_format_invalid', 'inspect_json_invalid',
+                      'unexpected_networks', 'network_endpoint_invalid',
+                      'network_id_mismatch', 'ipv4_invalid',
+                      'ipv6_not_supported', 'ipv4_not_private',
+                      'ipv4_outside_subnet', 'healthcheck_no_http'})
 # Positive list of *diagnostic formats*, not a generic Docker-log pass-through.
 _ALLOWED = (
     re.compile(r'^(?:ModuleNotFoundError|ImportError|SyntaxError|NameError|TypeError|AttributeError|RuntimeError|ValueError|OSError|FileNotFoundError|PermissionError): .{1,220}$'),
@@ -27,6 +34,12 @@ _ALLOWED = (
     re.compile(r'^(?:ERROR|Error) loading (?:ASGI|WSGI) app\..{0,180}$'),
     re.compile(r'^(?:Application startup failed\.|Worker failed to boot\.|Traceback \(most recent call last\):|gunicorn\.errors\.HaltServer: .{1,150})$'),
     re.compile(r'^\s*File "(/app/[\w./-]{1,130})", line \d+, in [A-Za-z_][A-Za-z0-9_]{0,60}$'),
+    # Nginx: only fixed, non-secret permission errors on standard writable paths.
+    re.compile(r'^nginx: \[(?:emerg|alert|crit)\] (?:mkdir|open)\(\) '
+               r'"/(?:tmp|var/cache/nginx|run)/[A-Za-z0-9/_\.-]{1,100}" '
+               r'failed \(\d+: (?:Permission denied|Read-only file system)\)$'),
+    re.compile(r"^Error: (?:EACCES|EROFS): (?:permission denied|read-only file system), "
+               r"(?:open|mkdir|scandir) '/app/[A-Za-z0-9/_\.-]{1,100}'$"),
 )
 
 
@@ -57,12 +70,14 @@ def _read_docker(container, command, timeout=8):
         return ''
 
 
-def capture(root, environment, run_id, container, *, failure='healthcheck'):
+def capture(root, environment, run_id, container, *, failure='healthcheck', reason=None):
     """Capture before rollback removes the failed container; no raw logs persist."""
     root = Path(root)
     result = {'environment_id': environment, 'run_id': run_id,
               'phase': 'runtime.deploy', 'category': failure, 'container_status': 'unavailable',
               'exit_code': None, 'oom_killed': False, 'restart_count': 0, 'lines': []}
+    if reason in _REASONS:
+        result['reason'] = reason
     raw = _read_docker(container, ['inspect', '--format', '{{json .State}}'])
     if raw:
         try:
@@ -103,5 +118,6 @@ def read(root, environment, run_id):
     return {'available': True, 'phase': data.get('phase','runtime.deploy'),
             'category': data.get('category','unknown'),
             'container_status': data.get('container_status','unknown'),
+            'reason': data.get('reason') if data.get('reason') in _REASONS else None,
             'exit_code': data.get('exit_code'), 'oom_killed': data.get('oom_killed') is True,
             'lines': [x for x in data.get('lines', [])[:24] if isinstance(x,str) and safe_log_line(x) == x]}

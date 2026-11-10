@@ -20,15 +20,20 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHand
 
 MODE = 'nginx-internal-v1'
 NAME_RE = re.compile(r'^autokom-[0-9a-f]{20}$')
+# The stack is shared by the frontend and backend, but must remain private.
+NETWORK_RE = re.compile(r'^autokom-(?:stack-)?[0-9a-f]{20}$')
 
 
 class IngressError(Exception):
     """Only code and fixed, non-secret explanation may cross the broker boundary."""
 
-    def __init__(self, code, message):
+    def __init__(self, code, message, *, reason='unspecified'):
         if not re.fullmatch(r'AUTOKOM_[A-Z0-9_]{3,80}', code):
             raise ValueError('Invalid safe diagnostic code')
+        if not re.fullmatch(r'[a-z][a-z0-9_]{0,60}', reason):
+            raise ValueError('Invalid safe diagnostic reason')
         self.code = code
+        self.reason = reason  # Fixed internal category only, never a Docker payload.
         super().__init__(f'{code}: {message}')
 
 
@@ -81,32 +86,72 @@ def _docker_network_info(network, execute):
         raise IngressError('AUTOKOM_NETWORK_NOT_PRIVATE', 'Réseau Docker interne invalide ou non vérifiable.') from exc
 
 
-def container_ipv4(name, network, execute):
-    _name(name)
-    if not isinstance(network, str) or not NAME_RE.fullmatch(network):
-        raise IngressError('AUTOKOM_NETWORK_INVALID_NAME', 'Nom du réseau Docker invalide.')
-    info, subnets = _docker_network_info(network, execute)
-    raw = execute(['docker','container','inspect',name,'--format','{{json .NetworkSettings.Networks}}'],
-                  timeout=12, max_output=16384)
+def _container_network_check(network, info, subnets, networks):
+    """Return (IPv4, reason, transient). Never accept a side network."""
+    if not isinstance(networks, dict):
+        return None, 'inspect_format_invalid', False
+    if not networks:
+        return None, 'network_attach_pending', True
+    if set(networks) != {network}:
+        # A second network could permit egress or cross-tenant access.
+        return None, 'unexpected_networks', False
+    entry = networks[network]
+    if not isinstance(entry, dict):
+        return None, 'network_endpoint_invalid', False
+    identity = entry.get('NetworkID')
+    if not identity:
+        return None, 'network_id_pending', True
+    if identity != info['Id']:
+        return None, 'network_id_mismatch', False
+    address_text = entry.get('IPAddress')
+    if not address_text:
+        return None, 'ipv4_pending', True
     try:
-        networks = json.loads(raw)
-        if not isinstance(networks, dict) or set(networks) != {network}:
-            raise ValueError('Container is attached to unexpected networks')
-        entry = networks[network]
-        if entry.get('NetworkID') != info['Id']:
-            raise ValueError('Network identity mismatch')
-        address = ipaddress.ip_address(entry['IPAddress'])
-        if not isinstance(address, ipaddress.IPv4Address):
-            raise ValueError('IPv6 not supported')
-        if (not address.is_private or address.is_loopback or address.is_link_local
-                or address.is_multicast or address.is_unspecified or address.is_reserved):
-            raise ValueError('Unexpected IPv4 address')
-        if not any(address in subnet for subnet in subnets):
-            raise ValueError('Outside Docker managed subnet')
-        return str(address)
-    except (ValueError, TypeError, KeyError, IndexError) as exc:
+        address = ipaddress.ip_address(address_text)
+    except ValueError:
+        return None, 'ipv4_invalid', False
+    if not isinstance(address, ipaddress.IPv4Address):
+        return None, 'ipv6_not_supported', False
+    if (not address.is_private or address.is_loopback or address.is_link_local
+            or address.is_multicast or address.is_unspecified or address.is_reserved):
+        return None, 'ipv4_not_private', False
+    if not any(address in subnet for subnet in subnets):
+        return None, 'ipv4_outside_subnet', False
+    return str(address), 'ok', False
+
+
+def container_ipv4(name, network, execute, *, retries=5, delay=0.5):
+    """Verify a Docker-internal endpoint; tolerate ONLY brief attach/IPAM delays.
+
+    Do not auto-attach or reconnect a container to fix security failures.
+    """
+    _name(name)
+    if not isinstance(network, str) or not NETWORK_RE.fullmatch(network):
+        raise IngressError('AUTOKOM_NETWORK_INVALID_NAME', 'Nom du réseau Docker invalide.',
+                           reason='network_name_invalid')
+    if type(retries) is not int or retries < 1 or retries > 8:
+        raise ValueError('Invalid bounded retry count')
+    info, subnets = _docker_network_info(network, execute)
+    for attempt in range(retries):
+        raw = execute(['docker', 'container', 'inspect', name,
+                       '--format', '{{json .NetworkSettings.Networks}}'],
+                      timeout=12, max_output=16384)
+        try:
+            networks = json.loads(raw)
+        except (TypeError, ValueError):
+            raise IngressError('AUTOKOM_CONTAINER_NETWORK_INVALID',
+                               'Configuration réseau du conteneur illisible.',
+                               reason='inspect_json_invalid') from None
+        address, reason, transient = _container_network_check(network, info, subnets, networks)
+        if address is not None:
+            return address
+        if transient and attempt < retries - 1:
+            time.sleep(delay)
+            continue
         raise IngressError('AUTOKOM_CONTAINER_NETWORK_INVALID',
-                           'Le conteneur ne respecte pas son réseau privé exclusif.') from exc
+                           'Réseau Docker privé non conforme (raison : ' + reason + ').',
+                           reason=reason)
+    raise AssertionError('unreachable')
 
 
 def pick_loopback_port():

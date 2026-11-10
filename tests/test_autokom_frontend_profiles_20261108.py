@@ -54,7 +54,7 @@ class ApprovedBuilds(unittest.TestCase):
         (self.repo/'index.html').write_text('<h1>OK</h1>')
         self.run_build(document('html',''), lambda src,args,context: (
             self.assertNotIn('RUN npm ci',src),
-            self.assertIn('COPY --from=assets /site/ /usr/share/nginx/html/',src),
+            self.assertIn('COPY --chown=10001:10001 --from=assets /site/ /usr/share/nginx/html/',src),
             self.assertIn('listen 8080', (context/'autokom-nginx.conf').read_text())))
 
     def test_static_html_does_not_publish_source_or_credentials(self):
@@ -95,7 +95,7 @@ class ApprovedBuilds(unittest.TestCase):
     def test_next_server_unprivileged_private_port(self):
         self.pkg({'next':'16','react':'19'}, {'build':'next build','start':'next start'})
         self.run_build(document('next_server','.next','AUTO',variables={'NEXT_PUBLIC_API':'https://example.org'}), lambda src,args,context: (
-            self.assertIn('USER node',src),
+            self.assertIn('USER 10001:10001',src),
             self.assertIn('PORT=8080',src),
             self.assertIn('node .next/standalone/server.js',src),
             self.assertIn('next start -p 8080',src)))

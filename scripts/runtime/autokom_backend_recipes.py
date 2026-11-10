@@ -152,8 +152,8 @@ def backend_recipe(profile, path, cfg):
         if profile == 'node_nest':
             base += 'RUN npm run build\n'
         base += 'RUN npm prune --omit=dev --ignore-scripts --no-audit --no-fund\n'
-        base += (f'FROM node:22-alpine\nWORKDIR /app\nENV NODE_ENV=production PORT={port} HOST=0.0.0.0\n'
-                 f'COPY --chown=node:node --from=builder /app/ ./\nUSER node\nEXPOSE {port}\n')
+        base += (f'FROM node:22-alpine\nWORKDIR /app\nENV NODE_ENV=production PORT={port} HOST=0.0.0.0 HOME=/tmp NPM_CONFIG_CACHE=/tmp/.npm\n'
+                 f'COPY --chown=10001:10001 --from=builder /app/ ./\nUSER 10001:10001\nEXPOSE {port}\n')
         cmd = 'start:prod' if profile == 'node_nest' else 'start'
         return base + 'CMD ["npm", "run", "' + cmd + '"]\n', files
     if profile in JAVA:
@@ -192,7 +192,7 @@ def backend_recipe(profile, path, cfg):
         base += 'COPY --from=deps /app/vendor /app/vendor\n'
     base += ('COPY autokom-php-nginx.conf /etc/nginx/nginx.conf\n'
              'COPY autokom-php-fpm.conf /usr/local/etc/php-fpm.d/zzzz-autokom.conf\n'
-             'RUN chown -R www-data:www-data /app /run/nginx /var/cache/nginx /tmp/php-fpm\n'
-             f'USER www-data\nEXPOSE {port}\n'
+             'RUN chown -R 10001:10001 /app /run/nginx /var/cache/nginx /tmp/php-fpm\n'
+             f'USER 10001:10001\nEXPOSE {port}\n'
              "CMD [\"sh\",\"-c\",\"php-fpm -D && exec nginx -g 'daemon off;'\"]\n")
     return base, files
