@@ -86,3 +86,9 @@ variable "confirm_billable_resources" {
   default     = false
   description = "Doit etre true pour autoriser un plan et un deploiement des ressources GCP payantes."
 }
+
+variable "enable_cloud_nat" {
+  type        = bool
+  default     = false
+  description = "Activer explicitement Cloud NAT facturable pour les workers sans IP externe (sous-reseau default)."
+}

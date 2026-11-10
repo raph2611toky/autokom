@@ -164,6 +164,39 @@ resource "google_compute_region_autoscaler" "web" {
   }
 }
 
+# Sortie IPv4 facultative pour les VM sans IP publique du sous-reseau EXISTANT.
+# Cloud NAT ne fournit aucun acces entrant et ne change ni MIG ni instance template.
+# ATTENTION : ce NAT couvre toutes les VM sans IP externe du sous-reseau primaire
+# de la region, pas uniquement les VM du MIG ; couts GCP additionnels.
+resource "google_compute_router" "worker_egress" {
+  count   = var.enable_cloud_nat ? 1 : 0
+  project = var.project_id
+  region  = var.region
+  name    = "${var.name_prefix}-router"
+  network = data.google_compute_network.existing.id
+}
+
+resource "google_compute_router_nat" "worker_egress" {
+  count                               = var.enable_cloud_nat ? 1 : 0
+  project                             = var.project_id
+  region                              = var.region
+  name                                = "${var.name_prefix}-nat"
+  router                              = google_compute_router.worker_egress[0].name
+  nat_ip_allocate_option              = "AUTO_ONLY"
+  source_subnetwork_ip_ranges_to_nat  = "LIST_OF_SUBNETWORKS"
+  min_ports_per_vm                    = 64
+
+  subnetwork {
+    name                    = data.google_compute_subnetwork.existing.id
+    source_ip_ranges_to_nat = ["PRIMARY_IP_RANGE"]
+  }
+
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
+  }
+}
+
 # Global external Application Load Balancer (HTTP valide en premiere phase).
 resource "google_compute_global_address" "lb" {
   project      = var.project_id

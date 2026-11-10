@@ -87,3 +87,41 @@ Le Load Balancer ne sera considéré opérationnel qu'une fois le health check `
 Une fois l'infrastructure validée, préparer la vraie application pour la VM modèle (image versionnée ou startup script reproductible), health check applicatif, secrets hors metadata et gestion des données persistantes. Ensuite seulement passer `bootstrap_mode` à `application`. Les mises à jour d'instance template peuvent créer/renouveler des VM : procéder avec une politique de rolling update et validation de santé.
 
 HTTPS du Load Balancer est optionnel et doit être activé uniquement après création d'un nouveau sous-domaine spécifique pointant vers l'IP du LB ; ne pas écraser les domaines existants `auto.ikom.mg` ou `backend.auto.ikom.mg`.
+
+
+## Etape 2B — Sortie privee des workers, sans renouveler le MIG
+
+Le module propose un **Cloud Router + Cloud NAT optionnels** (`enable_cloud_nat=false` par defaut).
+L'activation fournit un acces **sortant uniquement** depuis les VM sans IP externe du sous-reseau `default`.
+Les images d'applications restent protegees par l'IAM Artifact Registry. Aucun port HTTP entrant n'est ouvert.
+Le NAT a un **cout de passerelle et de trafic**, et son champ d'action concerne toutes les VM privees du sous-reseau regional, pas uniquement les deux web workers.
+
+### Avant toute modification
+
+- Verifier qu'aucun Cloud NAT existant ne couvre le sous-reseau `default` dans `us-central1`.
+- Conserver le backend GCS et l'etat Terraform existant ; ne jamais supprimer `.terraform` pour recreer l'infrastructure.
+- Preferer activer **Private Google Access** sur le sous-reseau actuel pour permettre l'acces aux API Google sans NAT ; cette activation est additive et concerne le sous-reseau, pas uniquement le MIG.
+- Si la mise a jour du template doit installer Docker depuis les depots Ubuntu ou acceder a d'autres services Internet, Cloud NAT est necessaire en l'absence d'autre sortie existante.
+- Ne jamais activer `bootstrap_mode=application` tant que le runtime reconciliateur et sa restauration apres recreation n'ont pas ete verifies.
+
+### Configuration voulue sur le serveur principal
+
+Dans le fichier **local non versionne** `terraform.tfvars`, ajouter :
+
+```hcl
+enable_cloud_nat = true
+```
+
+Verifier avec `terraform fmt -check -recursive ../../`, `terraform validate`, puis `terraform plan -out=autokom-ha-nat.tfplan`.
+Le plan doit creer **exactement 2 ressources** : `google_compute_router.worker_egress[0]` et
+`google_compute_router_nat.worker_egress[0]` ; **aucun remplacement** de VM,
+de MIG, de template, de LB et **aucune destruction**.
+N'appliquer `terraform apply autokom-ha-nat.tfplan` qu'apres cette revue et acceptation explicite des couts.
+
+### Limites
+
+Ce correctif n'installe **pas** Docker sur les VM, ne publie **pas** les images,
+ne modifie **pas** les cartes DNS et n'active **pas** de deployment client.
+La chaine suivante devra etre installee separement : image worker reproductible,
+reconciliation des releases voulues, collecte des secrets autorises, placement HA
+et backends NEGs/HTTPS par domaine. Les MIG et autoscaler actuels restent en validation.

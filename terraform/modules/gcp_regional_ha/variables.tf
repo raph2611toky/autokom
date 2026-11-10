@@ -120,3 +120,9 @@ variable "labels" {
   type    = map(string)
   default = { managed_by = "terraform", component = "autokom-web" }
 }
+
+variable "enable_cloud_nat" {
+  type        = bool
+  default     = false
+  description = "Cloud NAT sortant facture pour les VM privees du sous-reseau existant; ne publie aucun port entrant."
+}
