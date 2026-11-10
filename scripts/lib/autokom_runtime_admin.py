@@ -309,7 +309,6 @@ def jenkins_sync(*,apply):
     env=load_env()
     job=env.get('AUTOKOM_JENKINS_JOB','autokom-client-deploy')
     if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',job):raise SetupError('Nom de job Jenkins invalide.')
-    # A configured Pipeline job is NOT proof that the Declarative interpreter is active.
     from autokom_jenkins_pipeline import reconcile as pipeline_reconcile, PipelineError
     try:
         plugins = pipeline_reconcile(apply=apply, env=env)
@@ -317,8 +316,6 @@ def jenkins_sync(*,apply):
         raise SetupError(str(exc)) from exc
     if not plugins.ready:
         raise SetupError('Jenkins ne peut pas encore exécuter pipeline {} : plugin Declarative manquant ou inactif.')
-    # Credentials are not contained in the job XML. Check even if the job
-    # itself is already synchronized; no manual Jenkins UI action is required.
     from autokom_jenkins_credentials import provision, CredentialSetupError
     try:
         cred = provision(env, jenkins_request, apply=apply)
