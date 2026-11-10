@@ -1,0 +1,12 @@
+[Unit]
+Description=AUTOKOM HA - retry automatic image publishing
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=2min
+AccuracySec=15s
+Unit=autokom-ha-autopublish.service
+Persistent=yes
+
+[Install]
+WantedBy=timers.target

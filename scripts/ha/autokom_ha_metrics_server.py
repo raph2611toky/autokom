@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import autokom_ha_preflight as pf
+import autokom_ha_extra as extra
 
 
 class MetricCache:
@@ -32,7 +33,14 @@ class MetricCache:
             try:
                 report = pf.inventory(self.args.project, self.args.region, self.args.mig,
                                       self.args.backend, self.args.url_map, self.args.forwarding_rule, True)
-                self.data = pf.to_prometheus(report) + 'autokom_ha_metrics_scrape_success 1\n'
+                # Per-worker metrics are best-effort; aggregate MIG and LB data
+                # remain available if individual Cloud Monitoring calls fail.
+                try:
+                    extra.enrich(report, cpu_and_network=True)
+                    detailed = extra.to_prometheus(report)
+                except Exception:
+                    detailed = ''
+                self.data = pf.to_prometheus(report) + detailed + 'autokom_ha_metrics_scrape_success 1\n'
             except Exception as exc:
                 # Journaliser seulement le type et le code HTTP, jamais un jeton
                 # ou le contenu d'une reponse GCP potentiellement sensible.

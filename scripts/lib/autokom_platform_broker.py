@@ -526,6 +526,31 @@ def _commit(params):
             if previous.get('ingress_mode') == ingress.MODE:
                 ingress.remove(old_name, execute=run, available=PROXY, enabled=ENABLED)
         previous_path.unlink(missing_ok=True)
+    # Publish the already-committed image asynchronously. This is a private
+    # artifact mirroring queue, never an HA activation or a client DNS cutover.
+    # A registry outage must not roll back a validated local release.
+    try:
+        queue = Path('/var/lib/autokom/ha/publish-queue')
+        if queue.is_symlink():
+            raise BrokerError('HA publication queue symlink denied')
+        queue.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if queue.stat().st_uid != 0 or queue.stat().st_mode & 0o077:
+            raise BrokerError('HA publication queue is not private root-owned')
+        published = Path('/var/lib/autokom/ha/published') / (rid + '.json')
+        if not published.is_file():
+            item = queue / (rid + '.json')
+            if item.is_symlink():
+                raise BrokerError('HA publication item symlink denied')
+            if not item.exists():
+                with tempfile.NamedTemporaryFile('w', dir=queue, delete=False,
+                                                 prefix='.publish-', encoding='utf-8') as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    json.dump({'run_id': rid, 'environment_id': env}, stream)
+                    stream.write('\n')
+                    tmp = stream.name
+                os.replace(tmp, item)
+    except Exception as exc:
+        logger.warning('AUTOKOM_HA_AUTO_PUBLISH_QUEUE_FAILED reason=%s', type(exc).__name__)
     return {'committed':True}
 
 

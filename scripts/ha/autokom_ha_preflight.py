@@ -204,7 +204,8 @@ def monitoring_counts(project: str, url_map: str, period_minutes: int = 5) -> di
             doc = json.loads(resp.read(5_000_000))
         for series in doc.get("timeSeries", []):
             code = str((series.get("metric") or {}).get("labels", {}).get("response_code_class", ""))
-            label = code[:1] + "xx" if len(code) == 3 and code[:1] in "2345" else "other"
+            label = (code if code in ("2xx", "3xx", "4xx", "5xx") else
+                     code[:1] + "xx" if len(code) == 3 and code[:1] in "2345" else "other")
             for point in series.get("points", []):
                 raw = (point.get("value") or {}).get("int64Value", (point.get("value") or {}).get("doubleValue", 0))
                 try:
