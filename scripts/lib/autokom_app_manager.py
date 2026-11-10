@@ -293,6 +293,7 @@ ALLOWED_ENV_KEYS = {
     'GITHUB_AUTH_CALLBACK_URL',
     'AUTOKOM_FIELD_ENCRYPTION_KEY', 'AUTOKOM_BASE_DOMAIN', 'AUTOKOM_MANAGED_DOMAIN_SUFFIX',
     'AUTOKOM_RUNNER_SHARED_KEY', 'GITHUB_API_VERSION',
+    'AUTOKOM_BILLING_SANDBOX_ENABLED', 'AUTOKOM_BILLING_SANDBOX_TEST_EMAILS',
     'AUTOKOM_STATIC_ROOT', 'AUTOKOM_MEDIA_ROOT', 'TRUST_PROXY_SSL_HEADER',
     'SECURE_SSL_REDIRECT', 'SECURE_HSTS_SECONDS', 'AUTOKOM_SERVE_STATIC',
 }
@@ -1205,7 +1206,11 @@ def main(argv=None):
         from autokom_frontend_manager import main as frontend_main
         return frontend_main(['--help'])
     parser = argparse.ArgumentParser(prog='autokom app', description='Gestion du service backend AUTOKOM Platform')
-    sub = parser.add_subparsers(dest='action', required=True)
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--mode-test', action='store_true', help='Activer les paiements d’abonnement simulés pour les comptes autorisés')
+    modes.add_argument('--mode-prod', action='store_true', help='Désactiver les paiements simulés sans modifier DEBUG ni les applications')
+    modes.add_argument('--mode-status', action='store_true', help='Afficher le mode de facturation courant (sudo requis)')
+    sub = parser.add_subparsers(dest='action')
     setup_p = sub.add_parser('setup', help='Assistant de configuration backend (sans option : interactif)')
     setup_p.add_argument('--domain', help='Domaine public du backend Django')
     setup_p.add_argument('--email', help='Adresse Let’s Encrypt (requise pour --tls-mode certbot)')
@@ -1238,6 +1243,17 @@ def main(argv=None):
         env_p = sub.add_parser(env_kind, help='Configuration '+env_kind+' : env show/setup/edit/delete/sync-runner-key', add_help=False)
         env_p.add_argument('backend_args', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    if args.mode_test or args.mode_prod or args.mode_status:
+        if args.action is not None:
+            parser.error('Le changement de mode ne se combine pas à une sous-commande.')
+        from autokom_app_billing_mode import switch, status, BillingModeError
+        from autokom_env_manager import EnvError
+        try:
+            return status() if args.mode_status else switch('test' if args.mode_test else 'prod')
+        except (BillingModeError, EnvError, OSError) as exc:
+            raise AppError(str(exc)) from exc
+    if args.action is None:
+        parser.error('Indiquer une action ou --mode-test / --mode-prod / --mode-status.')
     if args.action == 'github':
         from autokom_github_activate import main as github_main
         return github_main(args.github_args)

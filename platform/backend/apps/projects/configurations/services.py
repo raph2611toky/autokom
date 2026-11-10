@@ -123,6 +123,16 @@ def check_entitlement(cfg):
     if (entitlement is None or entitlement.status != 'ACTIVE' or
             (entitlement.expires_at and entitlement.expires_at <= timezone.now())):
         raise PermissionDenied('Aucun plan actif attribué à cet environnement.')
+    if getattr(entitlement, 'grant_source', None) == 'TEST':
+        from django.conf import settings
+        from apps.plans.entitlements.models import SandboxCheckout
+        receipt = entitlement.sandbox_checkout if entitlement.sandbox_checkout_id else None
+        if (not settings.AUTOKOM_BILLING_SANDBOX_ENABLED or receipt is None or
+                receipt.status != SandboxCheckout.Status.ACCEPTED or
+                receipt.environment_id != cfg.environment_id or
+                receipt.resource_plan_id != entitlement.resource_plan_id or
+                receipt.expires_at <= timezone.now()):
+            raise PermissionDenied('Abonnement TEST désactivé, expiré ou non valide.')
     # Free plan is still limited by assigned CPU/RAM/quota; only fixed, non-Dockerfile
     # frontend recipes are allowed. Custom services remain paid.
     # A client must not gain a paid backend runtime by editing request JSON.
@@ -152,6 +162,7 @@ def check_entitlement(cfg):
                 'Sélectionnez un profil autorisé à deux instances.'
             )
         if (option is None or option.status != HighAvailabilityOption.Status.ACTIVE or
-                (option.expires_at and option.expires_at <= timezone.now())):
+                (option.expires_at and option.expires_at <= timezone.now()) or
+                (getattr(entitlement, 'grant_source', None) == 'TEST' and option.sandbox_checkout_id != entitlement.sandbox_checkout_id)):
             raise PermissionDenied('Haute disponibilite demandee, mais option non active ou non accordee. La configuration reste en brouillon.')
     return chosen

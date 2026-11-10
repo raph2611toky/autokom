@@ -772,6 +772,7 @@ def main(argv=None):
             (cmd=='runtime' and '--apply' in arguments) or
             (cmd in ('update','configure')) or
             (cmd=='recover' and '--apply' in arguments) or
+            (cmd=='app' and any(flag in arguments[1:] for flag in ('--mode-test','--mode-prod'))) or
             (cmd=='app' and len(arguments)>1 and arguments[1] in ('setup','deploy') and '--check' not in arguments) or
             (cmd=='install' and '--check' not in arguments) or
             (cmd=='iac' and '--apply' in arguments) or

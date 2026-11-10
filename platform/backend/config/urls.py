@@ -18,6 +18,7 @@ from apps.deployments.runs.views import RunnerManifestAPIView, RunnerSourceArchi
 client_api_patterns = [
     path('api/health/', PlatformHealthAPIView.as_view(), name='platform-health'),
     path('api/contact/', PublicContactAPIView.as_view(), name='public-contact'),
+    path('api/', include('apps.plans.entitlements.urls')),
     path('api/auth/', include('apps.accounts.user.urls')),
     path('api/projects/git/', include('apps.projects.git.urls')),
     path('api/projects/', include('apps.projects.environments.urls')),

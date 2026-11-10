@@ -211,10 +211,15 @@ export function remoteProjectToForm(detail) {
   const project = detail.project
   const env = detail.environment
   const cfg = detail.configurations[0] || {}
+  const granted = detail.offers?.entitlement
+  const code = granted?.resource_plan_code || ''
+  const paid = Boolean(granted?.status === 'ACTIVE' && (code.endsWith('-test') || code !== 'starter'))
+  const grantedPlan = paid ? (Number(granted?.max_instances) >= 2 ? 'pro' : 'essential')
+    : (cfg.high_availability_requested ? 'pro' : 'free')
   return {
     backendProjectId: project.id, backendEnvironmentId: env.id,
     organizationId: project.organization, githubInstallationId: project.github_installation_id || '',
-    pricingPlan: cfg.high_availability_requested ? 'pro' : 'free', resourcePlan: cfg.high_availability_requested ? 'adapted' : 'free', domainMode: 'autokom',
+    pricingPlan: grantedPlan, resourcePlan: grantedPlan === 'free' ? 'free' : 'adapted', domainMode: 'autokom',
     highAvailability: Boolean(cfg.high_availability_requested),
     projectName: project.name, repositorySlug: project.repository_name,
     repository: project.repository_url, githubRepositoryId: project.repository_external_id,

@@ -146,7 +146,8 @@ class ConfigurationOffersAPIView(APIView):
                     'resource_plan': str(entitlement.resource_plan_id),
                     'resource_plan_code': entitlement.resource_plan.code,
                     'max_instances': entitlement.resource_plan.max_instances,
-                    'status': entitlement.status}
+                    'status': entitlement.status, 'grant_source': entitlement.grant_source,
+                    'is_sandbox': entitlement.grant_source == 'TEST'}
                     if entitlement else None,
                 'ha_option': ({'status': ha_option.status,
                                'desired_replicas': ha_option.desired_replicas}

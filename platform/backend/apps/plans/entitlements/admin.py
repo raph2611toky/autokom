@@ -1,6 +1,7 @@
 from django.contrib import admin
+from django.db import transaction
 from django.utils import timezone
-from apps.plans.entitlements.models import ApplicationEntitlement, HighAvailabilityOption
+from apps.plans.entitlements.models import ApplicationEntitlement, HighAvailabilityOption, SandboxCheckout
 
 
 @admin.register(ApplicationEntitlement)
@@ -40,3 +41,37 @@ class HighAvailabilityOptionAdmin(admin.ModelAdmin):
                 obj.activated_at = timezone.now()
         obj.full_clean()
         super().save_model(request, obj, form, change)
+
+
+@admin.register(SandboxCheckout)
+class SandboxCheckoutAdmin(admin.ModelAdmin):
+    list_display = ('reference', 'environment', 'created_by', 'plan_code', 'status', 'amount_ariary', 'expires_at')
+    list_filter = ('status', 'plan_code', 'period')
+    search_fields = ('reference', 'environment__project__name', 'created_by__email')
+    actions = ('revoke_sandbox_receipts',)
+    readonly_fields = ('id', 'reference', 'environment', 'created_by', 'resource_plan',
+                       'plan_code', 'period', 'amount_ariary', 'idempotency_key', 'status', 'expires_at', 'created_at')
+    def has_add_permission(self, request):
+        return False
+    def has_change_permission(self, request, obj=None):
+        return request.user.is_superuser
+    def save_model(self, request, obj, form, change):
+        from django.core.exceptions import PermissionDenied
+        raise PermissionDenied('Les reçus sont immuables : utiliser l’action de révocation.')
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    @admin.action(description='Révoquer les simulations sélectionnées (et leurs droits TEST)')
+    def revoke_sandbox_receipts(self, request, queryset):
+        with transaction.atomic():
+            for receipt in queryset.select_for_update():
+                if receipt.status == SandboxCheckout.Status.REVOKED:
+                    continue
+                receipt.status = SandboxCheckout.Status.REVOKED
+                receipt.save(update_fields=['status'])
+                ApplicationEntitlement.objects.filter(
+                    sandbox_checkout=receipt, grant_source=ApplicationEntitlement.GrantSource.TEST,
+                ).update(status=ApplicationEntitlement.Status.REVOKED)
+                HighAvailabilityOption.objects.filter(
+                    sandbox_checkout=receipt,
+                ).update(status=HighAvailabilityOption.Status.REJECTED)

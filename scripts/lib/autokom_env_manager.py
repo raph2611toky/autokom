@@ -210,6 +210,15 @@ def _validate(kind,values):
         ):
             raise EnvError('GitHub réel nécessite FRONTEND_ONLY=false et API_ENABLED=true.')
     if kind=='backend':
+        sandbox = values.get('AUTOKOM_BILLING_SANDBOX_ENABLED', 'false').strip().lower()
+        if sandbox not in ('0', '1', 'false', 'true', 'yes', 'no', 'off', 'on'):
+            raise EnvError('AUTOKOM_BILLING_SANDBOX_ENABLED : true ou false attendu.')
+        allowlist = values.get('AUTOKOM_BILLING_SANDBOX_TEST_EMAILS', '')
+        addresses = [v.strip() for v in allowlist.split(',') if v.strip()]
+        if any(not re.fullmatch(r'[^\s@,]+@[^\s@,]+\.[^\s@,]+', address) for address in addresses):
+            raise EnvError('Liste d’adresses de test invalide.')
+        if sandbox in ('1', 'true', 'yes', 'on') and not addresses:
+            raise EnvError('Activer la simulation exige au moins un e-mail autorisé.')
         runner = values.get('AUTOKOM_RUNNER_SHARED_KEY', '')
         if runner and len(runner) < 32:
             raise EnvError('La clé interne du runner doit contenir au moins 32 caractères.')
@@ -298,7 +307,8 @@ def edit(kind,key=None):
     if kind=='backend':
         # Ces clés sont nécessaires aux intégrations réelles, même lorsqu'elles
         # n'existent pas encore dans un fichier .env hérité.
-        candidates=list(dict.fromkeys([*data, 'AUTOKOM_RUNNER_SHARED_KEY', 'GITHUB_AUTH_CALLBACK_URL']))
+        candidates=list(dict.fromkeys([*data, 'AUTOKOM_RUNNER_SHARED_KEY', 'GITHUB_AUTH_CALLBACK_URL',
+                                       'AUTOKOM_BILLING_SANDBOX_ENABLED', 'AUTOKOM_BILLING_SANDBOX_TEST_EMAILS']))
     if not candidates: raise EnvError('Aucune clé à modifier : exécuter setup.')
     if key is None:key=select('Modifier une variable '+kind,candidates)
     if key not in candidates:raise EnvError('Variable non autorisée.')

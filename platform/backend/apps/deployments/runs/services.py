@@ -34,7 +34,8 @@ def effective_replicas(env, plan, cfg=None):
     if cfg is None or not getattr(cfg, 'high_availability_requested', False):
         return 1
     option = HighAvailabilityOption.objects.filter(environment=env).first()
-    if option is None or option.status != HighAvailabilityOption.Status.ACTIVE:
+    if (option is None or option.status != HighAvailabilityOption.Status.ACTIVE or
+            (option.expires_at and option.expires_at <= timezone.now())):
         raise DeploymentConflict('Haute disponibilite demandee : option non active. Aucune publication locale de substitution.')
     if getattr(option, 'desired_replicas', 2) != 2:
         raise DeploymentConflict('Le MIG AUTOKOM prend actuellement en charge exactement deux replicas HA.')

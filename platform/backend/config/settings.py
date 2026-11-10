@@ -244,3 +244,9 @@ AUTOKOM_PROMETHEUS_URL = os.getenv('AUTOKOM_PROMETHEUS_URL','').strip()
 AUTOKOM_CONTROL_SOCKET = os.getenv('AUTOKOM_CONTROL_SOCKET','/run/autokom/platform-control.sock')
 
 REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['domains'] = '12/hour'
+
+# Simulation de facturation (jamais un encaissement réel). Réservée à une liste
+# fermée de comptes clients vérifiés ; désactivée par défaut en production.
+AUTOKOM_BILLING_SANDBOX_ENABLED = env_bool('AUTOKOM_BILLING_SANDBOX_ENABLED', False)
+AUTOKOM_BILLING_SANDBOX_TEST_EMAILS = frozenset(email.casefold() for email in env_csv('AUTOKOM_BILLING_SANDBOX_TEST_EMAILS'))
+REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['sandbox_checkout'] = '6/hour'
