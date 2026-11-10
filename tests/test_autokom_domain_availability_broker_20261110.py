@@ -63,6 +63,51 @@ class AvailabilityBrokerTests(TestCase):
         self.assertFalse(result['available'])
         urlopen.assert_not_called()
 
+    def test_reuse_allows_same_environment_with_managed_owned_dns(self):
+        record = {'name': 'known.auto.ikom.mg', 'type': 'A',
+                  'content': '136.116.89.163', 'proxied': False,
+                  'comment': 'AUTOKOM managed A record'}
+        with patch.object(broker.urllib.request, 'urlopen', return_value=FakeResponse([record])):
+            result = broker.handle('domain.reuse.check', {
+                'hostname': 'known.auto.ikom.mg',
+                'environment_id': '3a741822-18dd-4888-9a1c-e89886ddc6af',
+            })
+        self.assertEqual(result, {'available': True, 'reason': 'owned_by_project'})
+
+    def test_reuse_rejects_dns_mismatch_even_for_existing_project(self):
+        record = {'name': 'known.auto.ikom.mg', 'type': 'A',
+                  'content': '35.186.239.102', 'proxied': False,
+                  'comment': 'AUTOKOM managed A record'}
+        with patch.object(broker.urllib.request, 'urlopen', return_value=FakeResponse([record])):
+            result = broker.handle('domain.reuse.check', {
+                'hostname': 'known.auto.ikom.mg',
+                'environment_id': '3a741822-18dd-4888-9a1c-e89886ddc6af',
+            })
+        self.assertEqual(result['reason'], 'dns_target_mismatch')
+        self.assertFalse(result['available'])
+
+    def test_reuse_never_overwrites_an_unowned_dns_record(self):
+        record = {'name': 'known.auto.ikom.mg', 'type': 'A',
+                  'content': '136.116.89.163', 'proxied': False,
+                  'comment': 'manually configured'}
+        with patch.object(broker.urllib.request, 'urlopen', return_value=FakeResponse([record])):
+            result = broker.handle('domain.reuse.check', {
+                'hostname': 'known.auto.ikom.mg',
+                'environment_id': '3a741822-18dd-4888-9a1c-e89886ddc6af',
+            })
+        self.assertFalse(result['available'])
+        self.assertEqual(result['reason'], 'dns_unowned')
+
+    def test_reuse_never_takes_another_environment_vhost(self):
+        (broker.STATE / 'domain-owner-known.auto.ikom.mg.txt').write_text('different-environment')
+        with patch.object(broker.urllib.request, 'urlopen') as transport:
+            result = broker.handle('domain.reuse.check', {
+                'hostname': 'known.auto.ikom.mg',
+                'environment_id': '3a741822-18dd-4888-9a1c-e89886ddc6af',
+            })
+        self.assertFalse(result['available'])
+        transport.assert_not_called()
+
     def test_cloudflare_failure_is_not_declared_available(self):
         with patch.object(broker.urllib.request, 'urlopen', side_effect=OSError('network error')):
             with self.assertRaises(broker.BrokerError):

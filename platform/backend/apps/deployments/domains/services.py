@@ -255,19 +255,63 @@ def remove_domain(user, project_id, environment_id, domain_id):
             raise ValidationError({'domain': 'Impossible de supprimer le dernier domaine : au moins une adresse doit rester associée à ce service.'})
         if domain.is_primary:
             raise ValidationError({'domain': 'Définissez un autre domaine principal avant de supprimer celui-ci.'})
-        request_control('domain.remove', {
+        removed = request_control('domain.remove', {
             'hostname': domain.hostname, 'environment_id': str(env.pk),
             'managed': domain.domain_type == Domain.Type.SUBDOMAIN,
         }, timeout=90)
+        if not isinstance(removed, dict) or removed.get('removed') is not True:
+            raise ValidationError({'domain': 'Retrait DNS/Nginx non confirmé : domaine conservé.'})
         domain.delete()
+        return {'managed_dns_cleaned': removed.get('managed_dns_cleaned') is True,
+                'managed': domain.domain_type == Domain.Type.SUBDOMAIN}
+
+
+def _same_environment_managed_target(original, target, environment):
+    """Only a reservation belonging to this exact service can be reused.
+
+    Matching Cloudflare A records or user accounts do not establish ownership.
+    Other projects, other environments and external domains are never reusable.
+    """
+    return (target is not None and target.pk != original.pk
+            and target.environment_id == environment.pk
+            and target.domain_type == Domain.Type.SUBDOMAIN)
+
+
+def _managed_destination_check(original, host, environment):
+    """One owner-aware check shared by the availability API and final write.
+
+    The privileged broker also validates the authoritative DNS and Nginx
+    ownership marker; a stale or foreign Cloudflare record is NOT reusable.
+    """
+    target = Domain.objects.filter(hostname=host).first()
+    if target is not None:
+        if not _same_environment_managed_target(original, target, environment):
+            return {'available': False, 'reason': 'reserved_other_project', 'target': None}
+        if target.status == Domain.Status.ERROR:
+            return {'available': False, 'reason': 'reconcile_required', 'target': target}
+        expected_hash = hashlib.sha256(_challenge(target).encode()).hexdigest()
+        # Legacy pending reservations can be repaired by the rename transaction;
+        # verified or staged hosts with a different proof cannot be reclaimed.
+        if (target.verification_token_hash and
+                not hmac.compare_digest(target.verification_token_hash, expected_hash)):
+            return {'available': False, 'reason': 'proof_mismatch', 'target': target}
+        if (not target.verification_token_hash and
+                (target.status != Domain.Status.PENDING or target.verified_at is not None)):
+            return {'available': False, 'reason': 'proof_mismatch', 'target': target}
+        result = request_control('domain.reuse.check', {
+            'hostname': host, 'environment_id': str(environment.pk),
+        }, timeout=18)
+        return {'available': result.get('available') is True,
+                'reason': str(result.get('reason', 'unavailable'))[:48],
+                'target': target}
+    result = request_control('domain.available', {'hostname': host}, timeout=18)
+    return {'available': result.get('available') is True,
+            'reason': str(result.get('reason', 'unavailable'))[:48],
+            'target': None}
 
 
 def check_managed_domain_availability(user, project_id, environment_id, domain_id, hostname):
-    """Check application ownership AND the authoritative DNS provider, without writes.
-
-    This is advisory only. The mutating endpoint checks again, because another
-    request can reserve the name after an availability lookup.
-    """
+    """Read-only project-scoped availability, including previously owned aliases."""
     _, env = get_environment(user, project_id, environment_id, write=True)
     host = _validate_managed_rename_host(hostname)
     original = Domain.objects.filter(environment=env, pk=domain_id).first()
@@ -275,12 +319,8 @@ def check_managed_domain_availability(user, project_id, environment_id, domain_i
         raise ValidationError({'domain': 'Sous-domaine AUTOKOM introuvable.'})
     if original.hostname == host:
         return {'available': False, 'reason': 'unchanged'}
-    if Domain.objects.filter(hostname=host).exists():
-        return {'available': False, 'reason': 'reserved'}
-    # The broker knows about Cloudflare A/CNAME records and protected Nginx vhosts.
-    result = request_control('domain.available', {'hostname': host}, timeout=18)
-    return {'available': result.get('available') is True,
-            'reason': str(result.get('reason', 'unavailable'))[:40]}
+    result = _managed_destination_check(original, host, env)
+    return {'available': result['available'], 'reason': result['reason']}
 
 
 def _validate_managed_rename_host(hostname):
@@ -312,8 +352,9 @@ def rename_pending_managed_domain(user, project_id, environment_id, domain_id, h
             raise ValidationError({'domain': 'Sous-domaine AUTOKOM introuvable.'})
         if host == domain.hostname:
             return {'domain': domain, 'previous_retained': False, 'activated': domain.status == Domain.Status.ACTIVE}
-        if Domain.objects.filter(hostname=host).exists():
-            raise ValidationError({'hostname': 'Ce sous-domaine est déjà réservé.'})
+        existing = Domain.objects.select_for_update().filter(hostname=host).first()
+        if existing and not _same_environment_managed_target(domain, existing, env):
+            raise ValidationError({'hostname': 'Ce sous-domaine est réservé par un autre projet ou service.'})
         active = (domain.status == Domain.Status.ACTIVE and
                   domain.tls_status == 'ACTIVE' and domain.verified_at is not None and
                   not domain.is_disabled)
@@ -322,10 +363,26 @@ def rename_pending_managed_domain(user, project_id, environment_id, domain_id, h
                    not domain.is_disabled)
         if not (active or pending):
             raise ValidationError({'domain': 'Adresse dans un état incompatible avec une modification.'})
-        available = request_control('domain.available', {'hostname': host}, timeout=18)
-        if available.get('available') is not True:
-            raise ValidationError({'hostname': 'Ce préfixe est déjà utilisé. Choisissez-en un autre.'})
+        check = _managed_destination_check(domain, host, env)
+        if check['available'] is not True:
+            raise ValidationError({'hostname':
+                'Adresse non réutilisable : vérifiez son enregistrement DNS et la propriété AUTOKOM ('
+                + check['reason'] + ').'})
         if pending:
+            if existing is not None:
+                # Reuse the already registered target; do not leave a duplicate
+                # managed reservation or remove a working HTTPS endpoint.
+                was_primary = domain.is_primary
+                request_control('domain.remove', {
+                    'hostname': domain.hostname, 'environment_id': str(env.pk), 'managed': True,
+                }, timeout=90)
+                domain.delete()
+                if was_primary:
+                    existing.is_primary = True
+                    existing.save(update_fields=['is_primary'])
+                return {'domain': existing, 'previous_retained': False,
+                        'activated': existing.status == Domain.Status.ACTIVE
+                        and existing.tls_status == 'ACTIVE'}
             # No active DNS/HTTPS will be taken offline. Remove only an owned
             # pending record, and only then rename this reservation.
             request_control('domain.remove', {
@@ -338,13 +395,25 @@ def rename_pending_managed_domain(user, project_id, environment_id, domain_id, h
 
         # Reserve in DB before the slow Cloudflare + ACME operations to stop
         # concurrent projects from taking the hostname. No existing site is changed.
-        staged = Domain.objects.create(
-            environment=env, organization=project.organization,
-            hostname=host, domain_type=Domain.Type.SUBDOMAIN,
-            status=Domain.Status.VERIFYING, is_primary=False, is_disabled=True,
-        )
-        staged.verification_token_hash = hashlib.sha256(_challenge(staged).encode()).hexdigest()
-        staged.save(update_fields=['verification_token_hash'])
+        staged_created = existing is None
+        if staged_created:
+            staged = Domain.objects.create(
+                environment=env, organization=project.organization,
+                hostname=host, domain_type=Domain.Type.SUBDOMAIN,
+                status=Domain.Status.VERIFYING, is_primary=False, is_disabled=True,
+            )
+            staged.verification_token_hash = hashlib.sha256(_challenge(staged).encode()).hexdigest()
+            staged.save(update_fields=['verification_token_hash'])
+        else:
+            staged = existing
+            if staged.status not in (Domain.Status.PENDING, Domain.Status.VERIFYING, Domain.Status.ACTIVE):
+                raise ValidationError({'hostname': 'Ce domaine nécessite une réconciliation avant réutilisation.'})
+            expected_hash = hashlib.sha256(_challenge(staged).encode()).hexdigest()
+            if not staged.verification_token_hash and staged.status == Domain.Status.PENDING and staged.verified_at is None:
+                staged.verification_token_hash = expected_hash
+                staged.save(update_fields=['verification_token_hash'])
+            if not hmac.compare_digest(staged.verification_token_hash or '', expected_hash):
+                raise PermissionDenied('Preuve de propriété de ce domaine incompatible avec AUTOKOM.')
         old_id = domain.pk
         old_host = domain.hostname
 
@@ -368,18 +437,18 @@ def rename_pending_managed_domain(user, project_id, environment_id, domain_id, h
             'managed': True, 'token': token,
         }, timeout=720)
     except Exception:
-        # Cleanup only our just-staged name, NEVER the original live address.
-        try:
-            request_control('domain.remove', {
-                'hostname': host, 'environment_id': str(env.pk), 'managed': True,
-            }, timeout=90)
-        except Exception:
-            # Preserve the reservation so it cannot be claimed by another user.
-            staged.status = Domain.Status.ERROR
-            staged.activation_error_code = 'AUTOKOM_DOMAIN_RENAME_RECONCILE_REQUIRED'
-            staged.save(update_fields=['status', 'activation_error_code'])
-        else:
-            staged.delete()
+        # Existing aliases are NEVER removed when reuse/activation fails.
+        if staged_created:
+            try:
+                request_control('domain.remove', {
+                    'hostname': host, 'environment_id': str(env.pk), 'managed': True,
+                }, timeout=90)
+            except Exception:
+                staged.status = Domain.Status.ERROR
+                staged.activation_error_code = 'AUTOKOM_DOMAIN_RENAME_RECONCILE_REQUIRED'
+                staged.save(update_fields=['status', 'activation_error_code'])
+            else:
+                staged.delete()
         raise
 
     # The new HTTPS endpoint is live: atomically switch primary ownership.
@@ -405,18 +474,19 @@ def rename_pending_managed_domain(user, project_id, environment_id, domain_id, h
                 'is_primary', 'verified_at', 'status', 'tls_status', 'is_disabled', 'activation_error_code',
             ])
     except Exception:
-        # A deployment may have started while ACME was running. If the database
-        # cannot switch, the original domain remains primary and reachable.
-        try:
-            request_control('domain.remove', {
-                'hostname': host, 'environment_id': str(env.pk), 'managed': True,
-            }, timeout=90)
-        except Exception:
-            staged.status = Domain.Status.ERROR
-            staged.activation_error_code = 'AUTOKOM_DOMAIN_RENAME_RECONCILE_REQUIRED'
-            staged.save(update_fields=['status', 'activation_error_code'])
-        else:
-            staged.delete()
+        # A deployment may have started while ACME was running. The original
+        # stays primary; never remove a pre-existing alias from the project.
+        if staged_created:
+            try:
+                request_control('domain.remove', {
+                    'hostname': host, 'environment_id': str(env.pk), 'managed': True,
+                }, timeout=90)
+            except Exception:
+                staged.status = Domain.Status.ERROR
+                staged.activation_error_code = 'AUTOKOM_DOMAIN_RENAME_RECONCILE_REQUIRED'
+                staged.save(update_fields=['status', 'activation_error_code'])
+            else:
+                staged.delete()
         raise
 
     # Remove the old domain only after the new public site is demonstrably live.

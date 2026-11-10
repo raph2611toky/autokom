@@ -746,6 +746,62 @@ def _managed_hostname_available(host):
     return {'available': not occupied, 'reason': 'dns_reserved' if occupied else 'available'}
 
 
+
+def _managed_hostname_reusable(host, environment_id):
+    """Allow reuse ONLY of a domain already reserved in this environment.
+
+    Django authenticates project + domain ownership. This privileged check
+    rejects any foreign Nginx owner or DNS record; a matching public IP alone
+    is never proof of ownership. A missing DNS A can be recreated safely.
+    """
+    host = valid_hostname(host)
+    env = valid_id(environment_id)
+    cfg = _cloudflare_settings()
+    suffix = cfg['suffix']
+    if not host.endswith('.' + suffix) or host.count('.') != suffix.count('.') + 1:
+        raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH')
+    owner = STATE / ('domain-owner-' + host + '.txt')
+    conf = PROXY / ('autokom-customer-' + host + '.conf')
+    link = ENABLED / conf.name
+    if owner.is_symlink() or conf.is_symlink() or (link.exists() and not link.is_symlink()):
+        return {'available': False, 'reason': 'invalid_runtime_owner'}
+    if owner.is_file():
+        if owner.read_text(encoding='utf-8').strip() != env:
+            return {'available': False, 'reason': 'foreign_runtime_owner'}
+    elif conf.exists() or link.is_symlink():
+        return {'available': False, 'reason': 'unowned_nginx_config'}
+    if link.is_symlink() and link.resolve() != conf.resolve():
+        return {'available': False, 'reason': 'invalid_nginx_link'}
+
+    base = 'https://api.cloudflare.com/client/v4/zones/' + cfg['zone'] + '/dns_records'
+    request = Request(base + '?' + urlencode({'name': host, 'per_page': 100}),
+                      headers={'Authorization': 'Bearer ' + cfg['token']})
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            doc = json.load(response)
+    except (HTTPError, OSError, ValueError, TimeoutError) as exc:
+        raise BrokerError('AUTOKOM_CF_DNS_UNAVAILABLE') from exc
+    if not isinstance(doc, dict) or doc.get('success') is not True:
+        raise BrokerError('AUTOKOM_CF_DNS_UNAVAILABLE')
+    records = doc.get('result')
+    if not isinstance(records, list) or len(records) >= 100:
+        raise BrokerError('AUTOKOM_CF_DNS_UNAVAILABLE')
+    records = [record for record in records if isinstance(record, dict) and
+               str(record.get('name', '')).rstrip('.').lower() == host and
+               record.get('type') in ('A', 'AAAA', 'CNAME')]
+    if not records:
+        return {'available': True, 'reason': 'owned_dns_missing'}
+    if len(records) != 1:
+        return {'available': False, 'reason': 'dns_conflict'}
+    record = records[0]
+    if (record.get('type') != 'A' or record.get('content') != cfg['address'] or
+            record.get('proxied') is not False):
+        return {'available': False, 'reason': 'dns_target_mismatch'}
+    if record.get('comment') != 'AUTOKOM managed A record' and not owner.is_file():
+        return {'available': False, 'reason': 'dns_unowned'}
+    return {'available': True, 'reason': 'owned_by_project'}
+
+
 def _cloudflare_record(host):
     settings = _cloudflare_settings()
     suffix,zone,token = settings['suffix'],settings['zone'],settings['token']
@@ -800,7 +856,7 @@ def _cloudflare_remove_owned_record(host, *, legacy_owned_vhost=False, dry_run=F
         raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH: DNS hors zone gérée.')
     base = 'https://api.cloudflare.com/client/v4/zones/' + config['zone'] + '/dns_records'
     headers = {'Authorization': 'Bearer ' + config['token'], 'Content-Type': 'application/json'}
-    query = Request(base + '?' + urlencode({'name': host, 'type': 'A', 'per_page': 100}), headers=headers)
+    query = Request(base + '?' + urlencode({'name': host, 'per_page': 100}), headers=headers)
     try:
         with urllib.request.urlopen(query, timeout=12) as response:
             doc = json.load(response)
@@ -808,12 +864,16 @@ def _cloudflare_remove_owned_record(host, *, legacy_owned_vhost=False, dry_run=F
         raise BrokerError('AUTOKOM_CF_DNS_UNAVAILABLE: Lecture DNS impossible.') from exc
     if not isinstance(doc, dict) or doc.get('success') is not True:
         raise BrokerError('AUTOKOM_CF_DNS_REJECTED: Lecture DNS refusée.')
-    records = [record for record in (doc.get('result') or [])
-               if isinstance(record, dict) and record.get('name', '').rstrip('.').lower() == host]
+    result = doc.get('result')
+    if not isinstance(result, list) or len(result) >= 100:
+        raise BrokerError('AUTOKOM_CF_DNS_UNAVAILABLE: Réponse DNS incomplète.')
+    records = [record for record in result
+               if isinstance(record, dict) and record.get('name', '').rstrip('.').lower() == host
+               and record.get('type') in ('A', 'AAAA', 'CNAME')]
     if not records:
         return {'deleted': False}
     if len(records) != 1:
-        raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Plusieurs enregistrements A.')
+        raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Plusieurs enregistrements DNS pour ce nom.')
     record = records[0]
     identifier = record.get('id', '')
     if (record.get('type') != 'A' or record.get('content') != config['address']
@@ -857,9 +917,11 @@ def _remove_owned_domain(params):
         _cloudflare_remove_owned_record(host, legacy_owned_vhost=owned, dry_run=True)
     # `_deactivate_owned_vhost` validates the marker and restores on failure.
     _deactivate_owned_vhost(host, env)
+    dns_cleanup = {'deleted': False}
     if managed:
-        _cloudflare_remove_owned_record(host, legacy_owned_vhost=owned)
-    return {'removed': True, 'managed_dns_cleaned': managed}
+        dns_cleanup = _cloudflare_remove_owned_record(host, legacy_owned_vhost=owned)
+    return {'removed': True, 'managed_dns_cleaned': managed,
+            'dns_record_deleted': dns_cleanup.get('deleted') is True}
 
 
 def _nginx_config(host,port,tls=False,*,gateway_port=None,gateway_hostname=None):
@@ -1495,6 +1557,8 @@ def handle(action,params):
         return _check_dns(params.get('hostname'),params.get('token'),params.get('managed') is True)
     if action=='domain.available':
         return _managed_hostname_available(params.get('hostname'))
+    if action=='domain.reuse.check':
+        return _managed_hostname_reusable(params.get('hostname'), params.get('environment_id'))
     if action=='domain.dns.create':
         return _cloudflare_record(valid_hostname(params.get('hostname')))
     if action=='domain.activate':

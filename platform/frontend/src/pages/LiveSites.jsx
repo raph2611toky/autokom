@@ -92,8 +92,20 @@ export default function LiveSites({ navigate, projectId = null }) {
         .then(result => {
           if (cancelled) return
           const available = result?.available === true
+          const reason = result?.reason || ''
+          const reasonLabels = {
+            owned_by_project: 'Ce sous-domaine appartient déjà à ce projet : il peut être réutilisé après vérification HTTPS.',
+            owned_dns_missing: 'Ce sous-domaine est réservé à ce projet : AUTOKOM doit rétablir son DNS avant la bascule.',
+            dns_target_mismatch: 'Domaine enregistré dans ce projet, mais son DNS pointe ailleurs. Corrigez le DNS avant la bascule.',
+            dns_unowned: 'Enregistrement DNS non identifié comme appartenant à AUTOKOM : intervention requise.',
+            reconcile_required: 'Ce domaine appartient au projet mais nécessite une réconciliation avant réutilisation.',
+            proof_mismatch: 'La preuve de propriété de ce domaine n’est plus valide : assistance nécessaire.',
+            foreign_runtime_owner: 'Ce nom est géré par un autre environnement AUTOKOM.',
+            reserved_other_project: 'Ce sous-domaine est déjà attribué à un autre projet ou service.',
+          }
           setAvailability({state: available ? 'available' : 'unavailable', hostname: host,
-            message: available ? 'Préfixe disponible dans AUTOKOM et le DNS géré.' : 'Ce préfixe est déjà utilisé ou réservé.'})
+            message: reasonLabels[reason] || (available
+              ? 'Préfixe disponible dans AUTOKOM et le DNS géré.' : 'Ce préfixe est déjà utilisé ou réservé.')})
         })
         .catch(err => {
           if (!cancelled) setAvailability({state: 'error', hostname: host,
@@ -260,7 +272,7 @@ export default function LiveSites({ navigate, projectId = null }) {
           description={domainToDelete ? `${domainToDelete.hostname} sera retiré du projet, du reverse proxy AUTOKOM et du DNS géré s'il appartient à AUTOKOM. Ce retrait ne supprime pas les enregistrements de votre fournisseur DNS externe. Cette action est irréversible.` : ''}
           variant="warning" confirmLabel="Supprimer définitivement" requiredText={domainToDelete?.hostname || ''} busy={busy}
           onClose={() => setDomainToDelete(null)}
-          onConfirm={() => { const candidate = domainToDelete; setDomainToDelete(null); if (candidate) void perform(() => projectsApi.deleteDomain(detail.project.id, detail.environment.id, candidate.id), 'Domaine supprimé définitivement.') }}/>
+          onConfirm={() => { const candidate = domainToDelete; setDomainToDelete(null); if (candidate) void perform(() => projectsApi.deleteDomain(detail.project.id, detail.environment.id, candidate.id), (candidate.domain_type === 'SUBDOMAIN' ? 'Domaine et enregistrement DNS AUTOKOM supprimés.' : 'Domaine retiré. Le DNS externe doit être supprimé chez votre fournisseur.')) }}/>
         <h3 id="ak-domain-form">Ajouter une adresse</h3>
         <p className="ak-section-subtitle">{managedAlreadyReserved
           ? 'Ce projet possède déjà un sous-domaine AUTOKOM : utilisez Modifier directement sur le domaine. Vous pouvez encore ajouter un domaine externe.'

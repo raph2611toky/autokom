@@ -65,6 +65,7 @@ class DomainMinimumOneTests(unittest.TestCase):
             calls.append((name, payload))
             if broker_error:
                 raise RuntimeError('broker unavailable')
+            return {'removed': True, 'managed_dns_cleaned': True}
         scope = {
             'get_environment': lambda *args, **kwargs: (None, environment),
             'transaction': SimpleNamespace(atomic=nullcontext),

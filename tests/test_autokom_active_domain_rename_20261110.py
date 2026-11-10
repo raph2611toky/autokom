@@ -21,6 +21,7 @@ class DomainState:
         DomainState.next_id += 1
         self.pk = self.id = DomainState.next_id
         self.environment = env
+        self.environment_id = env.pk
         self.hostname = hostname
         self.organization = org
         self.domain_type = 'SUBDOMAIN'
@@ -175,6 +176,83 @@ class RenameTests(unittest.TestCase):
         self.assertEqual(actions, ['domain.available'])
         self.assertTrue(old.is_primary)
 
+    def test_reuse_existing_project_alias_after_dns_https_verification(self):
+        env = SimpleNamespace(pk='environment-id')
+        project = SimpleNamespace(pk='project-id', organization='org')
+        old = DomainState(env, 'original.auto.ikom.mg', primary=True, active=True, org='org')
+        existing = DomainState(env, 'known.auto.ikom.mg', org='org')
+        existing.status = 'VERIFYING'
+        existing.verification_token_hash = hashlib.sha256((str(existing.pk)*8).encode()).hexdigest()
+        records = [old, existing]
+        steps = []
+        def broker(action, payload, timeout=1):
+            steps.append((action, payload['hostname']))
+            if action == 'domain.reuse.check':
+                return {'available': True, 'reason': 'owned_by_project'}
+            return {}
+        scope = self.run_rename_scope(env, project, records, broker)
+        result = scope['rename_pending_managed_domain'](object(), 1, 1, old.pk, existing.hostname)
+        self.assertIs(result['domain'], existing)
+        self.assertTrue(existing.is_primary)
+        self.assertTrue(old.deleted)
+        self.assertEqual(len(records), 2)  # Reused an ID, no duplicate reservation.
+        self.assertLess(steps.index(('domain.activate', existing.hostname)),
+                        steps.index(('domain.remove', old.hostname)))
+        self.assertNotIn(('domain.remove', existing.hostname), steps)
+
+    def test_reuse_other_environment_alias_is_always_forbidden(self):
+        env = SimpleNamespace(pk='environment-id')
+        foreign = SimpleNamespace(pk='another-environment')
+        project = SimpleNamespace(pk='project-id', organization='org')
+        old = DomainState(env, 'original.auto.ikom.mg', primary=True, active=True, org='org')
+        existing = DomainState(foreign, 'known.auto.ikom.mg', org='org')
+        actions = []
+        scope = self.run_rename_scope(env, project, [old, existing],
+                                      lambda action, payload, timeout=1: actions.append(action))
+        with self.assertRaises(Rejected):
+            scope['rename_pending_managed_domain'](object(), 1, 1, old.pk, existing.hostname)
+        self.assertEqual(actions, [])
+        self.assertTrue(old.is_primary)
+
+    def test_failed_reuse_does_not_delete_existing_alias_or_original(self):
+        env = SimpleNamespace(pk='environment-id')
+        project = SimpleNamespace(pk='project-id', organization='org')
+        old = DomainState(env, 'original.auto.ikom.mg', primary=True, active=True, org='org')
+        existing = DomainState(env, 'known.auto.ikom.mg', org='org')
+        existing.verification_token_hash = hashlib.sha256((str(existing.pk)*8).encode()).hexdigest()
+        operations = []
+        def broker(action, payload, timeout=1):
+            operations.append((action, payload['hostname']))
+            if action == 'domain.reuse.check':
+                return {'available': True, 'reason': 'owned_by_project'}
+            if action == 'domain.activate':
+                raise Rejected('certificate failed')
+            return {}
+        scope = self.run_rename_scope(env, project, [old, existing], broker)
+        with self.assertRaises(Rejected):
+            scope['rename_pending_managed_domain'](object(), 1, 1, old.pk, existing.hostname)
+        self.assertTrue(old.is_primary)
+        self.assertFalse(old.deleted)
+        self.assertFalse(existing.deleted)
+        self.assertNotIn(('domain.remove', existing.hostname), operations)
+        self.assertNotIn(('domain.remove', old.hostname), operations)
+
+    def test_same_environment_existing_dns_mismatch_is_not_reusable(self):
+        env = SimpleNamespace(pk='environment-id')
+        project = SimpleNamespace(pk='project-id', organization='org')
+        old = DomainState(env, 'original.auto.ikom.mg', primary=True, active=True, org='org')
+        existing = DomainState(env, 'known.auto.ikom.mg', org='org')
+        existing.verification_token_hash = hashlib.sha256((str(existing.pk)*8).encode()).hexdigest()
+        actions = []
+        def broker(action, payload, timeout=1):
+            actions.append(action)
+            return {'available': False, 'reason': 'dns_target_mismatch'}
+        scope = self.run_rename_scope(env, project, [old, existing], broker)
+        with self.assertRaises(Rejected):
+            scope['rename_pending_managed_domain'](object(), 1, 1, old.pk, existing.hostname)
+        self.assertEqual(actions, ['domain.reuse.check'])
+        self.assertTrue(old.is_primary)
+
     @staticmethod
     def run_rename_scope(env, project, records, broker):
         source = ast.parse(SOURCE.read_text())
@@ -196,6 +274,8 @@ class RenameTests(unittest.TestCase):
             'request_control': broker,
             'hashlib': hashlib,
             '_challenge': lambda domain: str(domain.pk) * 8,
+            'hmac': __import__('hmac'),
+            'PermissionDenied': Rejected,
             'timezone': SimpleNamespace(now=lambda: 'today'),
         }
         # imports Project inside function: simulate via mock sys.modules if a Django
@@ -226,6 +306,9 @@ class RenameTests(unittest.TestCase):
                     sys.modules.pop(sock_path, None)
                 else:
                     sys.modules[sock_path] = old_sock
+        helper_defs = [node for node in source.body if isinstance(node, ast.FunctionDef) and
+                       node.name in ('_same_environment_managed_target', '_managed_destination_check')]
+        exec(compile(ast.Module(body=helper_defs, type_ignores=[]), str(SOURCE), 'exec'), scope)
         exec(code, scope)
         scope['actual_rename'] = scope['rename_pending_managed_domain']
         scope['rename_pending_managed_domain'] = execute

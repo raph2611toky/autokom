@@ -112,8 +112,10 @@ class DomainDeleteAPIView(APIView):
 
     def delete(self, request, project_id, environment_id, domain_id):
         try:
-            remove_domain(request.user, project_id, environment_id, domain_id)
-            return api_success(None, 'Domaine supprimé définitivement de ce projet.')
+            result = remove_domain(request.user, project_id, environment_id, domain_id)
+            message = ('Domaine et enregistrement DNS géré retirés.' if result['managed'] else
+                       'Domaine retiré d’AUTOKOM. Supprimez séparément son DNS chez votre fournisseur.')
+            return api_success(result, message)
         except Exception as exc:
             return handle_error(exc, 'domain_delete')
 

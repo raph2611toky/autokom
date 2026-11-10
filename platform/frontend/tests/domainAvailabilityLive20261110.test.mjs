@@ -21,3 +21,12 @@ test('input has inline spinner, success check icon, red rejection and status mes
   assert.match(source, /availability\.state === 'unavailable' \? <XCircle/)
   assert.match(source, /role="status" aria-live="polite"/)
 })
+test('previously registered hostname in this project is identified as reusable, foreign hostname is refused', () => {
+  assert.match(source, /owned_by_project: 'Ce sous-domaine appartient déjà à ce projet/)
+  assert.match(source, /reserved_other_project: 'Ce sous-domaine est déjà attribué à un autre projet/)
+  assert.match(source, /dns_target_mismatch: 'Domaine enregistré dans ce projet, mais son DNS pointe ailleurs/)
+  assert.match(source, /availability.state !== 'available'/)
+})
+test('the confirmation message for deleting managed domain states DNS removal', () => {
+  assert.match(source, /Domaine et enregistrement DNS AUTOKOM supprimés/)
+})
