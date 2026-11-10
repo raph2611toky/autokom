@@ -36,6 +36,26 @@ def claim_domain(user,project_id,environment_id,hostname,domain_type):
     if host in ('backend.auto.ik0m.tech','auto.ik0m.tech','backend.auto.ikom.mg','auto.ikom.mg','ikom.mg','www.ikom.mg'):
         raise ValidationError({'hostname':'Nom de domaine réservé au service IKOM.'})
     with transaction.atomic():
+        # Serialize all managed-host reservations for this project, across
+        # environments. The user must rename the existing host, not reserve
+        # another AUTOKOM hostname for the same project.
+        from apps.projects.project.models import Project
+        if domain_type == Domain.Type.SUBDOMAIN:
+            Project.objects.select_for_update().get(pk=project.pk)
+            if Domain.objects.filter(environment=env, domain_type=Domain.Type.SUBDOMAIN).exists():
+                raise ValidationError({'hostname':
+                    'Ce service possède déjà un sous-domaine AUTOKOM. Utilisez Modifier sur ce domaine.'})
+            # For ordinary projects, the managed address belongs to the project.
+            # A two-service stack is the one exception: the backend uses its
+            # own environment and may need its own hostname. Do not regress
+            # parallel frontend/backend deployments.
+            from apps.projects.configurations.models import ServiceStack
+            is_stack_backend = ServiceStack.objects.filter(
+                project=project, backend_environment=env).exists()
+            if not is_stack_backend and Domain.objects.filter(
+                    environment__project=project, domain_type=Domain.Type.SUBDOMAIN).exists():
+                raise ValidationError({'hostname':
+                    'Ce projet possède déjà un sous-domaine AUTOKOM. Utilisez Modifier sur ce domaine.'})
         if Domain.objects.filter(hostname=host).exists():
             raise ValidationError({'hostname':'Ce domaine est déjà enregistré.'})
         domain=Domain.objects.create(environment=env,organization=project.organization,

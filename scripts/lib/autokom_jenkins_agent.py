@@ -286,12 +286,6 @@ def provision_system_dependencies(*, apply):
 
 
 def verify_jenkins_identity(env):
-    """Check credentials against the actual authenticated Jenkins JSON API.
-
-    /login is a web-page endpoint and may return a misleading 401/redirect.
-    A local listening socket is not proof that the API token is usable.
-    Do not auto-create tokens, disable Jenkins security or print credentials.
-    """
     status, raw = http(env, 'GET', '/whoAmI/api/json', max_size=16_384)
     if status in (401, 403):
         raise AgentError('Jenkins actif, mais compte/API token refusé (HTTP '+str(status)+'). '
@@ -347,7 +341,6 @@ def systemctl(*args):
 
 
 def exact_agent_online(env):
-    """Do not mistake another agent bearing the same label for our managed node."""
     path = '/computer/api/json?tree=computer%5BdisplayName,offline,temporarilyOffline,numExecutors,assignedLabels%5Bname%5D%5D'
     status, raw = http(env, 'GET', path)
     if status != 200:
@@ -384,8 +377,6 @@ def provision(env, *, apply):
     print('  ◈ Agent AUTOKOM : nœud local isolé, sans proxy public et sans accès Docker')
     print('  › Nœud prévu : ' + NODE_NAME + ' · label : ' + LABEL)
     print('  › URL de liaison : http://127.0.0.1:8080/ (loopback uniquement)')
-    # Validate the already-configured Jenkins credentials BEFORE Ansible changes
-    # the host; a revoked token must not lead to a partial agent installation.
     verify_jenkins_identity(env)
     print('  ✓ API Jenkins : compte de service authentifié sur loopback')
     if not apply:

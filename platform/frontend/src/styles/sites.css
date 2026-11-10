@@ -321,3 +321,9 @@
 .ak-managed-host-input input{min-width:0;flex:1 1 120px;border:0;padding:12px;background:transparent;color:var(--ak-text);font-size:13px}
 .ak-managed-host-input span{display:flex;align-items:center;padding:0 14px;border-left:1px solid var(--ak-border);color:var(--ak-muted);white-space:nowrap;font:600 12px var(--ak-font-mono)}
 @media(max-width:550px){.ak-managed-host-input{flex-wrap:wrap}.ak-managed-host-input span{border-left:0;border-top:1px solid var(--ak-border);padding:8px 12px;width:100%}}
+
+/* Editor belongs to the selected domain, never to the separate create form. */
+.ak-domain-inline-edit{margin-top:14px;border:1px solid var(--ak-border-strong);padding:15px;display:grid;gap:10px;max-width:800px;background:var(--ak-surface)}
+.ak-domain-inline-edit>input{width:100%;padding:12px;background:var(--ak-surface);color:var(--ak-text);border:1px solid var(--ak-border-strong)}
+.ak-domain-inline-edit .ak-managed-host-input{max-width:650px}
+.ak-domain-inline-edit .ak-domain-entry-actions{margin-top:0}
