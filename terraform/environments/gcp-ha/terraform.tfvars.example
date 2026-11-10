@@ -19,6 +19,9 @@ cpu_target         = 0.80
 cooldown_seconds   = 180
 backend_port       = 8080
 health_check_path  = "/healthz"
+# Les paquets Docker ont pris >10 min sur les VM GCP initiales. Pas d'effet
+# sur le mode validation (360 s); utile pour les workers et applications.
+worker_initial_delay_seconds = 1800
 
 # validation : serveur de validation (actuel).
 # worker : installe Docker et teste l'acces Artifact Registry, SANS applications clientes.

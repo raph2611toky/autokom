@@ -138,9 +138,13 @@ resource "google_compute_region_instance_group_manager" "web" {
     port = var.backend_port
   }
 
+  # Les workers installent Docker au premier demarrage. Dans le contexte GCP
+  # observe, les seuls telechargements apt ont dure plus de dix minutes.
+  # La verification HTTP conserve son code 503 tant que la preparation echoue;
+  # seule la fenetre initiale de l'autohealing est prolongee pour ces modes.
   auto_healing_policies {
     health_check      = google_compute_health_check.web.id
-    initial_delay_sec = 360
+    initial_delay_sec = var.bootstrap_mode == "validation" ? 360 : var.worker_initial_delay_seconds
   }
 
   lifecycle {

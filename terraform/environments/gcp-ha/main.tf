@@ -29,6 +29,7 @@ module "regional_web_ha" {
   cpu_target            = var.cpu_target
   restrict_mig_ingress  = var.restrict_mig_ingress
   cooldown_seconds      = var.cooldown_seconds
+  worker_initial_delay_seconds = var.worker_initial_delay_seconds
   bootstrap_mode        = var.bootstrap_mode
   application_startup_script = trimspace(var.application_startup_script_file) != "" ? file(abspath(var.application_startup_script_file)) : null
   enable_https          = var.enable_https

@@ -98,3 +98,14 @@ variable "artifact_repository" {
   default     = "autokom-ha-images"
   description = "Depot Docker regional utilisable par les workers en mode worker."
 }
+
+
+variable "worker_initial_delay_seconds" {
+  type        = number
+  default     = 1800
+  description = "Initialisation des VM worker/applications sans recreation prematuree (360 a 3600 s)."
+  validation {
+    condition     = var.worker_initial_delay_seconds >= 360 && var.worker_initial_delay_seconds <= 3600 && floor(var.worker_initial_delay_seconds) == var.worker_initial_delay_seconds
+    error_message = "worker_initial_delay_seconds doit etre un entier entre 360 et 3600 secondes."
+  }
+}

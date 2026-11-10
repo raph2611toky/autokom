@@ -136,3 +136,16 @@ variable "artifact_repository" {
     error_message = "Nom du depot Artifact Registry invalide."
   }
 }
+
+
+# APT/installation Docker sur images Ubuntu neuves peuvent prendre > 10 min.
+# Max Google Compute Engine : 3600 secondes. Preferer une image prebakee ensuite.
+variable "worker_initial_delay_seconds" {
+  type        = number
+  default     = 1800
+  description = "Duree de grace de l'autohealing MIG pour les modes worker/application (secondes). Le mode validation conserve 360 s."
+  validation {
+    condition     = var.worker_initial_delay_seconds >= 360 && var.worker_initial_delay_seconds <= 3600 && floor(var.worker_initial_delay_seconds) == var.worker_initial_delay_seconds
+    error_message = "worker_initial_delay_seconds doit etre un entier entre 360 et 3600 secondes."
+  }
+}
