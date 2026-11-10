@@ -6,8 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 DynamicUser=yes
-StateDirectory=autokom-ha-metrics
-Environment=CLOUDSDK_CONFIG=/var/lib/autokom-ha-metrics
+Environment=AUTOKOM_GCP_AUTH_MODE=metadata
 ExecStart=/usr/bin/python3 /opt/autokom/source/scripts/ha/autokom_ha_metrics_server.py --port 19191
 Restart=on-failure
 RestartSec=10

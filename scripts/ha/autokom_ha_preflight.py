@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import subprocess
 import sys
@@ -26,7 +27,101 @@ DEFAULT_LB_MAP = "autokom-ha-map"
 DEFAULT_FORWARD_RULE = "autokom-ha-http"
 
 
+# Le service systemd utilise directement l'identite GCE. Il ne doit jamais
+# invoquer le lanceur gcloud Snap, incompatible avec DynamicUser et l'isolation.
+_METADATA_URL = "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
+_COMPUTE_URL = "https://compute.googleapis.com/compute/v1/projects"
+
+
+def _metadata_mode() -> bool:
+    return os.environ.get("AUTOKOM_GCP_AUTH_MODE", "").strip() == "metadata"
+
+
+def _metadata_token() -> str:
+    req = urllib.request.Request(_METADATA_URL, headers={"Metadata-Flavor": "Google"})
+    with urllib.request.urlopen(req, timeout=5) as response:
+        data = json.load(response)
+    token = data.get("access_token") if isinstance(data, dict) else None
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("Metadata GCE : aucun jeton de compte de service disponible.")
+    return token
+
+
+def _compute_api(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    url = _COMPUTE_URL + path
+    body = json.dumps(payload or {}).encode("utf-8") if method == "POST" else None
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Authorization": "Bearer " + _metadata_token(), "Accept": "application/json",
+                 **({"Content-Type": "application/json"} if body is not None else {})},
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=25) as response:
+        result = json.load(response)
+    if not isinstance(result, dict):
+        raise RuntimeError("Reponse Compute Engine inattendue.")
+    return result
+
+
+def _metadata_compute_command(*args: str) -> Any:
+    """Adaptateur limite aux lectures GCE necessaires au preflight AUTOKOM.
+
+    Aucune commande de mutation ni credential statique ne sont acceptes.
+    """
+    project = next((value.split("=", 1)[1] for value in args if value.startswith("--project=")), None)
+    region = next((value.split("=", 1)[1] for value in args if value.startswith("--region=")), None)
+    names = tuple(value for value in args if not value.startswith("--"))
+    if not project or not re.fullmatch(r"[a-z][a-z0-9-]{4,61}[a-z0-9]", project):
+        raise ValueError("Projet GCP absent ou invalide.")
+    if len(names) != 4 or names[0] != "compute" or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", names[3]):
+        raise ValueError("Commande GCP en mode metadata non autorisee.")
+    prefix = f"/{project}"
+    if names[1:3] == ("instance-templates", "describe"):
+        return _compute_api("GET", f"{prefix}/global/instanceTemplates/{names[3]}")
+    if names[1:3] == ("url-maps", "describe"):
+        return _compute_api("GET", f"{prefix}/global/urlMaps/{names[3]}")
+    if names[1:3] == ("forwarding-rules", "describe"):
+        return _compute_api("GET", f"{prefix}/global/forwardingRules/{names[3]}")
+    if names[1:3] == ("backend-services", "describe"):
+        return _compute_api("GET", f"{prefix}/global/backendServices/{names[3]}")
+    if names[1:3] == ("backend-services", "get-health"):
+        service = _compute_api("GET", f"{prefix}/global/backendServices/{names[3]}")
+        replies: list[dict[str, Any]] = []
+        for backend in service.get("backends") or []:
+            group = backend.get("group") if isinstance(backend, dict) else None
+            if not isinstance(group, str) or not group.startswith("https://www.googleapis.com/compute/v1/projects/"):
+                raise RuntimeError("Backend GCP sans groupe d'instances valide.")
+            replies.append(_compute_api("POST", f"{prefix}/global/backendServices/{names[3]}/getHealth", {"group": group}))
+        return {"backends": replies}
+    raise ValueError("Commande GCP en mode metadata non autorisee.")
+
+
 def command(*args: str) -> Any:
+    if _metadata_mode():
+        # Le nom de groupe regional est le seul chemin a cinq composantes.
+        tokens = tuple(value for value in args if not value.startswith("--"))
+        project = next((value.split("=", 1)[1] for value in args if value.startswith("--project=")), None)
+        region = next((value.split("=", 1)[1] for value in args if value.startswith("--region=")), None)
+        if len(tokens) == 5 and tokens[:3] == ("compute", "instance-groups", "managed"):
+            action, name = tokens[3], tokens[4]
+            if (action not in ("describe", "list-instances") or not region or
+                    not re.fullmatch(r"[a-z]+-[a-z0-9]+[0-9]", region) or
+                    not project or not re.fullmatch(r"[a-z][a-z0-9-]{4,61}[a-z0-9]", project) or
+                    not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", name)):
+                raise ValueError("Requete MIG non autorisee.")
+            route = f"/{project}/regions/{region}/instanceGroupManagers/{name}"
+            if action == "describe":
+                return _compute_api("GET", route)
+            result: list[Any] = []
+            page_token = None
+            for _ in range(20):
+                doc = _compute_api("POST", route + "/listManagedInstances", {"pageToken": page_token} if page_token else {})
+                result.extend(doc.get("managedInstances") or [])
+                page_token = doc.get("nextPageToken")
+                if not page_token:
+                    return result
+            raise RuntimeError("Inventaire MIG depasse 20 pages.")
+        return _metadata_compute_command(*args)
     proc = subprocess.run(["gcloud", *args, "--format=json"], text=True, capture_output=True,
                           timeout=50, check=False)
     if proc.returncode:
@@ -73,6 +168,8 @@ def bootstrap_mode(template: dict[str, Any]) -> str:
 
 
 def oauth_token() -> str:
+    if _metadata_mode():
+        return _metadata_token()
     proc = subprocess.run(["gcloud", "auth", "print-access-token"], text=True,
                           capture_output=True, timeout=25, check=False)
     if proc.returncode or not proc.stdout.strip():

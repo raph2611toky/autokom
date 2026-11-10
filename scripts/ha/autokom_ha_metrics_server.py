@@ -33,8 +33,13 @@ class MetricCache:
                 report = pf.inventory(self.args.project, self.args.region, self.args.mig,
                                       self.args.backend, self.args.url_map, self.args.forwarding_rule, True)
                 self.data = pf.to_prometheus(report) + 'autokom_ha_metrics_scrape_success 1\n'
-            except Exception:
-                # Never display access tokens, connection strings, or secret-bearing exceptions.
+            except Exception as exc:
+                # Journaliser seulement le type et le code HTTP, jamais un jeton
+                # ou le contenu d'une reponse GCP potentiellement sensible.
+                import urllib.error
+                code = exc.code if isinstance(exc, urllib.error.HTTPError) else None
+                safe = f" HTTP {code}" if code is not None else ""
+                print(f"AUTOKOM HA scrape failed: {type(exc).__name__}{safe}", file=sys.stderr, flush=True)
                 self.data = 'autokom_ha_metrics_scrape_success 0\n'
             self.until = time.monotonic() + self.refresh_seconds
             return self.data
