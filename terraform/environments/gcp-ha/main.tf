@@ -21,6 +21,7 @@ module "regional_web_ha" {
   boot_image            = var.boot_image
   assign_external_ip    = var.assign_external_ip
   enable_cloud_nat      = var.enable_cloud_nat
+  artifact_repository   = var.artifact_repository
   backend_port          = var.backend_port
   health_check_path     = var.health_check_path
   min_replicas          = var.min_replicas

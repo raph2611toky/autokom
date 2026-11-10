@@ -49,12 +49,22 @@ resource "google_compute_instance_template" "web" {
   metadata_startup_script = var.bootstrap_mode == "validation" ? templatefile("${path.module}/files/validation-startup.sh.tftpl", {
     backend_port      = var.backend_port
     health_check_path = var.health_check_path
+  }) : var.bootstrap_mode == "worker" ? templatefile("${path.module}/files/worker-startup.sh.tftpl", {
+    worker_settings = jsonencode({
+      project_id             = var.project_id
+      region                 = var.region
+      artifact_repository    = var.artifact_repository
+      health_path            = var.health_check_path
+      health_port            = var.backend_port
+    })
+    health_source = file("${path.module}/files/worker-health.py")
+    probe_source  = file("${path.module}/files/worker-probe.py")
   }) : var.application_startup_script
 
   lifecycle {
     create_before_destroy = true
     precondition {
-      condition     = var.bootstrap_mode == "validation" || (var.application_startup_script != null && trimspace(var.application_startup_script) != "")
+      condition     = var.bootstrap_mode != "application" || (var.application_startup_script != null && trimspace(var.application_startup_script) != "")
       error_message = "bootstrap_mode=application exige application_startup_script, sans secret."
     }
   }

@@ -92,3 +92,9 @@ variable "enable_cloud_nat" {
   default     = false
   description = "Activer explicitement Cloud NAT facturable pour les workers sans IP externe (sous-reseau default)."
 }
+
+variable "artifact_repository" {
+  type        = string
+  default     = "autokom-ha-images"
+  description = "Depot Docker regional utilisable par les workers en mode worker."
+}

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# autokom-ha-worker-preparation-only
+# Reproducible worker bootstrap on new managed VM; NO customer deployment.
+# This script contains no secret. The VM authenticates through its GCE service account.
+set -Eeuo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+install -d -m 0755 /etc/autokom-ha /usr/local/lib/autokom-ha /run/autokom-ha
+rm -f /run/autokom-ha/worker-ready
+
+cat >/etc/autokom-ha/worker.json <<'AUTOKOM_CONFIG'
+${worker_settings}
+AUTOKOM_CONFIG
+chmod 0644 /etc/autokom-ha/worker.json
+
+cat >/usr/local/lib/autokom-ha/worker-health.py <<'AUTOKOM_HEALTH'
+${health_source}
+AUTOKOM_HEALTH
+cat >/usr/local/lib/autokom-ha/worker-probe.py <<'AUTOKOM_PROBE'
+${probe_source}
+AUTOKOM_PROBE
+chmod 0644 /usr/local/lib/autokom-ha/worker-health.py /usr/local/lib/autokom-ha/worker-probe.py
+
+cat >/etc/systemd/system/autokom-ha-worker-health.service <<'AUTOKOM_SERVICE'
+[Unit]
+Description=AUTOKOM HA technical worker health endpoint (NO customer apps)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+ExecStart=/usr/bin/python3 -u /usr/local/lib/autokom-ha/worker-health.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
+AUTOKOM_SERVICE
+
+# Launch the health server immediately; it returns 503 until all preflights pass.
+systemctl daemon-reload
+systemctl enable --now autokom-ha-worker-health.service
+
+# Cloud NAT provides egress; Private Google Access provides Google APIs.
+# apt is idempotent and the VM will be reconstructed from the MIG template.
+apt-get -o Acquire::Retries=3 update
+apt-get -y -o Dpkg::Lock::Timeout=180 install --no-install-recommends docker.io ca-certificates python3
+systemctl enable --now docker.service
+
+# Stop if GCP IAM or registry access is not ready. Retry boundedly on bootstrap.
+for attempt in 1 2 3 4 5 6; do
+  if /usr/bin/python3 /usr/local/lib/autokom-ha/worker-probe.py; then
+    printf 'AUTOKOM HA worker runtime ready\n' > /run/autokom-ha/worker-ready
+    chmod 0644 /run/autokom-ha/worker-ready
+    echo 'AUTOKOM_HA_WORKER_PREPARED no_customer_workloads=true'
+    exit 0
+  fi
+  echo "AUTOKOM_HA_WORKER_PROBE_RETRY attempt=$attempt"
+  sleep 10
+done
+
+echo 'AUTOKOM_HA_WORKER_BOOTSTRAP_FAILED infrastructure_not_ready' >&2
+exit 1

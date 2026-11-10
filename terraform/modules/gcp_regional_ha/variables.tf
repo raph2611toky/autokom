@@ -89,8 +89,8 @@ variable "bootstrap_mode" {
   default     = "validation"
   description = "validation = serveur HTTP technique, application = vrai demarrage applicatif."
   validation {
-    condition     = contains(["validation", "application"], var.bootstrap_mode)
-    error_message = "bootstrap_mode vaut validation ou application."
+    condition     = contains(["validation", "worker", "application"], var.bootstrap_mode)
+    error_message = "bootstrap_mode vaut validation, worker ou application."
   }
 }
 variable "application_startup_script" {
@@ -125,4 +125,14 @@ variable "enable_cloud_nat" {
   type        = bool
   default     = false
   description = "Cloud NAT sortant facture pour les VM privees du sous-reseau existant; ne publie aucun port entrant."
+}
+
+variable "artifact_repository" {
+  type        = string
+  default     = "autokom-ha-images"
+  description = "Depot Docker Artifact Registry existant et accessible par le compte des workers."
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{1,62}$", var.artifact_repository))
+    error_message = "Nom du depot Artifact Registry invalide."
+  }
 }
