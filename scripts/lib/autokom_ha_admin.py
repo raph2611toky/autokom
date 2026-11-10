@@ -18,10 +18,8 @@ import autokom_ha_preflight as pf
 import autokom_ha_extra as extra
 import autokom_ha_observability as observe
 
-
 class HaError(RuntimeError):
     pass
-
 
 def _use_gce_identity() -> None:
     if os.environ.get('AUTOKOM_GCP_AUTH_MODE') == 'metadata':
@@ -35,7 +33,6 @@ def _use_gce_identity() -> None:
     except (OSError, TimeoutError):
         pass  # Kali workstation can use gcloud credentials.
 
-
 def _report(*, metrics: bool = False, details: bool = True) -> dict:
     _use_gce_identity()
     report = pf.inventory(pf.DEFAULT_PROJECT, pf.DEFAULT_REGION,
@@ -45,12 +42,10 @@ def _report(*, metrics: bool = False, details: bool = True) -> dict:
         report = extra.enrich(report, cpu_and_network=metrics)
     return report
 
-
 def _n(value, width=16):
     if value is None:
         return '-'.ljust(width)
     return str(value)[:width].ljust(width)
-
 
 def cmd_list(args):
     report = _report(metrics=not args.fast)
@@ -75,7 +70,6 @@ def cmd_list(args):
             print('BLOQUANT : ' + issue)
     return 0
 
-
 def cmd_logs(args):
     if args.source == 'publisher':
         return _journal('autokom-ha-autopublish.service', args.lines)
@@ -95,7 +89,6 @@ def cmd_logs(args):
     print(extra.serial_log(report['project'], candidates[args.instance], args.instance, args.lines))
     return 0
 
-
 def _journal(service, lines):
     result = subprocess.run(['journalctl', '-u', service, '-n', str(lines), '--no-pager', '--output=short-iso'],
                             capture_output=True, text=True, timeout=20, check=False)
@@ -103,7 +96,6 @@ def _journal(service, lines):
         raise HaError('Journaux systemd indisponibles : ' + service)
     print(result.stdout)
     return 0
-
 
 def _get_json(url):
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=5) as resp:
@@ -119,7 +111,6 @@ def prom_query(expr):
         raise HaError('Requête Prometheus non valide')
     return doc.get('data', {}).get('result', [])
 
-
 def _prom_targets():
     from observability_config import load
     cfg = load()
@@ -129,7 +120,6 @@ def _prom_targets():
             return {'health': target.get('health', 'unknown'), 'error': target.get('lastError', ''),
                     'last_scrape': target.get('lastScrape', '')}
     return {'health': 'absent', 'error': 'Scrape AUTOKOM HA not installed'}
-
 
 def cmd_monitor(args):
     from observability_config import load
@@ -157,7 +147,6 @@ def cmd_monitor(args):
         print('Monitoring non vérifiable : ' + type(exc).__name__)
         return 2
     return 0
-
 
 def cmd_doctor(args):
     report = _report(metrics=True)
@@ -199,8 +188,6 @@ def cmd_doctor(args):
     print('  STATUT GLOBAL : ' + ('BLOQUÉ' if critical else 'à vérifier au niveau applicatif'))
     return 2 if critical else 0
 
-
-
 def cmd_delivery(args):
     """Explicit installation / read-only status of cloud HTTP staging controller."""
     if args.status:
@@ -225,7 +212,6 @@ def cmd_delivery(args):
         raise HaError('Workers GCP delivery non prêts : vérifier le nouveau template et les contrôles de santé.')
     sys.path.insert(0, str(ROOT / 'scripts/ha'))
     from autokom_ha_delivery import reconcile, BUCKET
-    # This API check also validates the controller's temporary GCE identity.
     from autokom_ha_registry import metadata_token
     req = urllib.request.Request('https://storage.googleapis.com/storage/v1/b/' + BUCKET,
                                  headers={'Authorization': 'Bearer ' + metadata_token()})
@@ -273,8 +259,6 @@ def _systemd_enabled(unit):
     except (OSError, subprocess.TimeoutExpired):
         return False
 
-
-
 def cmd_rights(args):
     """Root-only read-only Django entitlement inspection; no entitlement mutation."""
     if os.geteuid() != 0:
@@ -290,6 +274,21 @@ def cmd_rights(args):
     run_as_service(cmd, timeout=40)
     return 0
 
+# Extension additive, aucune modification des chemins existants de livraison/CI.
+def cmd_apps(args):
+    """Inventaire par worker, état désiré + santé endpoint GCP, sans mutation."""
+    from autokom_ha_apps import get_inventory, output
+    report = _report(metrics=False, details=False)
+    data = get_inventory(report)
+    if args.worker:
+        nodes = [w for w in data['workers'] if w['name'] == args.worker]
+        if not nodes:
+            raise HaError('Worker absent du MIG actuel : ' + args.worker[:64])
+        selected = {a['environment'] for a in nodes[0]['applications']}
+        data['workers'] = nodes
+        data['applications'] = [a for a in data['applications'] if a['environment'] in selected]
+        data['unassigned'] = []
+    return output(data, ha_only=args.ha_only, as_json=args.json)
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog='autokom iac ha', description='MIG, LB, logs, supervision et diagnostic HA')
@@ -316,6 +315,10 @@ def main(argv=None):
     mode.add_argument('--check', action='store_true', help='Prévol sans modification')
     mode.add_argument('--apply', action='store_true', help='Activer le contrôleur systemd (root)')
     mode.add_argument('--status', action='store_true', help='Rapport de réconciliation et santé applicative')
+    apps = commands.add_parser('apps', help='Applications par worker, répliques et statut HA (lecture seule)')
+    apps.add_argument('--ha-only', action='store_true', help='Afficher uniquement les applications demandant la HA')
+    apps.add_argument('--json', action='store_true', help='Inventaire JSON, sans secrets')
+    apps.add_argument('--worker', default=None, help='Limiter la vue à un worker du MIG')
     args = p.parse_args(argv)
     if args.action == 'list':
         return cmd_list(args)
@@ -331,8 +334,9 @@ def main(argv=None):
         return cmd_rights(args)
     if args.action == 'delivery':
         return cmd_delivery(args)
+    if args.action == 'apps':
+        return cmd_apps(args)
     return 2
-
 
 if __name__ == '__main__':
     try:
