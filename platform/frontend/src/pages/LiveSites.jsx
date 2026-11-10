@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, ArrowRight, CheckCircle2, Download, ExternalLink, GitBranch, Globe2, Info, LoaderCircle, Pencil, Plus, Rocket, Search, ShieldCheck, Trash2, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, CheckCircle2, Download, ExternalLink, GitBranch, Globe2, Info, LoaderCircle, Pencil, Plus, Rocket, Search, ShieldCheck, Trash2, X, XCircle } from 'lucide-react'
 import { projectsApi } from '../services/projectsApi.js'
 import { errorText, getRemoteProjectDetail, listRemoteProjectRecords } from '../services/projectWorkflow.js'
 import { publicSiteUrl, siteStateLabel } from '../services/sitePresentation.js'
@@ -24,6 +24,7 @@ export default function LiveSites({ navigate, projectId = null }) {
   const [domainToDelete, setDomainToDelete] = useState(null)
   const [editingDomain, setEditingDomain] = useState(null)
   const [editHostname, setEditHostname] = useState('')
+  const [availability, setAvailability] = useState({ state: 'idle', hostname: '', message: '' })
 
   async function refreshDomains(info) {
     const actual = info || detail
@@ -65,6 +66,44 @@ export default function LiveSites({ navigate, projectId = null }) {
     return () => {alive=false;window.clearInterval(timer)}
   },[projectId,detail?.environment?.id])
 
+  // Advisory availability check: validation runs in Django AND against live
+  // Cloudflare DNS, not from a local list of already-loaded projects.
+  useEffect(() => {
+    if (!editingDomain || !detail?.environment?.id) return
+    const selected = domains.find(item => item.id === editingDomain)
+    if (!selected || selected.domain_type !== 'SUBDOMAIN') return
+    let host
+    try {
+      host = managedDomainHost(editHostname, dnsSetup?.managed_suffix || AUTOKOM_DOMAIN_SUFFIX)
+    } catch (err) {
+      setAvailability({state: 'unavailable', hostname: '', message: errorText(err)})
+      return
+    }
+    if (host === selected.hostname) {
+      setAvailability({state: 'unchanged', hostname: host, message: 'Saisissez un autre préfixe.'})
+      return
+    }
+    const controller = new AbortController()
+    let cancelled = false
+    setAvailability({state: 'checking', hostname: host, message: 'Vérification de disponibilité…'})
+    const timer = window.setTimeout(() => {
+      projectsApi.domainAvailability(detail.project.id, detail.environment.id, selected.id,
+        host, {signal: controller.signal})
+        .then(result => {
+          if (cancelled) return
+          const available = result?.available === true
+          setAvailability({state: available ? 'available' : 'unavailable', hostname: host,
+            message: available ? 'Préfixe disponible dans AUTOKOM et le DNS géré.' : 'Ce préfixe est déjà utilisé ou réservé.'})
+        })
+        .catch(err => {
+          if (!cancelled) setAvailability({state: 'error', hostname: host,
+            message: 'Vérification indisponible : réessayez avant de confirmer.'})
+        })
+    }, 600)
+    return () => {cancelled = true; window.clearTimeout(timer); controller.abort()}
+  }, [editingDomain, editHostname, detail?.project?.id, detail?.environment?.id, dnsSetup?.managed_suffix,
+      domains])
+
   const visible = useMemo(() => projects.filter(project =>
     `${project.name} ${project.repository} ${project.publicSite?.hostname || ''}`.toLowerCase().includes(query.toLowerCase().trim())), [projects, query])
 
@@ -72,9 +111,9 @@ export default function LiveSites({ navigate, projectId = null }) {
     if (busy || !detail) return
     setBusy(true); setError(''); setNotice('')
     try {
-      await action()
+      const result = await action()
       await refreshDomains()
-      setNotice(success)
+      setNotice(typeof success === 'function' ? success(result) : success)
     } catch (err) { setError(errorText(err)) }
     finally { setBusy(false) }
   }
@@ -84,6 +123,7 @@ export default function LiveSites({ navigate, projectId = null }) {
 
   function beginEdit(domain) {
     setError(''); setNotice('')
+    setAvailability({state: 'idle', hostname: '', message: ''})
     setEditingDomain(domain.id)
     setEditHostname(domain.domain_type === 'SUBDOMAIN'
       ? managedDomainPrefix(domain.hostname) : domain.hostname)
@@ -92,6 +132,7 @@ export default function LiveSites({ navigate, projectId = null }) {
   function cancelEdit() {
     setEditingDomain(null)
     setEditHostname('')
+    setAvailability({state: 'idle', hostname: '', message: ''})
   }
 
   async function editDomain(event, domain) {
@@ -107,8 +148,8 @@ export default function LiveSites({ navigate, projectId = null }) {
         return
       }
       if (domain.domain_type === 'SUBDOMAIN' &&
-          (domain.status !== 'PENDING' || domain.verified || domain.https || domain.is_disabled)) {
-        setError('Cette adresse AUTOKOM est déjà activée ou en cours de vérification. Un changement HTTPS sans interruption nécessite une migration dédiée ; aucune modification DNS ne sera effectuée ici.')
+          (availability.state !== 'available' || availability.hostname !== host)) {
+        setError('Le nouveau préfixe doit être disponible et vérifié avant modification.')
         return
       }
     } catch (err) { setError(errorText(err)); return }
@@ -121,8 +162,11 @@ export default function LiveSites({ navigate, projectId = null }) {
         await projectsApi.createDomain(detail.project.id, detail.environment.id, host, 'CUSTOM')
       }
       cancelEdit()
-    }, domain.domain_type === 'SUBDOMAIN'
-      ? 'Préfixe AUTOKOM modifié après contrôle de la réservation précédente. DNS/HTTPS seront activés à la publication.'
+    }, result => domain.domain_type === 'SUBDOMAIN'
+      ? (result?.previous_retained
+          ? 'Nouveau domaine principal disponible en HTTPS. L’ancienne adresse reste active comme alias, à retirer après vérification.'
+          : (domain.https ? 'Nouveau domaine actif en HTTPS. Ancienne adresse retirée après validation.'
+              : 'Préfixe réservé. DNS et HTTPS seront configurés à la publication.'))
       : 'Domaine de remplacement réservé. Vérifiez DNS et HTTPS avant de retirer l’ancienne adresse.')
   }
 
@@ -161,7 +205,7 @@ export default function LiveSites({ navigate, projectId = null }) {
         {domains.map(domain => {
           const url = publicSiteUrl(domain)
           return <article className="ak-domain-entry" key={domain.id}>
-            <div className="ak-domain-entry-head"><div><strong>{domain.hostname}</strong> {domain.is_primary && <span className="ak-project-state">Principal</span>}<p className="ak-section-subtitle">DNS : {domain.status} · HTTPS : {domain.https ? 'Actif' : 'Activation automatique en cours'}</p>{domain.activation_error_code && <p className="ak-domain-diagnostic">Diagnostic : {domain.activation_error_code}. Nouvelle tentative automatique programmée.</p>}</div>
+            <div className="ak-domain-entry-head"><div><strong>{domain.hostname}</strong> {domain.is_primary && <span className="ak-project-state">Principal</span>}<p className="ak-section-subtitle">DNS : {domain.status} · HTTPS : {domain.https ? 'Actif' : 'Activation automatique en cours'}</p>{domain.activation_error_code && <p className="ak-domain-diagnostic">Diagnostic : {domain.activation_error_code}. {domain.activation_error_code === 'AUTOKOM_DOMAIN_OLD_ALIAS_CLEANUP_PENDING' ? 'Retrait de l’ancienne adresse à finaliser depuis la gestion des domaines.' : 'Nouvelle tentative automatique programmée.'}</p>}</div>
               <div className="ak-domain-entry-actions">
                 <button type="button" className="button-outline" disabled={!dnsSetup?.ingress_ipv4} onClick={() => guide(domain)} title="Guide avec l'adresse IP publique actuelle"><Download size={15}/> Guide DNS</button>
                 {url && <a href={url} className="button-outline" target="_blank" rel="noopener noreferrer"><ExternalLink size={15}/> Ouvrir</a>}
@@ -180,19 +224,33 @@ export default function LiveSites({ navigate, projectId = null }) {
               <label className="ak-domain-field" htmlFor={`edit-domain-${domain.id}`}>
                 {domain.domain_type === 'SUBDOMAIN' ? 'Modifier le préfixe de cette adresse' : 'Nouvelle adresse externe de remplacement'}
               </label>
-              {domain.domain_type === 'SUBDOMAIN' ? <div className="ak-managed-host-input">
-                <input id={`edit-domain-${domain.id}`} autoFocus value={editHostname} onChange={event => setEditHostname(event.target.value.toLowerCase())}
-                  maxLength={63} required placeholder="nouveau-prefixe" aria-label="Nouveau préfixe AUTOKOM"/>
-                <span>.{AUTOKOM_DOMAIN_SUFFIX}</span>
-              </div> : <input id={`edit-domain-${domain.id}`} autoFocus value={editHostname} onChange={event => setEditHostname(event.target.value)}
+              {domain.domain_type === 'SUBDOMAIN' ? <>
+                <div className={`ak-managed-host-input ak-availability-${availability.state}`}>
+                  <input id={`edit-domain-${domain.id}`} autoFocus value={editHostname} onChange={event => setEditHostname(event.target.value.toLowerCase())}
+                    maxLength={63} required placeholder="nouveau-prefixe" aria-label="Nouveau préfixe AUTOKOM"
+                    aria-invalid={availability.state === 'unavailable'} aria-describedby={`edit-availability-${domain.id}`}/>
+                  <span className="ak-availability-icon" aria-hidden="true">
+                    {availability.state === 'checking' ? <LoaderCircle className="ak-spin" size={17}/> :
+                     availability.state === 'available' ? <CheckCircle2 size={17}/> :
+                     availability.state === 'unavailable' ? <XCircle size={17}/> : null}
+                  </span>
+                  <span className="ak-managed-host-suffix">.{AUTOKOM_DOMAIN_SUFFIX}</span>
+                </div>
+                <p id={`edit-availability-${domain.id}`} className={`ak-domain-availability-message ak-availability-${availability.state}`} role="status" aria-live="polite">
+                  {availability.message || 'Saisissez un nouveau préfixe pour vérifier sa disponibilité.'}
+                </p>
+              </> : <input id={`edit-domain-${domain.id}`} autoFocus value={editHostname} onChange={event => setEditHostname(event.target.value)}
                 maxLength={253} required aria-label="Nouveau domaine externe" />}
               <p className="ak-section-subtitle">{domain.domain_type === 'SUBDOMAIN'
-                ? (domain.status === 'PENDING' && !domain.verified && !domain.https && !domain.is_disabled
-                    ? 'AUTOKOM vérifie l’unicité du préfixe, retire uniquement l’ancienne réservation dont il contrôle la propriété, puis enregistre le nouveau nom.'
-                    : 'Adresse déjà activée ou vérifiée : changement bloqué ici pour protéger DNS et HTTPS.')
+                ? (domain.https
+                    ? 'Le nouveau domaine sera activé et vérifié en HTTPS avant la bascule. L’ancien reste disponible tant que le nouveau ne fonctionne pas.'
+                    : 'AUTOKOM vérifie le préfixe et conserve toute adresse active jusqu’à la mise en service de la nouvelle.')
                 : 'L’ancien domaine reste inchangé. Activez DNS/HTTPS du nouveau domaine avant de retirer l’ancien.'}</p>
               <div className="ak-domain-entry-actions">
-                <button type="submit" className="button-primary" disabled={busy || !editHostname.trim() || (domain.domain_type === 'SUBDOMAIN' && (domain.status !== 'PENDING' || domain.verified || domain.https || domain.is_disabled))}><CheckCircle2 size={15}/> Enregistrer</button>
+                <button type="submit" className="button-primary" disabled={busy || !editHostname.trim() ||
+                  (domain.domain_type === 'SUBDOMAIN' && availability.state !== 'available')}>
+                  {busy ? <LoaderCircle size={15} className="ak-spin"/> : <CheckCircle2 size={15}/>}
+                  {busy ? 'Vérification DNS et HTTPS…' : 'Enregistrer'}</button>
                 <button type="button" className="button-outline" onClick={cancelEdit} disabled={busy}><X size={15}/> Annuler</button>
               </div>
             </form>}

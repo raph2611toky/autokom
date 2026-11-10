@@ -327,3 +327,17 @@
 .ak-domain-inline-edit>input{width:100%;padding:12px;background:var(--ak-surface);color:var(--ak-text);border:1px solid var(--ak-border-strong)}
 .ak-domain-inline-edit .ak-managed-host-input{max-width:650px}
 .ak-domain-inline-edit .ak-domain-entry-actions{margin-top:0}
+
+/* Authoritative managed-domain availability feedback (not syntax-only). */
+.ak-managed-host-input.ak-availability-available {border-color:var(--ak-success)}
+.ak-managed-host-input.ak-availability-unavailable {border-color:var(--ak-danger)}
+.ak-managed-host-input.ak-availability-checking {border-color:var(--ak-accent)}
+.ak-managed-host-input .ak-availability-icon{border-left:0;display:flex;align-items:center;justify-content:center;
+  flex:0 0 34px;padding:0 7px;color:var(--ak-muted)}
+.ak-managed-host-input.ak-availability-available .ak-availability-icon,
+.ak-domain-availability-message.ak-availability-available{color:var(--ak-success)}
+.ak-managed-host-input.ak-availability-unavailable .ak-availability-icon,
+.ak-domain-availability-message.ak-availability-unavailable{color:var(--ak-danger)}
+.ak-domain-availability-message{margin:0;color:var(--ak-muted);font-size:12px;line-height:1.5}
+.ak-domain-availability-message.ak-availability-error{color:var(--ak-warning)}
+.ak-managed-host-input .ak-managed-host-suffix{border-left:1px solid var(--ak-border)}

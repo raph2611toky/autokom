@@ -45,6 +45,7 @@ export const projectsApi = Object.freeze({
   verifyDomain: (projectId, envId, domainId) => api.post(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/${uuid(domainId)}/verify/`, {}),
   primaryDomain: (projectId, envId, domainId) => api.post(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/${uuid(domainId)}/primary/`, {}),
   deactivateDomain: (projectId, envId, domainId) => api.post(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/${uuid(domainId)}/deactivate/`, {}),
+  domainAvailability: (projectId, envId, domainId, hostname, options = {}) => api.get(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/${uuid(domainId)}/availability/?hostname=${encodeURIComponent(hostname)}`, options),
   renameDomain: (projectId, envId, domainId, hostname) => api.patch(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/${uuid(domainId)}/rename/`, {hostname}),
   deleteDomain: (projectId, envId, domainId) => api.delete(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/domains/${uuid(domainId)}/delete/`),
 })

@@ -262,40 +262,172 @@ def remove_domain(user, project_id, environment_id, domain_id):
         domain.delete()
 
 
-def rename_pending_managed_domain(user, project_id, environment_id, domain_id, hostname):
-    """Rename only an inactive managed reservation; never switch live DNS blindly.
+def check_managed_domain_availability(user, project_id, environment_id, domain_id, hostname):
+    """Check application ownership AND the authoritative DNS provider, without writes.
 
-    Active hosts need a zero-downtime alias: create it, verify HTTPS, make it
-    primary if needed, and then delete the old alias.
+    This is advisory only. The mutating endpoint checks again, because another
+    request can reserve the name after an availability lookup.
     """
     _, env = get_environment(user, project_id, environment_id, write=True)
+    host = _validate_managed_rename_host(hostname)
+    original = Domain.objects.filter(environment=env, pk=domain_id).first()
+    if original is None or original.domain_type != Domain.Type.SUBDOMAIN:
+        raise ValidationError({'domain': 'Sous-domaine AUTOKOM introuvable.'})
+    if original.hostname == host:
+        return {'available': False, 'reason': 'unchanged'}
+    if Domain.objects.filter(hostname=host).exists():
+        return {'available': False, 'reason': 'reserved'}
+    # The broker knows about Cloudflare A/CNAME records and protected Nginx vhosts.
+    result = request_control('domain.available', {'hostname': host}, timeout=18)
+    return {'available': result.get('available') is True,
+            'reason': str(result.get('reason', 'unavailable'))[:40]}
+
+
+def _validate_managed_rename_host(hostname):
     host = validate_hostname(hostname)
-    if not _managed(host):
-        raise ValidationError({'hostname': 'Modifier uniquement le préfixe de la zone AUTOKOM.'})
     suffix = settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX.lower().strip('.')
-    if host.count('.') != suffix.count('.') + 1:
-        raise ValidationError({'hostname': 'Seul le préfixe peut être modifié.'})
+    if (not _managed(host) or host.count('.') != suffix.count('.') + 1):
+        raise ValidationError({'hostname': 'Seul le préfixe avant auto.ikom.mg peut être modifié.'})
     if host in ('backend.auto.ikom.mg', 'auto.ikom.mg'):
         raise ValidationError({'hostname': 'Nom réservé au service IKOM.'})
+    return host
+
+
+def rename_pending_managed_domain(user, project_id, environment_id, domain_id, hostname):
+    """Safely rename pending domains, or migrate an ACTIVE domain over HTTPS.
+
+    For active domains publish/verify a new alias first, switch the primary
+    only after its HTTPS probe succeeds, then remove the old alias. On failure
+    the existing public address remains online; any uncleared alias remains
+    visible in the database for administrator reconciliation.
+    """
+    project, env = get_environment(user, project_id, environment_id, write=True)
+    host = _validate_managed_rename_host(hostname)
     with transaction.atomic():
+        from apps.projects.project.models import Project
+        Project.objects.select_for_update().get(pk=project.pk)
         _reject_domain_mutation_during_deployment(env)
         domain = Domain.objects.select_for_update().filter(environment=env, pk=domain_id).first()
-        if domain is None:
-            raise ValidationError({'domain': 'Domaine introuvable.'})
-        if domain.domain_type != Domain.Type.SUBDOMAIN:
-            raise ValidationError({'domain': 'Seul un sous-domaine AUTOKOM peut être renommé ici.'})
-        if domain.status != Domain.Status.PENDING or domain.verified_at or domain.tls_status:
-            raise ValidationError({'domain': 'Adresse déjà utilisée : ajoutez la nouvelle adresse, activez HTTPS et supprimez ensuite l’ancienne.'})
+        if domain is None or domain.domain_type != Domain.Type.SUBDOMAIN:
+            raise ValidationError({'domain': 'Sous-domaine AUTOKOM introuvable.'})
         if host == domain.hostname:
-            return domain
+            return {'domain': domain, 'previous_retained': False, 'activated': domain.status == Domain.Status.ACTIVE}
         if Domain.objects.filter(hostname=host).exists():
-            raise ValidationError({'hostname': 'Ce domaine est déjà enregistré.'})
-        # Cleanup any partially provisioned DNS before changing its owner record.
+            raise ValidationError({'hostname': 'Ce sous-domaine est déjà réservé.'})
+        active = (domain.status == Domain.Status.ACTIVE and
+                  domain.tls_status == 'ACTIVE' and domain.verified_at is not None and
+                  not domain.is_disabled)
+        pending = (domain.status == Domain.Status.PENDING and
+                   domain.verified_at is None and not domain.tls_status and
+                   not domain.is_disabled)
+        if not (active or pending):
+            raise ValidationError({'domain': 'Adresse dans un état incompatible avec une modification.'})
+        available = request_control('domain.available', {'hostname': host}, timeout=18)
+        if available.get('available') is not True:
+            raise ValidationError({'hostname': 'Ce préfixe est déjà utilisé. Choisissez-en un autre.'})
+        if pending:
+            # No active DNS/HTTPS will be taken offline. Remove only an owned
+            # pending record, and only then rename this reservation.
+            request_control('domain.remove', {
+                'hostname': domain.hostname, 'environment_id': str(env.pk), 'managed': True,
+            }, timeout=90)
+            domain.hostname = host
+            domain.activation_error_code = ''
+            domain.save(update_fields=['hostname', 'activation_error_code', 'updated_at'])
+            return {'domain': domain, 'previous_retained': False, 'activated': False}
+
+        # Reserve in DB before the slow Cloudflare + ACME operations to stop
+        # concurrent projects from taking the hostname. No existing site is changed.
+        staged = Domain.objects.create(
+            environment=env, organization=project.organization,
+            hostname=host, domain_type=Domain.Type.SUBDOMAIN,
+            status=Domain.Status.VERIFYING, is_primary=False, is_disabled=True,
+        )
+        staged.verification_token_hash = hashlib.sha256(_challenge(staged).encode()).hexdigest()
+        staged.save(update_fields=['verification_token_hash'])
+        old_id = domain.pk
+        old_host = domain.hostname
+
+    token = _challenge(staged)
+    try:
+        request_control('domain.dns.create', {'hostname': host}, timeout=22)
+        # DNS takes time to propagate; retry only the known propagation failure.
+        from apps.deployments.runs.autokom_socket import AutokomControlUnavailable
+        import time
+        for attempt in range(3):
+            try:
+                request_control('domain.verify', {'hostname': host, 'managed': True, 'token': token}, timeout=20)
+                break
+            except AutokomControlUnavailable as exc:
+                if getattr(exc, 'safe_code', None) != 'AUTOKOM_DNS_A_MISMATCH' or attempt == 2:
+                    raise
+                time.sleep((attempt + 1) * 3)
+        # Broker verifies real HTTPS against the existing healthy environment.
+        request_control('domain.activate', {
+            'hostname': host, 'environment_id': str(env.pk),
+            'managed': True, 'token': token,
+        }, timeout=720)
+    except Exception:
+        # Cleanup only our just-staged name, NEVER the original live address.
+        try:
+            request_control('domain.remove', {
+                'hostname': host, 'environment_id': str(env.pk), 'managed': True,
+            }, timeout=90)
+        except Exception:
+            # Preserve the reservation so it cannot be claimed by another user.
+            staged.status = Domain.Status.ERROR
+            staged.activation_error_code = 'AUTOKOM_DOMAIN_RENAME_RECONCILE_REQUIRED'
+            staged.save(update_fields=['status', 'activation_error_code'])
+        else:
+            staged.delete()
+        raise
+
+    # The new HTTPS endpoint is live: atomically switch primary ownership.
+    try:
+        with transaction.atomic():
+            _reject_domain_mutation_during_deployment(env)
+            original = Domain.objects.select_for_update().get(pk=old_id, environment=env)
+            replacement = Domain.objects.select_for_update().get(pk=staged.pk, environment=env)
+            was_primary = original.is_primary
+            # Prevent scheduled domain reconciliation from republishing the old
+            # alias while its owned DNS and vhost are being retired.
+            original.is_primary = False
+            original.is_disabled = True
+            original.save(update_fields=['is_primary', 'is_disabled'])
+            if was_primary:
+                replacement.is_primary = True
+            replacement.verified_at = timezone.now()
+            replacement.status = Domain.Status.ACTIVE
+            replacement.tls_status = 'ACTIVE'
+            replacement.is_disabled = False
+            replacement.activation_error_code = ''
+            replacement.save(update_fields=[
+                'is_primary', 'verified_at', 'status', 'tls_status', 'is_disabled', 'activation_error_code',
+            ])
+    except Exception:
+        # A deployment may have started while ACME was running. If the database
+        # cannot switch, the original domain remains primary and reachable.
+        try:
+            request_control('domain.remove', {
+                'hostname': host, 'environment_id': str(env.pk), 'managed': True,
+            }, timeout=90)
+        except Exception:
+            staged.status = Domain.Status.ERROR
+            staged.activation_error_code = 'AUTOKOM_DOMAIN_RENAME_RECONCILE_REQUIRED'
+            staged.save(update_fields=['status', 'activation_error_code'])
+        else:
+            staged.delete()
+        raise
+
+    # Remove the old domain only after the new public site is demonstrably live.
+    # Failure here must never roll back the new working primary or erase old DNS.
+    try:
         request_control('domain.remove', {
-            'hostname': domain.hostname, 'environment_id': str(env.pk), 'managed': True,
+            'hostname': old_host, 'environment_id': str(env.pk), 'managed': True,
         }, timeout=90)
-        domain.hostname = host
-        domain.is_disabled = False
-        domain.activation_error_code = ''
-        domain.save(update_fields=['hostname', 'is_disabled', 'activation_error_code', 'updated_at'])
-    return domain
+    except Exception:
+        original.activation_error_code = 'AUTOKOM_DOMAIN_OLD_ALIAS_CLEANUP_PENDING'
+        original.save(update_fields=['activation_error_code'])
+        return {'domain': replacement, 'previous_retained': True, 'activated': True}
+    original.delete()
+    return {'domain': replacement, 'previous_retained': False, 'activated': True}

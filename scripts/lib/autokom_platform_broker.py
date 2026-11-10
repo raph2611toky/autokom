@@ -707,6 +707,45 @@ def _cloudflare_settings():
     return {'zone':zone,'token':token,'zone_name':zone_name,'suffix':suffix,'address':address}
 
 
+def _managed_hostname_available(host):
+    """Read-only check of the authoritative DNS zone and local vhost ownership.
+
+    A matching record (even pointing at our ingress) is considered occupied;
+    domain edits must never take over pre-existing DNS entries.
+    """
+    host = valid_hostname(host)
+    config = _cloudflare_settings()
+    suffix = config['suffix']
+    if not host.endswith('.' + suffix) or host.count('.') != suffix.count('.') + 1:
+        raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH')
+    if host in ('backend.' + suffix,):
+        return {'available': False, 'reason': 'reserved'}
+    owner = STATE / ('domain-owner-' + host + '.txt')
+    if owner.exists() or owner.is_symlink():
+        return {'available': False, 'reason': 'runtime_reserved'}
+    name = 'autokom-customer-' + host + '.conf'
+    if (PROXY / name).exists() or (PROXY / name).is_symlink() or (ENABLED / name).exists() or (ENABLED / name).is_symlink():
+        return {'available': False, 'reason': 'runtime_reserved'}
+    base = 'https://api.cloudflare.com/client/v4/zones/' + config['zone'] + '/dns_records'
+    req = Request(base + '?' + urlencode({'name': host, 'per_page': 100}),
+                  headers={'Authorization': 'Bearer ' + config['token']})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as response:
+            document = json.load(response)
+    except (HTTPError, OSError, ValueError, TimeoutError) as exc:
+        raise BrokerError('AUTOKOM_CF_DNS_UNAVAILABLE') from exc
+    if not isinstance(document, dict) or document.get('success') is not True:
+        raise BrokerError('AUTOKOM_CF_DNS_UNAVAILABLE')
+    records = document.get('result')
+    if not isinstance(records, list) or len(records) >= 100:
+        raise BrokerError('AUTOKOM_CF_DNS_UNAVAILABLE')
+    occupied = any(isinstance(record, dict) and
+                   str(record.get('name', '')).rstrip('.').lower() == host and
+                   record.get('type') in ('A', 'AAAA', 'CNAME')
+                   for record in records)
+    return {'available': not occupied, 'reason': 'dns_reserved' if occupied else 'available'}
+
+
 def _cloudflare_record(host):
     settings = _cloudflare_settings()
     suffix,zone,token = settings['suffix'],settings['zone'],settings['token']
@@ -1454,6 +1493,8 @@ def handle(action,params):
     if action=='domain.inspect':return _domain_inspect(params)
     if action=='domain.verify':
         return _check_dns(params.get('hostname'),params.get('token'),params.get('managed') is True)
+    if action=='domain.available':
+        return _managed_hostname_available(params.get('hostname'))
     if action=='domain.dns.create':
         return _cloudflare_record(valid_hostname(params.get('hostname')))
     if action=='domain.activate':

@@ -21,7 +21,7 @@ def request_control(action, params=None, *, timeout=30):
     if action not in {
         'ping', 'jenkins.dispatch','jenkins.state','jenkins.console','jenkins.cancel',
         'runtime.deploy','runtime.status','runtime.logs','runtime.diagnostics','runtime.rollback','runtime.commit','runtime.commit_pair','runtime.deprovision',
-        'domain.config.check','domain.verify','domain.dns.create','domain.activate','domain.deactivate','domain.remove','domain.inspect',
+        'domain.config.check','domain.available','domain.verify','domain.dns.create','domain.activate','domain.deactivate','domain.remove','domain.inspect',
     }:
         raise AutokomControlUnavailable('Opération non autorisée.')
     body = (json.dumps({'action':action,'params':params or {}},separators=(',',':'))+'\n').encode('utf-8')

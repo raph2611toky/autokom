@@ -7,7 +7,7 @@ from apps.projects.common import get_environment
 from apps.deployments.domains.models import Domain
 from apps.deployments.runs.autokom_socket import request_control, AutokomControlUnavailable
 from apps.deployments.domains.serializers import DomainCreateSerializer
-from apps.deployments.domains.services import claim_domain,domain_summary,verify_and_activate,choose_primary_domain,deactivate_domain,remove_domain,rename_pending_managed_domain
+from apps.deployments.domains.services import claim_domain,domain_summary,verify_and_activate,choose_primary_domain,deactivate_domain,remove_domain,rename_pending_managed_domain,check_managed_domain_availability
 from apps.deployments.domains.swagger.domain_list import schema as list_schema
 from apps.deployments.domains.swagger.domain_create import schema as create_schema
 from apps.deployments.domains.swagger.domain_verify import schema as verify_schema
@@ -129,10 +129,34 @@ class DomainRenameAPIView(APIView):
             from apps.deployments.domains.serializers import DomainRenameSerializer
             serializer = DomainRenameSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
-            domain = rename_pending_managed_domain(
+            result = rename_pending_managed_domain(
                 request.user, project_id, environment_id, domain_id,
                 serializer.validated_data['hostname'])
-            return api_success({'domain': domain_summary(domain, include_challenge=True)},
-                               'Préfixe du domaine modifié.')
+            retained = result['previous_retained']
+            if retained:
+                message = 'Nouvelle adresse HTTPS active. Nettoyage de l’ancienne adresse à finaliser.'
+            elif result['activated']:
+                message = 'Nouvelle adresse HTTPS activée ; ancienne adresse retirée.'
+            else:
+                message = 'Préfixe modifié. L’activation DNS/HTTPS suivra la prochaine publication.'
+            return api_success({'domain': domain_summary(result['domain'], include_challenge=True),
+                                'previous_retained': retained,
+                                'activated': result['activated']}, message)
         except Exception as exc:
             return handle_error(exc, 'domain_rename')
+
+
+class DomainAvailabilityAPIView(APIView):
+    permission_classes = [IsClientUser]
+    parser_classes = [JSONParser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'domains'
+
+    def get(self, request, project_id, environment_id, domain_id):
+        try:
+            result = check_managed_domain_availability(
+                request.user, project_id, environment_id, domain_id,
+                request.query_params.get('hostname', ''))
+            return api_success(result, 'Disponibilité vérifiée dans AUTOKOM et le DNS géré.')
+        except Exception as exc:
+            return handle_error(exc, 'domain_availability')

@@ -1,5 +1,5 @@
 from django.urls import path
-from apps.deployments.domains.views import DomainListAPIView,DomainCreateAPIView,DomainVerifyAPIView,DomainPrimaryAPIView,DomainDeactivateAPIView,DomainDeleteAPIView,DomainRenameAPIView
+from apps.deployments.domains.views import DomainListAPIView,DomainCreateAPIView,DomainVerifyAPIView,DomainPrimaryAPIView,DomainDeactivateAPIView,DomainDeleteAPIView,DomainRenameAPIView,DomainAvailabilityAPIView
 app_name='client_domains'
 urlpatterns=[
     path('<uuid:project_id>/environments/<uuid:environment_id>/domains/',DomainListAPIView.as_view(),name='list'),
@@ -8,5 +8,6 @@ urlpatterns=[
     path('<uuid:project_id>/environments/<uuid:environment_id>/domains/<uuid:domain_id>/primary/',DomainPrimaryAPIView.as_view(),name='primary'),
     path('<uuid:project_id>/environments/<uuid:environment_id>/domains/<uuid:domain_id>/deactivate/',DomainDeactivateAPIView.as_view(),name='deactivate'),
     path('<uuid:project_id>/environments/<uuid:environment_id>/domains/<uuid:domain_id>/delete/',DomainDeleteAPIView.as_view(),name='delete'),
+    path('<uuid:project_id>/environments/<uuid:environment_id>/domains/<uuid:domain_id>/availability/',DomainAvailabilityAPIView.as_view(),name='availability'),
     path('<uuid:project_id>/environments/<uuid:environment_id>/domains/<uuid:domain_id>/rename/',DomainRenameAPIView.as_view(),name='rename'),
 ]
