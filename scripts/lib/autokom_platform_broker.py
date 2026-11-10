@@ -607,7 +607,24 @@ def _domain_config_check(params):
     This is strictly read-only and must run BEFORE Jenkins dispatch. Do not
     weaken the allowed suffix or silently authorize a different Cloudflare zone.
     """
-    config = _cloudflare_settings()
+    try:
+        config = _cloudflare_settings()
+    except BrokerError:
+        # The UI can still display public DNS parameters when Cloudflare is
+        # not provisioned. Build dispatch with managed_hosts stays fail-closed.
+        if params.get('managed_hosts') is not None:
+            raise
+        runtime = _runtime_dns_env()
+        suffix = str(runtime.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX', '')).strip('.').lower()
+        ingress = str(runtime.get('AUTOKOM_INGRESS_IPV4', '')).strip()
+        try:
+            if not ipaddress.IPv4Address(ingress).is_global:
+                ingress = ''
+        except ValueError:
+            ingress = ''
+        return {'ready': False, 'ingress_ipv4': ingress,
+                'managed_suffix': suffix if HOSTNAME.fullmatch('test.' + suffix) else '',
+                'dns_zone': ''}
     suffix = config['suffix']
     declared = params.get('managed_suffix')
     if declared is not None:
@@ -715,10 +732,85 @@ def _cloudflare_record(host):
             if record_type=='CNAME' or len(results)!=1 or results[0].get('content')!=ingress or results[0].get('proxied') is not False:
                 raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Enregistrement DNS existant différent.')
             return {'created':False}
-    payload=json.dumps({'type':'A','name':host,'content':ingress,'ttl':120,'proxied':False}).encode()
+    payload=json.dumps({'type':'A','name':host,'content':ingress,'ttl':120,'proxied':False,
+                        'comment':'AUTOKOM managed A record'}).encode()
     req=Request(base,data=payload,headers=headers,method='POST')
     cloudflare(req)
     return {'created':True}
+
+def _cloudflare_remove_owned_record(host, *, legacy_owned_vhost=False, dry_run=False):
+    """Delete only an AUTOKOM-owned managed A record, never arbitrary DNS.
+
+    Legacy records without the ownership comment are removable only if AUTOKOM
+    had an exact matching runtime owner marker for the same environment.
+    An untagged, pending legacy record requires administrator reconciliation.
+    """
+    config = _cloudflare_settings()
+    if not host.endswith('.' + config['suffix']) or host == config['suffix']:
+        raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH: DNS hors zone gérée.')
+    base = 'https://api.cloudflare.com/client/v4/zones/' + config['zone'] + '/dns_records'
+    headers = {'Authorization': 'Bearer ' + config['token'], 'Content-Type': 'application/json'}
+    query = Request(base + '?' + urlencode({'name': host, 'type': 'A', 'per_page': 100}), headers=headers)
+    try:
+        with urllib.request.urlopen(query, timeout=12) as response:
+            doc = json.load(response)
+    except (HTTPError, OSError, ValueError, TimeoutError) as exc:
+        raise BrokerError('AUTOKOM_CF_DNS_UNAVAILABLE: Lecture DNS impossible.') from exc
+    if not isinstance(doc, dict) or doc.get('success') is not True:
+        raise BrokerError('AUTOKOM_CF_DNS_REJECTED: Lecture DNS refusée.')
+    records = [record for record in (doc.get('result') or [])
+               if isinstance(record, dict) and record.get('name', '').rstrip('.').lower() == host]
+    if not records:
+        return {'deleted': False}
+    if len(records) != 1:
+        raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Plusieurs enregistrements A.')
+    record = records[0]
+    identifier = record.get('id', '')
+    if (record.get('type') != 'A' or record.get('content') != config['address']
+            or record.get('proxied') is not False
+            or not isinstance(identifier, str) or not re.fullmatch(r'[a-f0-9]{32}', identifier)):
+        raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Enregistrement DNS non conforme.')
+    if record.get('comment') != 'AUTOKOM managed A record' and not legacy_owned_vhost:
+        raise BrokerError('AUTOKOM_DOMAIN_DNS_UNOWNED: Suppression DNS manuelle requise pour cet ancien enregistrement.')
+    if dry_run:
+        return {'deletable': True}
+    try:
+        with urllib.request.urlopen(Request(base + '/' + identifier, headers=headers, method='DELETE'), timeout=12) as response:
+            result = json.load(response)
+    except (HTTPError, OSError, ValueError, TimeoutError) as exc:
+        raise BrokerError('AUTOKOM_CF_DNS_UNAVAILABLE: Suppression DNS impossible.') from exc
+    if not isinstance(result, dict) or result.get('success') is not True:
+        raise BrokerError('AUTOKOM_CF_DNS_REJECTED: Suppression DNS refusée.')
+    return {'deleted': True}
+
+
+def _remove_owned_domain(params):
+    """Unpublish and clean up an owned host; client DB deletion happens later.
+
+    This operation is retriable. Never remove an unrelated Nginx vhost,
+    Cloudflare record or TLS certificate. External DNS is user-controlled.
+    """
+    host = valid_hostname(params.get('hostname'))
+    env = valid_id(params.get('environment_id'))
+    managed = params.get('managed') is True
+    runtime = _runtime_dns_env()
+    suffix = str(runtime.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX', '')).strip('.').lower()
+    if managed != bool(suffix and host.endswith('.' + suffix) and host != suffix):
+        raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH')
+    owner = STATE / ('domain-owner-' + host + '.txt')
+    if owner.is_symlink():
+        raise BrokerError('AUTOKOM_DOMAIN_OWNERSHIP_MISMATCH')
+    owned = owner.is_file() and owner.read_text(encoding='utf-8').strip() == env
+    # Probe the Cloudflare record and ownership first: never take a working
+    # Nginx vhost offline just to discover DNS cannot be safely removed.
+    if managed:
+        _cloudflare_remove_owned_record(host, legacy_owned_vhost=owned, dry_run=True)
+    # `_deactivate_owned_vhost` validates the marker and restores on failure.
+    _deactivate_owned_vhost(host, env)
+    if managed:
+        _cloudflare_remove_owned_record(host, legacy_owned_vhost=owned)
+    return {'removed': True, 'managed_dns_cleaned': managed}
+
 
 def _nginx_config(host,port,tls=False,*,gateway_port=None,gateway_hostname=None):
     if type(port)!=int or not 1024<=port<=65535:raise BrokerError('Port upstream invalide.')
@@ -1357,6 +1449,8 @@ def handle(action,params):
         # Serialise Nginx / Certbot with runtime deploy, rollback and removal.
         # A domain retry cannot rewrite a vhost while another release changes state.
         return _runtime_lock_call(_activate_owned_domain,params)
+    if action=='domain.remove':
+        return _runtime_lock_call(_remove_owned_domain, params)
     if action=='domain.deactivate':
         return _runtime_lock_call(lambda p: {'deactivated':_deactivate_owned_vhost(valid_hostname(p.get('hostname')),valid_id(p.get('environment_id')))},params)
     raise BrokerError('Opération non autorisée.')

@@ -29,6 +29,10 @@ def claim_domain(user,project_id,environment_id,hostname,domain_type):
         raise ValidationError({'domain_type':'SUBDOMAIN ou CUSTOM attendu.'})
     if (domain_type==Domain.Type.SUBDOMAIN)!=_managed(host):
         raise ValidationError({'hostname':'Domaine géré AUTOKOM ou externe incohérent.'})
+    if domain_type == Domain.Type.SUBDOMAIN:
+        suffix = settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX.lower().strip('.')
+        if host.count('.') != suffix.count('.') + 1:
+            raise ValidationError({'hostname': 'Saisissez un seul préfixe avant auto.ikom.mg.'})
     if host in ('backend.auto.ik0m.tech','auto.ik0m.tech','backend.auto.ikom.mg','auto.ikom.mg','ikom.mg','www.ikom.mg'):
         raise ValidationError({'hostname':'Nom de domaine réservé au service IKOM.'})
     with transaction.atomic():
@@ -198,4 +202,80 @@ def activate_stack_domain_for_release(environment, hostname):
     domain.tls_status = 'ACTIVE'
     domain.activation_error_code = ''
     domain.save(update_fields=['verified_at', 'status', 'tls_status', 'activation_error_code'])
+    return domain
+
+
+def _reject_domain_mutation_during_deployment(environment):
+    """Do not mutate domain ownership while workers may publish that hostname."""
+    from django.db.models import Q
+    from apps.deployments.runs.models import DeploymentRun, StackDeployment
+    if DeploymentRun.objects.filter(environment=environment, status__in=['QUEUED', 'RUNNING', 'PREPARED']).exists():
+        raise ValidationError({'domain': 'Publication en cours : réessayez une fois le déploiement terminé.'})
+    if StackDeployment.objects.filter(
+        Q(stack__frontend_environment=environment) | Q(stack__backend_environment=environment),
+        status__in=['QUEUED', 'PREPARING', 'ACTIVATING', 'BLOCKED'],
+    ).exists():
+        raise ValidationError({'domain': 'Publication groupée en cours ou à réconcilier.'})
+
+
+def remove_domain(user, project_id, environment_id, domain_id):
+    """Permanently remove non-primary aliases, keeping at least two addresses.
+
+    Do not delete the database reservation unless the privileged broker confirms
+    Nginx teardown and (for managed hosts) owned DNS record cleanup.
+    """
+    _, env = get_environment(user, project_id, environment_id, write=True)
+    with transaction.atomic():
+        _reject_domain_mutation_during_deployment(env)
+        aliases = Domain.objects.select_for_update().filter(environment=env)
+        domain = aliases.filter(pk=domain_id).first()
+        if domain is None:
+            raise ValidationError({'domain': 'Domaine introuvable.'})
+        if aliases.count() <= 2:
+            raise ValidationError({'domain': 'Conserver au moins deux domaines. Ajoutez un remplaçant avant de supprimer.'})
+        if domain.is_primary:
+            raise ValidationError({'domain': 'Définissez un autre domaine principal avant de supprimer celui-ci.'})
+        request_control('domain.remove', {
+            'hostname': domain.hostname, 'environment_id': str(env.pk),
+            'managed': domain.domain_type == Domain.Type.SUBDOMAIN,
+        }, timeout=90)
+        domain.delete()
+
+
+def rename_pending_managed_domain(user, project_id, environment_id, domain_id, hostname):
+    """Rename only an inactive managed reservation; never switch live DNS blindly.
+
+    Active hosts need a zero-downtime alias: create it, verify HTTPS, make it
+    primary if needed, and then delete the old alias.
+    """
+    _, env = get_environment(user, project_id, environment_id, write=True)
+    host = validate_hostname(hostname)
+    if not _managed(host):
+        raise ValidationError({'hostname': 'Modifier uniquement le préfixe de la zone AUTOKOM.'})
+    suffix = settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX.lower().strip('.')
+    if host.count('.') != suffix.count('.') + 1:
+        raise ValidationError({'hostname': 'Seul le préfixe peut être modifié.'})
+    if host in ('backend.auto.ikom.mg', 'auto.ikom.mg'):
+        raise ValidationError({'hostname': 'Nom réservé au service IKOM.'})
+    with transaction.atomic():
+        _reject_domain_mutation_during_deployment(env)
+        domain = Domain.objects.select_for_update().filter(environment=env, pk=domain_id).first()
+        if domain is None:
+            raise ValidationError({'domain': 'Domaine introuvable.'})
+        if domain.domain_type != Domain.Type.SUBDOMAIN:
+            raise ValidationError({'domain': 'Seul un sous-domaine AUTOKOM peut être renommé ici.'})
+        if domain.status != Domain.Status.PENDING or domain.verified_at or domain.tls_status:
+            raise ValidationError({'domain': 'Adresse déjà utilisée : ajoutez la nouvelle adresse, activez HTTPS et supprimez ensuite l’ancienne.'})
+        if host == domain.hostname:
+            return domain
+        if Domain.objects.filter(hostname=host).exists():
+            raise ValidationError({'hostname': 'Ce domaine est déjà enregistré.'})
+        # Cleanup any partially provisioned DNS before changing its owner record.
+        request_control('domain.remove', {
+            'hostname': domain.hostname, 'environment_id': str(env.pk), 'managed': True,
+        }, timeout=90)
+        domain.hostname = host
+        domain.is_disabled = False
+        domain.activation_error_code = ''
+        domain.save(update_fields=['hostname', 'is_disabled', 'activation_error_code', 'updated_at'])
     return domain

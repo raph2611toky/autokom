@@ -7,7 +7,7 @@ from apps.projects.common import get_environment
 from apps.deployments.domains.models import Domain
 from apps.deployments.runs.autokom_socket import request_control, AutokomControlUnavailable
 from apps.deployments.domains.serializers import DomainCreateSerializer
-from apps.deployments.domains.services import claim_domain,domain_summary,verify_and_activate,choose_primary_domain,deactivate_domain
+from apps.deployments.domains.services import claim_domain,domain_summary,verify_and_activate,choose_primary_domain,deactivate_domain,remove_domain,rename_pending_managed_domain
 from apps.deployments.domains.swagger.domain_list import schema as list_schema
 from apps.deployments.domains.swagger.domain_create import schema as create_schema
 from apps.deployments.domains.swagger.domain_verify import schema as verify_schema
@@ -31,9 +31,9 @@ class DomainListAPIView(APIView):
             setup = None
             try:
                 config = request_control('domain.config.check', {}, timeout=10)
-                if config.get('ready') is True:
-                    setup = {key:config[key] for key in ('ingress_ipv4','managed_suffix','dns_zone')
-                             if isinstance(config.get(key),str) and config[key]}
+                setup = {key:config[key] for key in ('ingress_ipv4','managed_suffix','dns_zone')
+                         if isinstance(config.get(key),str) and config[key]}
+                setup['ready'] = config.get('ready') is True
             except AutokomControlUnavailable:
                 pass
             return api_success({'domains':results,'dns_setup':setup},'Domaines liés à cet environnement.')
@@ -102,3 +102,37 @@ class DomainDeactivateAPIView(APIView):
             return api_success({'domain':domain_summary(d)}, 'Domaine désactivé. Son nom reste réservé.')
         except Exception as exc:
             return handle_error(exc,'domain_deactivate')
+
+
+class DomainDeleteAPIView(APIView):
+    permission_classes = [IsClientUser]
+    parser_classes = [JSONParser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'domains'
+
+    def delete(self, request, project_id, environment_id, domain_id):
+        try:
+            remove_domain(request.user, project_id, environment_id, domain_id)
+            return api_success(None, 'Domaine supprimé définitivement de ce projet.')
+        except Exception as exc:
+            return handle_error(exc, 'domain_delete')
+
+
+class DomainRenameAPIView(APIView):
+    permission_classes = [IsClientUser]
+    parser_classes = [JSONParser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'domains'
+
+    def patch(self, request, project_id, environment_id, domain_id):
+        try:
+            from apps.deployments.domains.serializers import DomainRenameSerializer
+            serializer = DomainRenameSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            domain = rename_pending_managed_domain(
+                request.user, project_id, environment_id, domain_id,
+                serializer.validated_data['hostname'])
+            return api_success({'domain': domain_summary(domain, include_challenge=True)},
+                               'Préfixe du domaine modifié.')
+        except Exception as exc:
+            return handle_error(exc, 'domain_rename')

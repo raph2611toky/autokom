@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, ArrowRight, CheckCircle2, Download, ExternalLink, GitBranch, Globe2, Info, LoaderCircle, Plus, Rocket, Search, ShieldCheck } from 'lucide-react'
+import { ArrowLeft, ArrowRight, CheckCircle2, Download, ExternalLink, GitBranch, Globe2, Info, LoaderCircle, Pencil, Plus, Rocket, Search, ShieldCheck, Trash2, X } from 'lucide-react'
 import { projectsApi } from '../services/projectsApi.js'
 import { errorText, getRemoteProjectDetail, listRemoteProjectRecords } from '../services/projectWorkflow.js'
 import { publicSiteUrl, siteStateLabel } from '../services/sitePresentation.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
 import ActionDialog from '../components/ActionDialog.jsx'
 import { downloadDnsGuide } from '../services/domainGuide.js'
+import { AUTOKOM_DOMAIN_SUFFIX, managedDomainHost, managedDomainPrefix } from '../services/managedDomain.js'
 
 /** Domains are backed by real Django and broker state: no demo or guessed public URLs. */
 export default function LiveSites({ navigate, projectId = null }) {
@@ -14,13 +15,14 @@ export default function LiveSites({ navigate, projectId = null }) {
   const [domains, setDomains] = useState([])
   const [query, setQuery] = useState('')
   const [hostname, setHostname] = useState('')
-  const [domainType, setDomainType] = useState('CUSTOM')
+  const [domainType, setDomainType] = useState('SUBDOMAIN')
   const [dnsSetup, setDnsSetup] = useState(null)
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
-  const [domainToDisable, setDomainToDisable] = useState(null)
+  const [domainToDelete, setDomainToDelete] = useState(null)
+  const [editingDomain, setEditingDomain] = useState(null)
 
   async function refreshDomains(info) {
     const actual = info || detail
@@ -76,14 +78,47 @@ export default function LiveSites({ navigate, projectId = null }) {
     finally { setBusy(false) }
   }
 
+  function beginEdit(domain) {
+    setError(''); setNotice('')
+    setEditingDomain(domain)
+    setDomainType(domain.domain_type)
+    setHostname(domain.domain_type === 'SUBDOMAIN'
+      ? managedDomainPrefix(domain.hostname) : domain.hostname)
+    document.getElementById('ak-domain-form')?.scrollIntoView({behavior:'smooth', block:'center'})
+  }
+
+  function cancelEdit() {
+    setEditingDomain(null)
+    setHostname('')
+  }
+
   async function addDomain(event) {
     event.preventDefault()
-    const host = hostname.trim().toLowerCase().replace(/\.$/, '')
-    if (!host) return
+    let host
+    try {
+      host = domainType === 'SUBDOMAIN'
+        ? managedDomainHost(hostname, dnsSetup?.managed_suffix || AUTOKOM_DOMAIN_SUFFIX)
+        : hostname.trim().toLowerCase().replace(/\.$/, '')
+      if (!host) return
+    } catch (err) { setError(errorText(err)); return }
+    const changing = editingDomain
     await perform(async () => {
-      await projectsApi.createDomain(detail.project.id, detail.environment.id, host, domainType)
+      if (changing && changing.domain_type === 'SUBDOMAIN'
+          && changing.status === 'PENDING' && !changing.verified && !changing.https
+          && !changing.is_disabled) {
+        await projectsApi.renameDomain(detail.project.id, detail.environment.id, changing.id, host)
+      } else {
+        // Active domains are never renamed in place: preserve current HTTPS.
+        // The replacement becomes a new alias until explicitly promoted.
+        await projectsApi.createDomain(detail.project.id, detail.environment.id, host, domainType)
+      }
       setHostname('')
-    }, 'Domaine réservé. AUTOKOM prépare automatiquement DNS et HTTPS pour les sous-domaines gérés.')
+      setEditingDomain(null)
+    }, changing
+      ? (changing.status === 'PENDING' && !changing.verified && !changing.https
+          ? 'Préfixe modifié. La vérification DNS/HTTPS suivra la prochaine publication.'
+          : 'Nouvelle adresse réservée. L’ancienne reste active jusqu’à ce que vous activiez HTTPS puis supprimiez l’ancien domaine.')
+      : 'Domaine réservé. AUTOKOM prépare automatiquement DNS et HTTPS pour les sous-domaines gérés.')
   }
 
   function guide(domain) {
@@ -115,19 +150,22 @@ export default function LiveSites({ navigate, projectId = null }) {
             <div className="ak-domain-entry-actions">
               {!domain.https && <button type="button" className="button-outline" disabled={busy} onClick={() => perform(() => projectsApi.verifyDomain(detail.project.id, detail.environment.id, domain.id), 'Vérification DNS/HTTPS demandée.')}><ShieldCheck size={15}/> Activer HTTPS</button>}
               {domain.https && !domain.is_primary && <button type="button" className="button-outline" disabled={busy} onClick={() => perform(() => projectsApi.primaryDomain(detail.project.id, detail.environment.id, domain.id), 'Adresse principale modifiée.')}><CheckCircle2 size={15}/> Définir comme principal</button>}
-              {domain.https && !domain.is_primary && <button type="button" className="button-quiet ak-danger-action" disabled={busy} onClick={() => {
-                setDomainToDisable(domain)
-              }}>Désactiver</button>}
+              <button type="button" className="button-outline" disabled={busy} onClick={() => beginEdit(domain)}><Pencil size={15}/> Modifier</button>
+              {domains.length > 2 && <button type="button" className="button-quiet ak-danger-action" disabled={busy || domain.is_primary} title={domain.is_primary ? 'Définissez un autre domaine principal avant suppression.' : 'Suppression définitive'} onClick={() => setDomainToDelete(domain)}><Trash2 size={15}/> Supprimer</button>}
             </div>
           </article>
         })}
-        <ActionDialog open={Boolean(domainToDisable)} title="Désactiver le domaine ?"
-          description={domainToDisable ? `${domainToDisable.hostname} ne sera plus servi publiquement. Le nom restera réservé afin d'éviter son usurpation.` : ''}
-          variant="warning" confirmLabel="Désactiver" busy={busy}
-          onClose={() => setDomainToDisable(null)}
-          onConfirm={() => { const candidate = domainToDisable; setDomainToDisable(null); if (candidate) void perform(() => projectsApi.deactivateDomain(detail.project.id, detail.environment.id, candidate.id), 'Domaine désactivé et réservé.') }}/>
-        <h3>Ajouter ou changer d’adresse</h3>
-        <p className="ak-section-subtitle">Ajoutez d’abord le nouveau domaine. Une fois HTTPS actif, définissez-le comme principal : l’ancienne adresse reste opérationnelle jusqu’à sa désactivation.</p>
+        <ActionDialog open={Boolean(domainToDelete)} title="Supprimer définitivement ce domaine ?"
+          description={domainToDelete ? `${domainToDelete.hostname} sera retiré du projet, du reverse proxy AUTOKOM et du DNS géré s'il appartient à AUTOKOM. Ce retrait ne supprime pas les enregistrements de votre fournisseur DNS externe. Cette action est irréversible.` : ''}
+          variant="warning" confirmLabel="Supprimer définitivement" busy={busy}
+          onClose={() => setDomainToDelete(null)}
+          onConfirm={() => { const candidate = domainToDelete; setDomainToDelete(null); if (candidate) void perform(() => projectsApi.deleteDomain(detail.project.id, detail.environment.id, candidate.id), 'Domaine supprimé définitivement.') }}/>
+        <h3 id="ak-domain-form">{editingDomain ? 'Modifier l’adresse' : 'Ajouter une adresse'}</h3>
+        <p className="ak-section-subtitle">{editingDomain
+          ? (editingDomain.https || editingDomain.verified
+              ? 'Le domaine actif ne sera pas interrompu : AUTOKOM réserve une nouvelle adresse. Activez son HTTPS puis définissez-la principale, avant de supprimer l’ancienne.'
+              : 'Modifiez seulement le préfixe ; le suffixe auto.ikom.mg reste fixe.')
+          : 'Les sous-domaines AUTOKOM sont créés automatiquement. Les domaines externes exigent votre configuration DNS.'}</p>
         <div className="ak-domain-instructions">
           <strong>Informations DNS</strong>
           <p>Adresse IPv4 publique d'AUTOKOM : <code>{dnsSetup?.ingress_ipv4 || 'Indisponible'}</code> · Suffixe géré : {dnsSetup?.managed_suffix || 'indisponible'}.</p>
@@ -135,20 +173,23 @@ export default function LiveSites({ navigate, projectId = null }) {
         </div>
         <form onSubmit={addDomain} className="ak-domain-manager-form ak-domain-form-details">
           <label className="ak-domain-field">Type d'adresse
-            <select value={domainType} onChange={event => setDomainType(event.target.value)} aria-label="Type du domaine">
-              <option value="CUSTOM">Domaine personnel (DNS externe)</option>
+            <select value={domainType} disabled={Boolean(editingDomain)} onChange={event => {setDomainType(event.target.value);setHostname('')}} aria-label="Type du domaine">
               <option value="SUBDOMAIN">Sous-domaine AUTOKOM (géré automatiquement)</option>
+              <option value="CUSTOM">Domaine personnel (DNS externe)</option>
             </select>
           </label>
-          <div className="ak-domain-field"><label htmlFor="ak-domain-host">Nom de domaine complet</label>
+          <div className="ak-domain-field"><label htmlFor="ak-domain-host">{domainType === 'SUBDOMAIN' ? 'Préfixe du sous-domaine' : 'Nom de domaine complet'}</label>
             <details className="ak-domain-info"><summary><Info size={15}/> Comment configurer le domaine ?</summary>
-              {domainType === 'CUSTOM' ? <p>Après ajout, créez chez votre fournisseur DNS un A vers l'IP affichée et le TXT de propriété indiqué dans la fiche. Ensuite AUTOKOM activera HTTPS.</p>
-                : <p>Choisissez un nom sous {dnsSetup?.managed_suffix || 'le suffixe AUTOKOM'}. AUTOKOM gère lui-même son enregistrement A, sa validation et HTTPS.</p>}
+              {domainType === 'CUSTOM' ? <p>Créez les enregistrements A et TXT chez votre fournisseur DNS, puis AUTOKOM vérifiera le nom avant d'activer HTTPS.</p>
+                : <p>Seul le préfixe change. Le suffixe {AUTOKOM_DOMAIN_SUFFIX} est fixe, et AUTOKOM configure son DNS.</p>}
             </details>
-            <input id="ak-domain-host" value={hostname} onChange={event => setHostname(event.target.value)} maxLength={253} required placeholder={domainType === 'SUBDOMAIN' ? `exemple.${dnsSetup?.managed_suffix || 'auto.ikom.mg'}` : 'www.monsite.mg ou monsite.mg'} />
+            {domainType === 'SUBDOMAIN' ? <div className="ak-managed-host-input"><input id="ak-domain-host" value={hostname} onChange={event => setHostname(event.target.value.toLowerCase())} maxLength={63} required placeholder="mon-portfolio" aria-label="Préfixe du sous-domaine AUTOKOM"/><span>.{AUTOKOM_DOMAIN_SUFFIX}</span></div>
+              : <input id="ak-domain-host" value={hostname} onChange={event => setHostname(event.target.value)} maxLength={253} required placeholder="www.monsite.mg ou monsite.mg" />}
           </div>
-          <div className="ak-domain-form-actions"><button type="submit" className="button-primary" disabled={busy || !hostname.trim()}>{busy ? <LoaderCircle size={15} className="ak-spin"/> : <Plus size={15}/>} Ajouter le domaine</button>
-            <button type="button" className="button-outline" disabled={!dnsSetup?.ingress_ipv4 || !hostname.trim()} onClick={() => guide({hostname:hostname.trim().toLowerCase(),domain_type:domainType})}><Download size={15}/> Télécharger le guide DNS</button>
+          <div className="ak-domain-form-actions">
+            <button type="submit" className="button-primary" disabled={busy || !hostname.trim()}>{busy ? <LoaderCircle size={15} className="ak-spin"/> : editingDomain ? <Pencil size={15}/> : <Plus size={15}/>} {editingDomain ? 'Enregistrer le changement' : 'Ajouter le domaine'}</button>
+            {editingDomain && <button type="button" className="button-outline" disabled={busy} onClick={cancelEdit}><X size={15}/> Annuler</button>}
+            <button type="button" className="button-outline" disabled={!dnsSetup?.ingress_ipv4 || !hostname.trim()} onClick={() => {try {const host=domainType === 'SUBDOMAIN' ? managedDomainHost(hostname) : hostname.trim().toLowerCase();guide({hostname:host,domain_type:domainType})}catch(err){setError(errorText(err))}}}><Download size={15}/> Télécharger le guide DNS</button>
           </div>
         </form>
       </section>

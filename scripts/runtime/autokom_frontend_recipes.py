@@ -2,6 +2,10 @@
 import json
 import re
 from pathlib import Path
+try:
+    from .autokom_npm_install import install_step
+except ImportError:  # Standalone trusted Jenkins runner.
+    from autokom_npm_install import install_step
 
 STATIC_PROFILES = frozenset({'vite', 'npm_static', 'next_export', 'html'})
 ALL_PROFILES = STATIC_PROFILES | {'next_server'}
@@ -127,9 +131,11 @@ def recipe(profile, cfg, doc):
     build_name = script_name(cfg.get('build_command'))
     base = ('FROM node:22-alpine AS builder\n'
             'WORKDIR /app\n' + declarations +
-            'COPY package.json package-lock.json ./\n'
-            'RUN npm ci --ignore-scripts --no-audit --no-fund\n'
+            'COPY package.json package-lock.json ./\n' +
+            install_step(doc.get('mode')) +
+            'RUN cp package-lock.json /tmp/autokom-effective-package-lock.json\n'
             'COPY . .\n'
+            'RUN cp /tmp/autokom-effective-package-lock.json package-lock.json\n'
             f'RUN npm run {build_name}\n')
     if profile == 'next_server':
         # For standalone exports, copy static/public into their expected relative location.

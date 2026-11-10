@@ -1054,8 +1054,6 @@ def ensure_prometheus(args, *, auth_user=None, auth_password=None):
             raise SetupError('Chemin de stockage Prometheus modifié : migration TSDB manuelle exigée '
                              f'({previous.group(1)} -> {cfg().storage_path})')
     if exists and not PROM_DROPIN.exists() and active('prometheus'):
-        # Existing deployments may have non-standard args and storage paths.
-        # Do not replace their ExecStart without explicit review.
         unit = run(['systemctl', 'cat', 'prometheus'])
         if '/usr/bin/prometheus $ARGS' not in unit:
             raise SetupError('Prometheus déjà actif avec unité personnalisée : ne pas remplacer les options de stockage')
@@ -1066,12 +1064,8 @@ def ensure_prometheus(args, *, auth_user=None, auth_password=None):
         needs_job = not re.search(job_pattern, config_text, flags=re.M)
         if (override_changed or needs_job) and not yesno('Prometheus existant : confirmer une mise à jour et son redémarrage ?', False, noninteractive=args.non_interactive):
             raise SetupError('Prometheus existant conservé : modification non autorisée')
-    # Prestage drop-in BEFORE apt starts the service, to prevent 0.0.0.0 bind.
     changed_override = owned_write(PROM_DROPIN, unit_override_prometheus())
     run(['systemctl', 'daemon-reload'])
-    # `promtool` is included by the Prometheus package on Ubuntu 24.04,
-    # but is an independent package on some newer Ubuntu releases.
-    # Never ask apt to install a package not present in its own index.
     promtool_present = bool(shutil.which('promtool'))
     if not exists or not promtool_present:
         run(['apt-get', 'update', '-qq'], timeout=240)
@@ -1228,7 +1222,6 @@ def ensure_grafana(args):
         key = Path('/etc/apt/keyrings/grafana.asc')
         key.parent.mkdir(parents=True, exist_ok=True)
         if not key.exists():
-            # Download via HTTPS and verify content is a public OpenPGP key.
             with Activity('Téléchargement de la clé officielle Grafana', delay=0.4):
                 with urllib.request.urlopen('https://apt.grafana.com/gpg-full.key', timeout=30) as p:
                     key_data = p.read(120000)

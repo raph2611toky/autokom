@@ -27,6 +27,7 @@ _RUNTIME_DIR = str(Path(__file__).resolve().parent)
 if _RUNTIME_DIR not in sys.path:
     sys.path.insert(0, _RUNTIME_DIR)
 from autokom_backend_recipes import (BACKEND_PROFILES, BACKEND_RUNTIME, backend_recipe, validate_backend_source)
+from autokom_npm_install import install_step
 # The policy is pure Python and shared with Django; never import a client module.
 _BACKEND_PY = Path(__file__).resolve().parents[2] / "platform" / "backend"
 if not (_BACKEND_PY / "apps" / "projects" / "git" / "sqlite_policy.py").is_file():
@@ -457,8 +458,10 @@ def build(doc):
             'WORKDIR /app\n'
             + vite_arg_lines
             + 'COPY package.json package-lock.json ./\n'
-            'RUN npm ci --ignore-scripts --no-audit --no-fund\n'
-            'COPY . .\n'
+            + install_step(doc.get('mode'))
+            + 'RUN cp package-lock.json /tmp/autokom-effective-package-lock.json\n'
+            + 'COPY . .\n'
+            + 'RUN cp /tmp/autokom-effective-package-lock.json package-lock.json\n'
             f'RUN npm run {build_script}\n'
             'RUN printf "%s\\n" "server {" "listen 8080;" "server_name _;" '
             '"root /usr/share/nginx/html;" "index index.html;" '
@@ -472,6 +475,8 @@ def build(doc):
     else:
         if profile in BACKEND_PROFILES:
             try:
+                # The execution mode is backend-controlled, not from the repository.
+                cfg = {**cfg, 'autokom_mode': doc.get('mode')}
                 recipe, accompanying = backend_recipe(profile, path, cfg)
                 frontend_args = []
             except (ValueError, OSError) as exc:

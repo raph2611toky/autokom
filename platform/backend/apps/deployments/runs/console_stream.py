@@ -117,17 +117,29 @@ def consume_diagnostic_chunk(previous, chunk, *, final=False):
         if marker:
             records.append(marker)
         else:
-            safe = safe_technical_line(line)
-            if safe:
-                records.append('AUTOKOM_TECH:' + safe)
+            # BuildKit prefixes trusted Dockerfile messages with step/time text.
+            # These are human diagnostics only; never used as security proof.
+            if 'AUTOKOM_NPM_LOCK_REPAIRED:' in line:
+                records.append('AUTOKOM_LOG: Lockfile npm normalisé temporairement en mode DevOps. Exécutez npm install puis committez package-lock.json dans GitHub.')
+            elif 'npm error `npm ci` can only install packages when your package.json' in line:
+                records.append('AUTOKOM_LOG: package-lock.json incohérent : exécutez npm install dans le dépôt, puis committez package-lock.json.')
+            else:
+                safe = safe_technical_line(line)
+                if safe:
+                    records.append('AUTOKOM_TECH:' + safe)
     pending = parts[-1][-2000:]
     if final:
         marker = parse_marker(pending)
         if marker:
             records.append(marker)
         else:
-            safe = safe_technical_line(pending)
-            if safe:
-                records.append('AUTOKOM_TECH:' + safe)
+            if 'AUTOKOM_NPM_LOCK_REPAIRED:' in pending:
+                records.append('AUTOKOM_LOG: Lockfile npm normalisé temporairement en mode DevOps. Exécutez npm install puis committez package-lock.json dans GitHub.')
+            elif 'npm error `npm ci` can only install packages when your package.json' in pending:
+                records.append('AUTOKOM_LOG: package-lock.json incohérent : exécutez npm install dans le dépôt, puis committez package-lock.json.')
+            else:
+                safe = safe_technical_line(pending)
+                if safe:
+                    records.append('AUTOKOM_TECH:' + safe)
         pending = ''
     return records, pending

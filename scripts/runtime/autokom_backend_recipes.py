@@ -5,6 +5,10 @@ or an arbitrary shell entry point to an AUTO build.  The applications themselves
 remain untrusted code and must run inside the existing AUTOKOM container sandbox.
 """
 import json
+try:
+    from .autokom_npm_install import install_step
+except ImportError:  # Standalone trusted Jenkins runner.
+    from autokom_npm_install import install_step
 import re
 from pathlib import Path
 import sys
@@ -141,8 +145,10 @@ def backend_recipe(profile, path, cfg):
         return install + 'CMD ' + json.dumps(cmd) + '\n', files
     if profile in NODE:
         base = ('FROM node:22-alpine AS builder\nWORKDIR /app\n'
-                'COPY package.json package-lock.json ./\nRUN npm ci --ignore-scripts --no-audit --no-fund\n'
-                'COPY . .\n')
+                'COPY package.json package-lock.json ./\n' + install_step(cfg.get('autokom_mode')) +
+                'RUN cp package-lock.json /tmp/autokom-effective-package-lock.json\n'
+                'COPY . .\n'
+                'RUN cp /tmp/autokom-effective-package-lock.json package-lock.json\n')
         if profile == 'node_nest':
             base += 'RUN npm run build\n'
         base += 'RUN npm prune --omit=dev --ignore-scripts --no-audit --no-fund\n'

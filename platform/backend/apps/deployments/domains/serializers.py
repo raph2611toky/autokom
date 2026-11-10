@@ -8,3 +8,10 @@ class DomainCreateSerializer(serializers.Serializer):
 
     def validate_hostname(self,value):
         return validate_hostname(value)
+
+
+class DomainRenameSerializer(serializers.Serializer):
+    hostname = serializers.CharField(max_length=253)
+
+    def validate_hostname(self, value):
+        return validate_hostname(value)
