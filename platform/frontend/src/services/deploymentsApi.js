@@ -9,6 +9,7 @@ const validId = id => {
 const prefix = (projectId, environmentId) => `/projects/${validId(projectId)}/environments/${validId(environmentId)}/`
 export const deploymentsApi = Object.freeze({
   preview: (p, e) => api.get(`${prefix(p, e)}deployments/preview/`),
+  highAvailabilityStatus: (p, e) => api.get(`${prefix(p, e)}high-availability/`),
   launch: (p, e, idempotencyKey) => {
     const key = idempotencyKey || globalThis.crypto?.randomUUID?.()
     if (!key || !/^[a-zA-Z0-9-]{8,128}$/.test(key)) throw new TypeError('Clé d’idempotence invalide.')

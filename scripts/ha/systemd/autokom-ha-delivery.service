@@ -1,0 +1,18 @@
+[Unit]
+Description=AUTOKOM private GCP application delivery controller (no DNS or HTTPS cutover)
+After=network-online.target autokom-ha-autopublish.service
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/autokom/source/scripts/ha
+ExecStart=/usr/bin/python3 /opt/autokom/source/scripts/ha/autokom_ha_delivery.py
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/var/lib/autokom/ha /run/lock
+TimeoutStartSec=600
+[Install]
+WantedBy=multi-user.target

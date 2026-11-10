@@ -50,13 +50,13 @@ def test_ha_pending_option_does_not_silently_deploy_single():
         f(object(),object(),types.SimpleNamespace(high_availability_requested=True))
 
 
-def test_ha_active_blocked_until_real_cloud_runtime():
+def test_ha_active_uses_one_local_safe_candidate_and_two_cloud_replicas():
     FakeOption.objects=FakeObjects(types.SimpleNamespace(status='ACTIVE'))
     f=load_function('platform/backend/apps/deployments/runs/services.py','effective_replicas',
                     {'HighAvailabilityOption':FakeOption,'DeploymentConflict':DeploymentConflict})
     import pytest
-    with pytest.raises(DeploymentConflict,match='runtime et routage du MIG'):
-        f(object(),object(),types.SimpleNamespace(high_availability_requested=True))
+    # Local Docker is never asked to create two fake replicas on one host.
+    assert f(object(),object(),types.SimpleNamespace(high_availability_requested=True)) == 1
 
 
 def test_model_and_migration_include_ha_for_single_and_stack():

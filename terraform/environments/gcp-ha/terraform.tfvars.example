@@ -39,3 +39,6 @@ domain_name  = null
 # Conserver false jusqu'a revue du plan, quota, facturation et regles firewall.
 restrict_mig_ingress        = true
 confirm_billable_resources = false
+
+# Activer seulement apres avoir confirme les droits GCS/les couts du stockage.
+enable_app_delivery = false

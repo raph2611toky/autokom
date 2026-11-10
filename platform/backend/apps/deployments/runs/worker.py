@@ -424,6 +424,11 @@ def _release_docker_and_proxy(run, *, stack=None, stack_role=None):
         'memory_mb':int(resource['memory_mb']),'storage_mb':int(resource['storage_mb']),
         'internal_port':int(cfg['port']),'healthcheck':cfg['healthcheck'],
         'replicas':1,'variables':manifest['variables'],
+        # Declarative cloud migration: STANDARD is one GCP worker by default;
+        # HA is explicitly requested and requires its active paid entitlement.
+        # Neither choice changes the validated local release transaction.
+        'cloud_delivery_requested':True,
+        'ha_requested':bool(run.configuration.high_availability_requested),
     },timeout=280)
     add_log(run, 'AUTOKOM_TECH:release:Docker · conteneur et contrôle HTTP interne validés.', level='TECH')
     add_customer_trace(run, 'release', 'docker', 'Réponse HTTP interne conforme : la nouvelle version est candidate à l’activation HTTPS.')

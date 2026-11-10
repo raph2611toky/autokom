@@ -409,7 +409,14 @@ def _docker_deploy_inner(params):
             failure_reason = 'healthcheck_no_http'
             raise BrokerError('AUTOKOM_CONTAINER_HEALTHCHECK_FAILED: L’application ne répond pas sur son port interne. '                               'Consulter le diagnostic du run ; ancienne version conservée.')
         previous=_load_state(environment)
-        doc={'environment_id':environment,'run_id':rid,'internal_port':port,'port':external_port,'name':name,'network':network,'healthcheck':health,**relay}
+        doc={'environment_id':environment,'run_id':rid,'internal_port':port,'port':external_port,
+             'name':name,'network':network,'healthcheck':health,**relay,
+             # Only non-sensitive metadata is mirrored to the private GCP controller.
+             # Existing local sites remain functional without the cloud controller.
+             'cloud_delivery_requested':params.get('cloud_delivery_requested') is True,
+             'high_availability_requested':params.get('ha_requested') is True,
+             'variables_present':bool(variables),
+             'memory_mb':mem,'cpu_millicores':cpu}
         if stack_project:
             doc['stack_project_id'] = stack_project
             doc['stack_role'] = stack_role
@@ -1552,6 +1559,34 @@ def handle(action,params):
     if action=='runtime.commit':return _runtime_lock_call(_commit,params)
     if action=='runtime.commit_pair':return _runtime_lock_call(_commit_pair,params)
     if action=='runtime.deprovision':return _runtime_lock_call(_deprovision_environment,params)
+    if action=='ha.application.status':
+        env=valid_id(params.get('environment_id'))
+        path=Path('/var/lib/autokom/ha/delivery-status.json')
+        default={'status':'NOT_DEPLOYED','healthy_replicas':0,'http_lb_ready':False,
+                 'public_https_ready':False,'requested_replicas':1}
+        if path.is_symlink() or not path.is_file():
+            return {'application':default}
+        st=path.stat(follow_symlinks=False)
+        if st.st_uid!=0 or st.st_size>262144 or st.st_mode & 0o022:
+            return {'application':default}
+        try:
+            report=json.loads(path.read_text(encoding='utf-8'))
+            matches=[row for row in (report.get('applications') or [])
+                     if isinstance(row,dict) and row.get('environment')==env]
+            if len(matches)!=1:
+                return {'application':default}
+            row=matches[0]
+            health=row.get('healthy_replicas',0)
+            health=health if type(health) is int and 0<=health<=20 else 0
+            status=str(row.get('status','UNKNOWN'))
+            if not re.fullmatch(r'[A-Z0-9_]{3,60}',status):status='UNKNOWN'
+            selected=row.get('ha') is True
+            return {'application':{'status':status,'healthy_replicas':health,
+                    'requested_replicas':2 if selected else 1,
+                    'http_lb_ready':status=='HTTP_LB_READY_NOT_HTTPS',
+                    'public_https_ready':False}}
+        except (OSError,ValueError,TypeError,AttributeError):
+            return {'application':default}
     if action=='runtime.status':
         env=valid_id(params.get('environment_id'))
         return {'runtime':_load_state(env)}

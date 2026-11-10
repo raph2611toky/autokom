@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ArrowLeft, Settings2, Trash2, Archive, RotateCcw, Save, LoaderCircle, History } from 'lucide-react'
 import { projectsApi } from '../services/projectsApi.js'
+import { deploymentsApi } from '../services/deploymentsApi.js'
 import { getRemoteProjectDetail, errorText } from '../services/projectWorkflow.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
 import ActionDialog from '../components/ActionDialog.jsx'
@@ -14,6 +15,7 @@ export default function LiveProjectSettings({ navigate, projectId }) {
   const [busy,setBusy] = useState(false)
   const [error,setError] = useState('')
   const [notice,setNotice] = useState('')
+  const [cloudStatus,setCloudStatus] = useState(null)
   const [removeOpen, setRemoveOpen] = useState(false)
   const [archiveOpen, setArchiveOpen] = useState(false)
 
@@ -25,6 +27,19 @@ export default function LiveProjectSettings({ navigate, projectId }) {
     }).catch(err => { if(active) setError(errorText(err)) }).finally(() => {if(active)setLoading(false)})
     return () => {active=false}
   },[projectId])
+
+  useEffect(() => {
+    const envId=record?.environment?.id
+    if (!projectId || !envId) return
+    let active=true
+    const refresh=() => deploymentsApi.highAvailabilityStatus(projectId, envId)
+      .then(result => { if(active) setCloudStatus(result) }).catch(() => {
+        if (active) setCloudStatus(null)
+      })
+    refresh()
+    const timer=window.setInterval(refresh, 30000)
+    return () => {active=false;window.clearInterval(timer)}
+  }, [projectId, record?.environment?.id])
 
   async function operation(task, success) {
     if(busy)return
@@ -53,6 +68,14 @@ export default function LiveProjectSettings({ navigate, projectId }) {
     {error && <p className="feedback error" role="alert">{error}</p>}
     {notice && <p className="feedback success" role="status">{notice}</p>}
     <ProjectPublicSite site={project.public_site} onManage={() => navigate(`/sites/${projectId}`)}/>
+    <section className="ak-workspace-sheet" aria-label="Disponibilité des applications GCP">
+      <h2>Disponibilité et réplicas GCP</h2>
+      <p>Haute disponibilité : <strong>{cloudStatus?.ha?.status === 'ACTIVE' ? 'Option autorisée (déploiement à vérifier)' : cloudStatus?.ha?.status === 'PENDING' ? 'Option en attente de validation' : 'Désactivée par défaut'}</strong></p>
+      <p>Réplicas cloud sains : <strong>{cloudStatus?.cloud_delivery ? `${cloudStatus.cloud_delivery.healthy_replicas} / ${cloudStatus.cloud_delivery.requested_replicas}` : 'Non vérifiable'}</strong></p>
+      <p>Publication GCP : <strong>{cloudStatus?.cloud_delivery?.status || 'Aucune information disponible'}</strong></p>
+      <p>Load Balancer HTTP : {cloudStatus?.cloud_delivery?.http_lb_ready ? 'Vérifié pour cette application' : 'Non validé'}.</p>
+      <p>HTTPS public HA : <strong>{cloudStatus?.cloud_delivery?.public_https_ready ? 'Validé' : 'Non activé — hébergement HTTPS principal conservé'}</strong></p>
+    </section>
     <section className="ak-workspace-sheet ak-project-settings-main"><h2>Informations générales</h2>
       <form onSubmit={event => {event.preventDefault();operation(() => projectsApi.update(projectId,{name:name.trim(),description}), 'Paramètres enregistrés.')}}>
         <label htmlFor="ak-settings-name">Nom du projet</label>

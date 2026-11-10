@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# AUTOKOM HA delivery worker: pinned Docker images, isolated network, private GCS desired-state.
+# No customer secrets in metadata. Nginx port 8080; private health on 127.0.0.1:18080.
+set -Eeuo pipefail
+export DEBIAN_FRONTEND=noninteractive
+install -d -m 0755 /etc/autokom-ha /usr/local/lib/autokom-ha /run/autokom-ha /var/lib/autokom-ha
+rm -f /run/autokom-ha/worker-ready
+
+cat >/etc/autokom-ha/worker.json <<'AUTOKOM_CONFIG'
+${worker_settings}
+AUTOKOM_CONFIG
+chmod 0644 /etc/autokom-ha/worker.json
+cat >/usr/local/lib/autokom-ha/worker-health.py <<'AUTOKOM_HEALTH'
+${health_source}
+AUTOKOM_HEALTH
+cat >/usr/local/lib/autokom-ha/worker-probe.py <<'AUTOKOM_PROBE'
+${probe_source}
+AUTOKOM_PROBE
+cat >/usr/local/lib/autokom-ha/worker-agent.py <<'AUTOKOM_AGENT'
+${agent_source}
+AUTOKOM_AGENT
+chmod 0644 /usr/local/lib/autokom-ha/worker-*.py
+printf '{}\n' >/etc/autokom-ha/routed.json
+chmod 0644 /etc/autokom-ha/routed.json
+
+cat >/etc/systemd/system/autokom-ha-worker-health.service <<'AUTOKOM_SERVICE'
+[Unit]
+Description=AUTOKOM private infrastructure and application health
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+ExecStart=/usr/bin/python3 -u /usr/local/lib/autokom-ha/worker-health.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictSUIDSGID=true
+[Install]
+WantedBy=multi-user.target
+AUTOKOM_SERVICE
+
+cat >/etc/systemd/system/autokom-ha-worker-agent.service <<'AUTOKOM_SERVICE'
+[Unit]
+Description=AUTOKOM HA private desired-state application reconciler
+After=network-online.target docker.service nginx.service autokom-ha-worker-health.service
+Requires=docker.service nginx.service
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 -u /usr/local/lib/autokom-ha/worker-agent.py
+Restart=always
+RestartSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+[Install]
+WantedBy=multi-user.target
+AUTOKOM_SERVICE
+
+# Use private egress (NAT + Private Google Access) and verify Docker + IAM first.
+apt-get -o Acquire::Retries=4 update
+apt-get -y -o Dpkg::Lock::Timeout=240 install --no-install-recommends docker.io ca-certificates python3 nginx
+systemctl enable --now docker.service
+systemctl enable --now nginx.service
+systemctl daemon-reload
+systemctl enable --now autokom-ha-worker-health.service
+
+# Never expose Ubuntu's default HTTP site. Port 8080 is exposed to the GCP LB only.
+rm -f /etc/nginx/sites-enabled/default
+cat >/etc/nginx/conf.d/autokom-ha-default.conf <<'AUTOKOM_NGINX'
+server {
+    listen 8080 default_server;
+    server_name _;
+    location = ${health_check_path} { proxy_pass http://127.0.0.1:18080${health_check_path}; }
+    location ^~ /__autokom_health/ { proxy_pass http://127.0.0.1:18080; }
+    location / { return 404; }
+}
+AUTOKOM_NGINX
+/usr/sbin/nginx -t
+systemctl reload nginx.service
+
+for attempt in 1 2 3 4 5 6; do
+  if /usr/bin/python3 /usr/local/lib/autokom-ha/worker-probe.py; then
+    printf 'AUTOKOM HA worker runtime ready\n' >/run/autokom-ha/worker-ready
+    chmod 0644 /run/autokom-ha/worker-ready
+    systemctl enable --now autokom-ha-worker-agent.service
+    echo 'AUTOKOM_HA_WORKER_DELIVERY_PREPARED registry=true desired_state=true'
+    exit 0
+  fi
+  echo "AUTOKOM_HA_WORKER_PROBE_RETRY attempt=$attempt"
+  sleep 12
+done
+
+echo 'AUTOKOM_HA_WORKER_BOOTSTRAP_FAILED infrastructure_not_ready' >&2
+exit 1

@@ -87,6 +87,10 @@ def dashboard(uid: str) -> dict:
         ('Trafic réseau envoyé des workers', 'autokom_ha_worker_network_send_Bps', 'Bps'),
         ('Cible Prometheus AUTOKOM HA', 'up{job="autokom-gcp-ha"}', 'short'),
         ('Erreurs LB 5xx en 5 min', 'autokom_ha_lb_requests_5m{response_class="5xx"}', 'short'),
+        ('Réplicas demandés par application', 'autokom_ha_app_replicas_requested', 'short'),
+        ('Réplicas sains par application', 'autokom_ha_app_replicas_healthy', 'short'),
+        ('Routage HTTP par application', 'autokom_ha_app_http_ready', 'short'),
+        ('Livraison : métriques fraîches', 'autokom_ha_app_metrics_fresh', 'short'),
     ]
     y = max((p.get('gridPos', {}).get('y', 0) + p.get('gridPos', {}).get('h', 8) for p in panels), default=0)
     offset = max((p.get('id', 0) for p in panels), default=0)
@@ -96,7 +100,7 @@ def dashboard(uid: str) -> dict:
                        'gridPos': pos,
                        'datasource': {'type': 'prometheus', 'uid': uid},
                        'targets': [{'refId': 'A', 'expr': expr,
-                                    'legendFormat': '{{instance}} {{zone}}',
+                                    'legendFormat': '{{environment}} {{mode}} {{instance}} {{zone}}',
                                     'datasource': {'type': 'prometheus', 'uid': uid}}],
                        'fieldConfig': {'defaults': {'unit': unit}, 'overrides': []},
                        'options': {}})

@@ -161,6 +161,8 @@ def bootstrap_mode(template: dict[str, Any]) -> str:
     for item in items:
         if isinstance(item, dict) and item.get("key") == "startup-script":
             script = str(item.get("value") or "")
+            if "AUTOKOM HA delivery worker" in script or "AUTOKOM HA delivery worker:" in script:
+                return "delivery_worker"
             if "autokom-ha-worker-preparation-only" in script:
                 return "worker"
             if "infrastructure validation only" in script.lower() or "validation_server.py" in script:
@@ -270,6 +272,8 @@ def inventory(project: str, region: str, mig: str, backend: str, url_map: str,
         issues.append("Instance template toujours en mode VALIDATION : pas de runtime client ni de restauration automatique.")
     if validation == "worker":
         issues.append("Workers initialises seulement : publication des images, reconciliation, routage et HTTPS clients non configures.")
+    if validation == "delivery_worker":
+        issues.append("Delivery GCP en HTTP de preparation : DNS et certificat HTTPS publics non encore bascules.")
     if validation == "unknown":
         issues.append("Bootstrap du template inconnu : vérifier avant d'activer des applications clientes.")
     if not hosts:

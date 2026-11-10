@@ -36,7 +36,13 @@ def effective_replicas(env, plan, cfg=None):
     option = HighAvailabilityOption.objects.filter(environment=env).first()
     if option is None or option.status != HighAvailabilityOption.Status.ACTIVE:
         raise DeploymentConflict('Haute disponibilite demandee : option non active. Aucune publication locale de substitution.')
-    raise DeploymentConflict('Haute disponibilite demandee : runtime et routage du MIG non encore actives. Aucune publication locale de substitution.')
+    if getattr(option, 'desired_replicas', 2) != 2:
+        raise DeploymentConflict('Le MIG AUTOKOM prend actuellement en charge exactement deux replicas HA.')
+    # The local release remains the transactional, rollback-capable fallback.
+    # The opt-in cloud controller subsequently prepares two distinct zonal
+    # replicas and only advertises the GCP HTTP route when BOTH are healthy.
+    # Never ask the local single-host Docker broker to run two "replicas".
+    return 1
 
 
 def plan_deployment(env, *, verify_remote=False, user=None):

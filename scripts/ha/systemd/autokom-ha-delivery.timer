@@ -1,0 +1,10 @@
+[Unit]
+Description=AUTOKOM private cloud application reconciliation
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=90s
+RandomizedDelaySec=10s
+Persistent=true
+Unit=autokom-ha-delivery.service
+[Install]
+WantedBy=timers.target

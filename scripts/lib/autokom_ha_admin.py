@@ -79,6 +79,8 @@ def cmd_list(args):
 def cmd_logs(args):
     if args.source == 'publisher':
         return _journal('autokom-ha-autopublish.service', args.lines)
+    if args.source == 'delivery':
+        return _journal('autokom-ha-delivery.service', args.lines)
     if args.source == 'exporter':
         return _journal('autokom-ha-metrics.service', args.lines)
     report = _report(details=False)
@@ -168,7 +170,7 @@ def cmd_doctor(args):
     for issue in report['issues']:
         print('  BLOQUANT : ' + issue)
         critical += 1
-    print('  Applications déployées dans le MIG : non vérifiées (pas de réconciliation)')
+    print('  Applications GCP : vérifier les rapports de réconciliation et les health checks par release')
     print('  Publication automatique : ' + ('timer présent' if _systemd_enabled('autokom-ha-autopublish.timer') else 'timer absent'))
     if not _systemd_enabled('autokom-ha-autopublish.timer'):
         critical += 1
@@ -183,10 +185,85 @@ def cmd_doctor(args):
     except (OSError, ValueError, RuntimeError):
         print('  Prometheus HA : indisponible')
         critical += 1
+    delivery = Path('/var/lib/autokom/ha/delivery-status.json')
+    if delivery.is_file() and not delivery.is_symlink():
+        try:
+            doc = json.loads(delivery.read_text(encoding='utf-8'))
+            for app in doc.get('applications', [])[:50]:
+                print('  Application ' + str(app.get('environment')) + ' : ' + str(app.get('status')) +
+                      ' / répliques saines=' + str(app.get('healthy_replicas', 0)) +
+                      ' / HA demandée=' + str(app.get('ha', False)))
+        except (OSError, ValueError, TypeError):
+            print('  Contrôleur livraison : rapport illisible')
     print('  Haute disponibilité client : ' + ('confirmée' if report['can_host_customer_applications'] else 'NON VALIDÉE'))
     print('  STATUT GLOBAL : ' + ('BLOQUÉ' if critical else 'à vérifier au niveau applicatif'))
     return 2 if critical else 0
 
+
+
+def cmd_delivery(args):
+    """Explicit installation / read-only status of cloud HTTP staging controller."""
+    if args.status:
+        file = Path('/var/lib/autokom/ha/delivery-status.json')
+        if file.is_symlink() or not file.is_file():
+            print('AUTOKOM HA delivery: aucun rapport (service non démarré ou aucune exécution).')
+            return 3
+        try:
+            report = json.loads(file.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as exc:
+            raise HaError('Rapport de livraison illisible') from exc
+        for app in report.get('applications', []):
+            print(str(app.get('environment')) + ' · ' + str(app.get('status')) +
+                  ' · replicas=' + str(app.get('healthy_replicas', 'indisponible')) +
+                  ' · HA=' + str(app.get('ha')))
+        print('HTTPS et DNS clients : non basculés (serveur principal préservé)')
+        return 0
+    _use_gce_identity()
+    report = _report(details=False)
+    if (report['bootstrap_mode'] != 'delivery_worker' or report['instance_count'] < 2 or
+            report['healthy_backends'] < 2):
+        raise HaError('Workers GCP delivery non prêts : vérifier le nouveau template et les contrôles de santé.')
+    sys.path.insert(0, str(ROOT / 'scripts/ha'))
+    from autokom_ha_delivery import reconcile, BUCKET
+    # This API check also validates the controller's temporary GCE identity.
+    from autokom_ha_registry import metadata_token
+    req = urllib.request.Request('https://storage.googleapis.com/storage/v1/b/' + BUCKET,
+                                 headers={'Authorization': 'Bearer ' + metadata_token()})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as response:
+            if response.status != 200:
+                raise HaError('GCS state bucket unreachable')
+    except urllib.error.HTTPError as exc:
+        raise HaError('GCS state bucket HTTP_' + str(exc.code)) from None
+    print('GCS état privé et deux workers delivery : vérifiés')
+    if args.check:
+        doc = reconcile(dry_run=True)
+        print(json.dumps(doc, ensure_ascii=False, indent=2))
+        print('Simulation : aucun conteneur, NEG ou domaine modifié.')
+        return 0
+    if os.geteuid() != 0:
+        raise HaError('Activation du contrôleur : root requis')
+    units = ('autokom-ha-delivery.service', 'autokom-ha-delivery.timer')
+    for unit in units:
+        source = ROOT / 'scripts/ha/systemd' / unit
+        dest = Path('/etc/systemd/system') / unit
+        if not source.is_file() or source.is_symlink():
+            raise HaError('Unité systemd source manquante')
+        if dest.exists() and dest.is_symlink():
+            raise HaError('Unité systemd déjà redirigée : refus')
+        import shutil
+        shutil.copy2(source, dest)
+        os.chmod(dest, 0o644)
+    def checked(*argv):
+        value = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        if value.returncode:
+            raise HaError('Commande systemd échouée : ' + argv[-1])
+    checked('systemctl', 'daemon-reload')
+    checked('systemctl', 'enable', '--now', 'autokom-ha-delivery.timer')
+    print('Service de reconciliation cloud activé (timer 90 s).')
+    print('Aucun DNS ni certificat HTTPS des applications modifié.')
+    print('Etat : autokom iac ha delivery --status')
+    return 0
 
 def _systemd_enabled(unit):
     try:
@@ -205,13 +282,18 @@ def main(argv=None):
     a.add_argument('--fast', action='store_true', help='Sans requêtes de métriques Cloud Monitoring')
     b = commands.add_parser('logs', help='Logs série worker ou systemd exporter/publisher')
     b.add_argument('--instance', default=None)
-    b.add_argument('--source', choices=('worker','publisher','exporter'), default='worker')
+    b.add_argument('--source', choices=('worker','publisher','exporter','delivery'), default='worker')
     b.add_argument('--lines', type=int, default=80)
     c = commands.add_parser('monitor', help='Prometheus/Grafana, installation HA idempotente')
     group = c.add_mutually_exclusive_group()
     group.add_argument('--check', action='store_true', help='Simulation, sans changement')
     group.add_argument('--apply', action='store_true', help='Provisionner (root + passphrase)')
     commands.add_parser('doctor', help='Contrôles HA end-to-end, sans faux positifs')
+    delivery = commands.add_parser('delivery', help='Agent cloud + routage GCP HTTP de préparation')
+    mode = delivery.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--check', action='store_true', help='Prévol sans modification')
+    mode.add_argument('--apply', action='store_true', help='Activer le contrôleur systemd (root)')
+    mode.add_argument('--status', action='store_true', help='Rapport de réconciliation et santé applicative')
     args = p.parse_args(argv)
     if args.action == 'list':
         return cmd_list(args)
@@ -223,6 +305,8 @@ def main(argv=None):
         return cmd_monitor(args)
     if args.action == 'doctor':
         return cmd_doctor(args)
+    if args.action == 'delivery':
+        return cmd_delivery(args)
     return 2
 
 

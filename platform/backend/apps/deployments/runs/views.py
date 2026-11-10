@@ -212,7 +212,19 @@ class HighAvailabilityStatusAPIView(APIView):
         try:
             _, env = get_environment(request.user, project_id, environment_id)
             option = HighAvailabilityOption.objects.filter(environment=env).first()
-            return api_success({'ha': {
+            from apps.deployments.runs.autokom_socket import request_control
+            cloud = {'status': 'UNAVAILABLE', 'healthy_replicas': 0,
+                     'requested_replicas': 1, 'http_lb_ready': False,
+                     'public_https_ready': False}
+            try:
+                response = request_control('ha.application.status',
+                                           {'environment_id': str(env.id)}, timeout=5)
+                if isinstance(response.get('application'), dict):
+                    cloud = response['application']
+            except Exception:
+                # Cloud status must never interrupt paid-entitlement information.
+                pass
+            return api_success({'cloud_delivery': cloud, 'ha': {
                 'status': option.status if option else 'NOT_REQUESTED',
                 'requested_replicas': option.desired_replicas if option else 1,
                 'activated_at': option.activated_at if option else None,

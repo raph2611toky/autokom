@@ -10,6 +10,7 @@ import argparse
 import http.server
 import threading
 import time
+import os
 import sys
 from pathlib import Path
 
@@ -40,7 +41,19 @@ class MetricCache:
                     detailed = extra.to_prometheus(report)
                 except Exception:
                     detailed = ''
-                self.data = pf.to_prometheus(report) + detailed + 'autokom_ha_metrics_scrape_success 1\n'
+                cloud_metrics = ''
+                path = Path('/run/autokom-ha-app-metrics.prom')
+                try:
+                    if (path.is_file() and not path.is_symlink() and
+                            time.time() - path.stat().st_mtime < 240 and
+                            path.stat().st_size < 65536):
+                        cloud_metrics = path.read_text(encoding='ascii')
+                except (OSError, ValueError, UnicodeError):
+                    cloud_metrics = ''
+                fresh = 1 if cloud_metrics else 0
+                self.data = (pf.to_prometheus(report) + detailed + cloud_metrics +
+                             f'autokom_ha_app_metrics_fresh {fresh}\n' +
+                             'autokom_ha_metrics_scrape_success 1\n')
             except Exception as exc:
                 # Journaliser seulement le type et le code HTTP, jamais un jeton
                 # ou le contenu d'une reponse GCP potentiellement sensible.

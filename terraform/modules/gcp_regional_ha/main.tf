@@ -49,6 +49,19 @@ resource "google_compute_instance_template" "web" {
   metadata_startup_script = var.bootstrap_mode == "validation" ? templatefile("${path.module}/files/validation-startup.sh.tftpl", {
     backend_port      = var.backend_port
     health_check_path = var.health_check_path
+  }) : var.bootstrap_mode == "worker" && var.enable_app_delivery ? templatefile("${path.module}/files/worker-startup-delivery.sh.tftpl", {
+    worker_settings = jsonencode({
+      project_id          = var.project_id
+      region              = var.region
+      artifact_repository = var.artifact_repository
+      state_bucket        = google_storage_bucket.app_state[0].name
+      health_path         = var.health_check_path
+      health_port         = 18080
+    })
+    health_check_path = var.health_check_path
+    health_source     = file("${path.module}/files/worker-delivery-health.py")
+    probe_source      = file("${path.module}/files/worker-probe.py")
+    agent_source      = file("${path.module}/files/worker-agent.py")
   }) : var.bootstrap_mode == "worker" ? templatefile("${path.module}/files/worker-startup.sh.tftpl", {
     worker_settings = jsonencode({
       project_id             = var.project_id
@@ -240,6 +253,9 @@ resource "google_compute_backend_service" "web" {
 }
 
 resource "google_compute_url_map" "web" {
+  # The authenticated AUTOKOM application reconciler exclusively owns host/path rules.
+  # Terraform continues to own default_service and the URL map's lifecycle.
+  lifecycle { ignore_changes = [host_rule, path_matcher] }
   project         = var.project_id
   name            = "${var.name_prefix}-map"
   default_service = google_compute_backend_service.web.id
@@ -294,4 +310,32 @@ resource "google_compute_global_forwarding_rule" "https" {
   port_range            = "443"
   ip_address            = google_compute_global_address.lb.id
   target                = google_compute_target_https_proxy.web[0].id
+}
+
+# Enabled explicitly after the delivery agent passes its local tests.
+# The bucket is private, regional and versioned; no secrets go into manifests.
+resource "google_storage_bucket" "app_state" {
+  count                       = var.enable_app_delivery ? 1 : 0
+  project                     = var.project_id
+  name                        = "${var.project_id}-${var.name_prefix}-state"
+  location                    = var.region
+  storage_class               = "STANDARD"
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = false
+  versioning { enabled = true }
+}
+
+resource "google_storage_bucket_iam_member" "worker_state_reader" {
+  count  = var.enable_app_delivery ? 1 : 0
+  bucket = google_storage_bucket.app_state[0].name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.web.email}"
+}
+
+resource "google_storage_bucket_iam_member" "controller_state_writer" {
+  count  = var.enable_app_delivery ? 1 : 0
+  bucket = google_storage_bucket.app_state[0].name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:autokom-terraform@${var.project_id}.iam.gserviceaccount.com"
 }

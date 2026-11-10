@@ -109,3 +109,9 @@ variable "worker_initial_delay_seconds" {
     error_message = "worker_initial_delay_seconds doit etre un entier entre 360 et 3600 secondes."
   }
 }
+
+variable "enable_app_delivery" {
+  description = "Install private GCS state, immutable-image agent and application ingress on MIG workers."
+  type        = bool
+  default     = false
+}

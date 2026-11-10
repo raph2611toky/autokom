@@ -10,6 +10,7 @@ resource "terraform_data" "cost_gate" {
 }
 
 module "regional_web_ha" {
+  enable_app_delivery = var.enable_app_delivery
   source                = "../../modules/gcp_regional_ha"
   project_id            = var.project_id
   region                = var.region
