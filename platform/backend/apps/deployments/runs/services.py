@@ -30,15 +30,13 @@ def get_final_config(env):
     return cfg
 
 
-def effective_replicas(env, plan):
+def effective_replicas(env, plan, cfg=None):
+    if cfg is None or not getattr(cfg, 'high_availability_requested', False):
+        return 1
     option = HighAvailabilityOption.objects.filter(environment=env).first()
-    if option is None or option.status in (HighAvailabilityOption.Status.REJECTED,
-                                            HighAvailabilityOption.Status.EXPIRED):
-        return 1
-    if option.status != HighAvailabilityOption.Status.ACTIVE:
-        # Pending purchase doesn't interrupt existing single-replica operations.
-        return 1
-    raise DeploymentConflict('Haute disponibilité : option visible mais non activable avant le cluster GCP.')
+    if option is None or option.status != HighAvailabilityOption.Status.ACTIVE:
+        raise DeploymentConflict('Haute disponibilite demandee : option non active. Aucune publication locale de substitution.')
+    raise DeploymentConflict('Haute disponibilite demandee : runtime et routage du MIG non encore actives. Aucune publication locale de substitution.')
 
 
 def plan_deployment(env, *, verify_remote=False, user=None):
@@ -54,7 +52,7 @@ def plan_deployment(env, *, verify_remote=False, user=None):
     if issues:
         raise ValidationError(issues)
     plan = check_entitlement(cfg)
-    replicas = effective_replicas(env, plan)
+    replicas = effective_replicas(env, plan, cfg)
     # Reject stale/unreadable secrets BEFORE queuing a build or contacting Jenkins.
     from apps.projects.environments.models import EnvironmentVariable
     from apps.projects.git.services import decrypt

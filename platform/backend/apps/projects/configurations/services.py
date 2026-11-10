@@ -136,4 +136,12 @@ def check_entitlement(cfg):
     if (chosen.cpu_millicores > granted.cpu_millicores or chosen.memory_mb > granted.memory_mb or
         chosen.storage_mb > granted.storage_mb or chosen.max_instances > granted.max_instances):
         raise PermissionDenied('Les ressources choisies dépassent le plan autorisé.')
+    if getattr(cfg, 'high_availability_requested', False):
+        from apps.plans.entitlements.models import HighAvailabilityOption
+        option = HighAvailabilityOption.objects.filter(environment=cfg.environment).first()
+        if chosen.max_instances < 2:
+            raise PermissionDenied('Haute disponibilite : le plan accorde au moins deux instances est requis.')
+        if (option is None or option.status != HighAvailabilityOption.Status.ACTIVE or
+                (option.expires_at and option.expires_at <= timezone.now())):
+            raise PermissionDenied('Haute disponibilite demandee, mais option non active ou non accordee. La configuration reste en brouillon.')
     return chosen

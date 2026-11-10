@@ -75,6 +75,7 @@ export function toBackendConfiguration(form) {
     dockerfile_path: String(advanced.dockerfile || 'Dockerfile'),
     build_command: String(advanced.buildCommand || ''), start_command: String(advanced.startCommand || ''),
     output_directory: String(advanced.outputDir || ''), auto_deploy: Boolean(form.autoDeploy),
+    high_availability_requested: Boolean(form.highAvailability),
     auto_deploy_branch: form.autoDeploy ? form.branch : '',
   }
 
@@ -98,6 +99,7 @@ export function toBackendConfiguration(form) {
     settings: { frontend_profile: profile },
     healthcheck_path: String(advanced.healthcheckPath || '/').trim(),
     auto_deploy: Boolean(form.autoDeploy), auto_deploy_branch: form.autoDeploy ? form.branch : '',
+    high_availability_requested: Boolean(form.highAvailability),
   }
 }
 
@@ -145,9 +147,8 @@ export async function saveRemoteProject(form, { onCreated = () => {} } = {}) {
   const configurationValues = toBackendConfiguration(form)
   let projectId = form.backendProjectId || ''
   let envId = form.backendEnvironmentId || ''
-  if (!projectId && form.pricingPlan && form.pricingPlan !== 'free') {
-    throw new Error('La souscription aux offres payantes n’est pas encore raccordée au backend. Sélectionnez l’offre gratuite avant de créer ce projet.')
-  }
+  // Les offres payantes ne sont jamais accordees par le navigateur : Django valide
+  // les droits ACTIFS avant toute finalisation. Une demande HA reste un brouillon.
   if (!projectId) {
     if (!form.organizationId || !form.githubInstallationId || !form.githubRepositoryId) {
       throw new Error('Sélectionnez votre organisation et un dépôt GitHub autorisé avant d’enregistrer.')
@@ -179,9 +180,8 @@ export async function saveRemoteProject(form, { onCreated = () => {} } = {}) {
   onCreated({ backendProjectId: projectId, backendEnvironmentId: envId })
   // L’interface ne doit jamais présenter une offre non accordée comme activée.
   const offers = await projectsApi.offers(projectId, envId)
-  if (form.pricingPlan && form.pricingPlan !== 'free') {
-    throw new Error('La souscription et l’attribution du plan payant ne sont pas encore raccordées à Django. Le projet est conservé ; choisissez l’offre gratuite autorisée pour continuer.')
-  }
+  // Ne pas confondre selection UI et entitlement. Seul offers.entitlement accorde
+  // les droits serveur ; une option HA non active bloque sa finalisation.
   if (offers?.entitlement?.resource_plan) configurationValues.resource_plan = offers.entitlement.resource_plan
   let configs = (await projectsApi.configurations(projectId, envId))?.configurations || []
   let draft = configs.find(item => item.is_draft)
@@ -214,7 +214,8 @@ export function remoteProjectToForm(detail) {
   return {
     backendProjectId: project.id, backendEnvironmentId: env.id,
     organizationId: project.organization, githubInstallationId: project.github_installation_id || '',
-    pricingPlan: 'free', resourcePlan: 'free', domainMode: 'autokom',
+    pricingPlan: cfg.high_availability_requested ? 'pro' : 'free', resourcePlan: cfg.high_availability_requested ? 'adapted' : 'free', domainMode: 'autokom',
+    highAvailability: Boolean(cfg.high_availability_requested),
     projectName: project.name, repositorySlug: project.repository_name,
     repository: project.repository_url, githubRepositoryId: project.repository_external_id,
     branch: cfg.branch || project.default_branch || 'main', workdir: cfg.root_directory || './',

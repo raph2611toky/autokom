@@ -39,6 +39,8 @@ class DeploymentConfig(models.Model):
     internal_port = models.PositiveIntegerField(default=8000)
     healthcheck_path = models.CharField(max_length=250, default='/')
     auto_deploy = models.BooleanField(default=False)
+    # Demande declarative ; ne signifie pas que les workers MIG sont deja actifs.
+    high_availability_requested = models.BooleanField(default=False)
     auto_deploy_branch = models.CharField(max_length=255, blank=True)
     settings = models.JSONField(default=dict, blank=True, help_text='Métadonnées non sensibles uniquement.')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -63,6 +65,7 @@ class ServiceStack(models.Model):
     backend_environment = models.ForeignKey('environments.Environment', on_delete=models.PROTECT,
                                             related_name='backend_stacks')
     auto_deploy = models.BooleanField(default=False)
+    high_availability_requested = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

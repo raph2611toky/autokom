@@ -131,6 +131,7 @@ export default function StackDeploy({navigate,projectId}) {
   const [frontend,setFrontend] = useState(INITIAL)
   const [backend,setBackend] = useState(INITIAL)
   const [auto,setAuto] = useState(true)
+  const [highAvailability,setHighAvailability] = useState(false)
   const [probe,setProbe] = useState({frontend:{status:'idle'},backend:{status:'idle'}})
   const [busy,setBusy] = useState(false)
   const [error,setError] = useState('')
@@ -160,6 +161,7 @@ export default function StackDeploy({navigate,projectId}) {
         setFrontend(asForm(existing?.frontend || (primaryKind==='frontend' ? singleService : null),branch,'frontend'))
         setBackend(asForm(existing?.backend || (primaryKind==='backend' ? singleService : null),branch,'backend'))
         setAuto(existing ? Boolean(existing.auto_deploy) : Boolean(detail.configurations?.find(item => !item.is_draft)?.auto_deploy))
+        setHighAvailability(Boolean(existing?.high_availability_requested))
         if (detail.project.github_installation_id && detail.project.repository_external_id) {
           try {
             const result = await gitApi.branches(detail.project.github_installation_id,detail.project.repository_external_id)
@@ -229,7 +231,7 @@ export default function StackDeploy({navigate,projectId}) {
     if (busy || !ready)return
     setBusy(true);setError('');setNotice('')
     try {
-      const payload={frontend:componentPayload(frontend,'frontend'),backend:componentPayload(backend,'backend'),auto_deploy:auto}
+      const payload={frontend:componentPayload(frontend,'frontend'),backend:componentPayload(backend,'backend'),auto_deploy:auto,high_availability_requested:highAvailability}
       const resultConfig = await stackApi.configure(projectId,payload)
       setDnsProof(resultConfig?.stack || null)
       setNotice('Contrôle des domaines et de leur pointage DNS avant construction…')
@@ -270,7 +272,7 @@ export default function StackDeploy({navigate,projectId}) {
         </div>)}</div>
         <p className="ak-stack-subtle"><Info size={15}/> Les ressources sont réparties entre les deux conteneurs. La validation des quotas appartient au backend AUTOKOM ; aucune seconde offre n’est ajoutée automatiquement.</p>
       </section>
-      <section className="ak-stack-component ak-stack-options"><label><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)}/> Déployer automatiquement après un push sur l'une des deux branches</label><p className="ak-stack-subtle">Le nouveau mode conserve la dernière version saine des deux services jusqu'à la validation du nouveau couple.</p></section>
+      <section className="ak-stack-component ak-stack-options"><label><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)}/> Déployer automatiquement après un push sur l'une des deux branches</label><label><input type="checkbox" checked={highAvailability} onChange={e=>setHighAvailability(e.target.checked)}/> Demander la haute disponibilité pour le frontend et le backend</label><p className="ak-stack-subtle">La redondance doit être autorisée pour chacun des deux environnements et exécutée sur deux workers GCP. Aucune activation locale fictive. </p><p className="ak-stack-subtle">Le nouveau mode conserve la dernière version saine des deux services jusqu'à la validation du nouveau couple.</p></section>
       <div className="ak-stack-footer"><button type="button" className="button-primary" disabled={!ready} onClick={()=>setStep(1)}>Continuer <ArrowRight size={16}/></button></div>
     </>}
     {step===1 && <section className="ak-stack-component"><h2>Vérification avant publication</h2>

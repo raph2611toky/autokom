@@ -9,7 +9,7 @@ class DeploymentConfigSerializer(serializers.ModelSerializer):
         fields = ('id', 'environment', 'created_by', 'version', 'is_draft', 'mode', 'resource_plan', 'runtime_type',
                   'build_method', 'branch', 'root_directory', 'dockerfile_path',
                   'build_command', 'start_command', 'output_directory',
-                  'healthcheck_path', 'auto_deploy', 'auto_deploy_branch', 'settings', 'created_at')
+                  'healthcheck_path', 'auto_deploy', 'auto_deploy_branch', 'high_availability_requested', 'settings', 'created_at')
         read_only_fields = fields
 
 
@@ -26,6 +26,7 @@ class DeploymentConfigWriteSerializer(serializers.Serializer):
     output_directory = serializers.CharField(max_length=300, required=False, allow_blank=True)
     healthcheck_path = serializers.CharField(max_length=250, required=False)
     auto_deploy = serializers.BooleanField(required=False)
+    high_availability_requested = serializers.BooleanField(required=False)
     auto_deploy_branch = serializers.CharField(max_length=255, required=False, allow_blank=True)
     settings = serializers.DictField(required=False)
 

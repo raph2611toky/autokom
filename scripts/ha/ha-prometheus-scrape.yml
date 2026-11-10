@@ -1,0 +1,9 @@
+# A ajouter dans la section scrape_configs de /etc/prometheus/prometheus.yml
+# apres sauvegarde et verification de la configuration active.
+- job_name: 'autokom-gcp-ha'
+  scrape_interval: 60s
+  scrape_timeout: 45s
+  static_configs:
+    - targets: ['127.0.0.1:19191']
+      labels:
+        service: 'autokom-ha'

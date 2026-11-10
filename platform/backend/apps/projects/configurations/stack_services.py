@@ -142,6 +142,7 @@ class StackConfigureSerializer(serializers.Serializer):
     frontend = serializers.DictField()
     backend = serializers.DictField()
     auto_deploy = serializers.BooleanField(default=False)
+    high_availability_requested = serializers.BooleanField(default=False)
 
     def validate(self, attrs):
         for kind in ('frontend', 'backend'):
@@ -152,7 +153,7 @@ class StackConfigureSerializer(serializers.Serializer):
         return attrs
 
 
-def _component_config(env, user, data, kind):
+def _component_config(env, user, data, kind, *, high_availability_requested=False):
     previous = DeploymentConfig.objects.filter(environment=env).order_by('-version').first()
     if previous and previous.is_draft:
         cfg = previous
@@ -166,6 +167,7 @@ def _component_config(env, user, data, kind):
     cfg.internal_port = 8000 if kind == 'backend' else 8080
     cfg.healthcheck_path = data['healthcheck']
     cfg.auto_deploy = False  # Stack pushes are coordinated, never standalone.
+    cfg.high_availability_requested = high_availability_requested
     cfg.auto_deploy_branch = ''
     cfg.settings = {'frontend_profile': profile, 'stack_hostname': data['hostname'],
                     **({'stack_api_env_key': data['api_env_key']} if kind == 'frontend'
@@ -263,6 +265,7 @@ def stack_summary(stack):
     return {
         'id': str(stack.id), 'project_id': str(stack.project_id),
         'auto_deploy': stack.auto_deploy,
+        'high_availability_requested': stack.high_availability_requested,
         'frontend': {'environment_id': str(stack.frontend_environment_id),
                      'branch': fcfg.branch if fcfg else '', 'root_directory': fcfg.root_directory if fcfg else '',
                      'profile': (fcfg.settings or {}).get('frontend_profile') if fcfg else '',
@@ -374,8 +377,8 @@ def configure_stack(user, project_id, attrs):
         if previous_front and not previous_front_key and (previous_front.settings or {}).get('stack_hostname'):
             previous_front_key = _frontend_api_key((previous_front.settings or {}).get('frontend_profile', ''))
         previous_back_key = (previous_back.settings or {}).get('stack_origin_env_key', 'FRONTEND_ORIGIN') if previous_back and (previous_back.settings or {}).get('stack_hostname') else None
-        frontend_cfg = _component_config(frontend_env, user, attrs['frontend'], 'frontend')
-        backend_cfg = _component_config(backend_env, user, attrs['backend'], 'backend')
+        frontend_cfg = _component_config(frontend_env, user, attrs['frontend'], 'frontend', high_availability_requested=attrs['high_availability_requested'])
+        backend_cfg = _component_config(backend_env, user, attrs['backend'], 'backend', high_availability_requested=attrs['high_availability_requested'])
         # Claim both names under their own environment. An existing domain in a
         # different project/environment is never adopted or overwritten.
         for kind, env, host in (('frontend', frontend_env, fhost), ('backend', backend_env, bhost)):
@@ -387,7 +390,8 @@ def configure_stack(user, project_id, attrs):
         _sync_variables(project, backend_env, attrs['backend'], 'backend', api_url=fhost,
                         previous_managed_key=previous_back_key)
         stack.auto_deploy = attrs['auto_deploy']
-        stack.save(update_fields=['auto_deploy', 'updated_at'])
+        stack.high_availability_requested = attrs['high_availability_requested']
+        stack.save(update_fields=['auto_deploy', 'high_availability_requested', 'updated_at'])
         return stack
 
 
