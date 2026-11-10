@@ -239,7 +239,7 @@ def _reject_domain_mutation_during_deployment(environment):
 
 
 def remove_domain(user, project_id, environment_id, domain_id):
-    """Permanently remove non-primary aliases, keeping at least two addresses.
+    """Permanently remove non-primary aliases, keeping at least one address.
 
     Do not delete the database reservation unless the privileged broker confirms
     Nginx teardown and (for managed hosts) owned DNS record cleanup.
@@ -251,8 +251,8 @@ def remove_domain(user, project_id, environment_id, domain_id):
         domain = aliases.filter(pk=domain_id).first()
         if domain is None:
             raise ValidationError({'domain': 'Domaine introuvable.'})
-        if aliases.count() <= 2:
-            raise ValidationError({'domain': 'Conserver au moins deux domaines. Ajoutez un remplaçant avant de supprimer.'})
+        if aliases.count() <= 1:
+            raise ValidationError({'domain': 'Impossible de supprimer le dernier domaine : au moins une adresse doit rester associée à ce service.'})
         if domain.is_primary:
             raise ValidationError({'domain': 'Définissez un autre domaine principal avant de supprimer celui-ci.'})
         request_control('domain.remove', {

@@ -172,8 +172,8 @@ export default function LiveSites({ navigate, projectId = null }) {
               {!domain.https && <button type="button" className="button-outline" disabled={busy} onClick={() => perform(() => projectsApi.verifyDomain(detail.project.id, detail.environment.id, domain.id), 'Vérification DNS/HTTPS demandée.')}><ShieldCheck size={15}/> Activer HTTPS</button>}
               {domain.https && !domain.is_primary && <button type="button" className="button-outline" disabled={busy} onClick={() => perform(() => projectsApi.primaryDomain(detail.project.id, detail.environment.id, domain.id), 'Adresse principale modifiée.')}><CheckCircle2 size={15}/> Définir comme principal</button>}
               <button type="button" className="button-outline" disabled={busy || editingDomain === domain.id} onClick={() => beginEdit(domain)}><Pencil size={15}/> Modifier</button>
-              <button type="button" className="button-quiet ak-danger-action" disabled={busy || domain.is_primary || domains.length <= 2}
-                title={domain.is_primary ? 'Définissez un autre domaine principal avant suppression.' : domains.length <= 2 ? 'Deux adresses minimum : ajoutez une autre adresse avant de supprimer.' : 'Suppression définitive contrôlée'}
+              <button type="button" className="button-quiet ak-danger-action" disabled={busy || domain.is_primary || domains.length <= 1}
+                title={domain.is_primary ? 'Définissez un autre domaine principal avant suppression.' : domains.length <= 1 ? 'Un domaine minimum : ajoutez une autre adresse avant de supprimer le dernier.' : 'Suppression définitive contrôlée'}
                 onClick={() => setDomainToDelete(domain)}><Trash2 size={15}/> Supprimer</button>
             </div>
             {editingDomain === domain.id && <form className="ak-domain-inline-edit" onSubmit={event => editDomain(event, domain)}>

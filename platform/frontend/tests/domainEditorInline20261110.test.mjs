@@ -20,7 +20,8 @@ test('managed project creation is constrained and suffix is immutable', () => {
   assert.match(source, /<span>\.\{AUTOKOM_DOMAIN_SUFFIX\}<\/span>/)
 })
 
-test('delete remains visible but disabled for <=2 or primary, and requires exact hostname', () => {
-  assert.match(source, /disabled=\{busy \|\| domain\.is_primary \|\| domains\.length <= 2\}/)
+test('delete remains visible for two domains, but is disabled for last domain or primary, and requires exact hostname', () => {
+  assert.match(source, /disabled=\{busy \|\| domain\.is_primary \|\| domains\.length <= 1\}/)
+  assert.doesNotMatch(source, /domains\.length <= 2/)
   assert.match(source, /requiredText=\{domainToDelete\?\.hostname \|\| ''\}/)
 })
