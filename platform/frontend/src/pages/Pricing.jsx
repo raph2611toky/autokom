@@ -1,6 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ArrowRight, Check, CheckCircle2, CircleHelp, GitBranch, ShieldCheck, Server, Workflow } from 'lucide-react'
 import { formatAr, getBillingPeriod, PRICING_PLANS, rememberPlan } from '../config/pricing.js'
+import { billingApi } from '../services/billingApi.js'
+import { API_AVAILABLE } from '../config/runtime.js'
+import { useAuth } from '../context/AuthContext.jsx'
 import '../styles/pricing.css'
 
 const comparison = [
@@ -19,13 +22,32 @@ const questions = [
   { question: 'Puis-je utiliser mon domaine ?', answer: 'Oui, dans les formules payantes proposées. La mise en ligne exigera ensuite la vérification du contrôle du domaine et la configuration du certificat HTTPS.' },
 ]
 
+export function activePricingPlan(subscription) {
+  if (!subscription || typeof subscription !== 'object') return null
+  const plan = subscription.active ? subscription.plan : 'free'
+  return PRICING_PLANS.some(item => item.id === plan) ? plan : null
+}
+
 export default function Pricing({ navigate }) {
   const [period, setPeriod] = useState(getBillingPeriod)
+  const [subscription, setSubscription] = useState(null)
+  const { status } = useAuth()
+  useEffect(() => {
+    if (!API_AVAILABLE || status !== 'authenticated') {
+      setSubscription(null)
+      return
+    }
+    let live = true
+    billingApi.account().then(result => { if (live) setSubscription(result?.subscription || null) })
+      .catch(() => { if (live) setSubscription(null) })
+    return () => { live = false }
+  }, [status])
+  const activePlan = status === 'authenticated' ? activePricingPlan(subscription) : null
   const choose = id => {
+    if (id === activePlan) return
     rememberPlan(id, undefined, period)
     navigate(id === 'free' ? '/deploy' : `/checkout/${id}`)
   }
-
   return (
     <div className="ak-pricing-page">
       <section className="ak-pricing-hero" aria-labelledby="ak-pricing-title">
@@ -41,23 +63,23 @@ export default function Pricing({ navigate }) {
           </div>
         </fieldset>
       </section>
-
       <div className="ak-pricing-cards">
-        {PRICING_PLANS.map(plan => (
-          <article className={`ak-pricing-card ${plan.highlighted ? 'is-highlighted' : ''}`} key={plan.id}>
+        {PRICING_PLANS.map(plan => {
+          const isActive = activePlan === plan.id
+          return <article className={`ak-pricing-card ${plan.highlighted && !isActive ? 'is-highlighted' : ''} ${isActive ? 'is-active-subscription' : ''}`} key={plan.id} aria-label={`${plan.name}${isActive ? ' — votre abonnement actuel' : ''}`}>
             <div className="ak-pricing-card-top">
               <div>
                 <h2>{plan.name}</h2>
                 <p>{plan.tagline}</p>
               </div>
-              {plan.highlighted && <span className="ak-pricing-popular">Recommandée</span>}
+              {isActive ? <span className="ak-pricing-current"><CheckCircle2 size={15}/> Votre offre actuelle</span> : plan.highlighted && <span className="ak-pricing-popular">Recommandée</span>}
             </div>
             <div className="ak-pricing-amount">
               <strong>{formatAr(period === 'annual' ? plan.annual : plan.monthly)}</strong>
               <span>/ {period === 'annual' ? 'an' : 'mois'}</span>
             </div>
             {period === 'annual' && plan.monthly > 0 ? <span className="ak-pricing-price-caption">Soit {formatAr(Math.round(plan.annual / 12))} par mois, facturé à l’année</span> : <span className="ak-pricing-price-caption">{plan.monthly ? 'Souscription depuis votre compte' : 'Accès gratuit, sans paiement'}</span>}
-            <button className={`ak-pricing-select ${plan.highlighted ? 'is-primary' : ''}`} type="button" onClick={() => choose(plan.id)}>{plan.cta}<ArrowRight size={18}/></button>
+            {isActive ? <button className="ak-pricing-select is-current-plan" type="button" disabled aria-current="true"><Check size={18}/> Abonnement actif</button> : <button className={`ak-pricing-select ${plan.highlighted ? 'is-primary' : ''}`} type="button" onClick={() => choose(plan.id)}>{plan.cta}<ArrowRight size={18}/></button>}
             <div className="ak-pricing-specs">
               <div><Server size={17}/><span>{plan.servers}</span></div>
               <div><Workflow size={17}/><span>{plan.capacity}</span></div>
@@ -66,10 +88,9 @@ export default function Pricing({ navigate }) {
               {plan.benefits.map(benefit => <li key={benefit}><Check size={16} aria-hidden="true"/><span>{benefit}</span></li>)}
             </ul>
           </article>
-        ))}
+        })}
       </div>
       <p className="ak-pricing-disclaimer">Grille commerciale proposée pour AUTOKOM par IKOM, en cours de validation. Montants et quotas indicatifs, hors frais éventuels de domaine et taxes à définir. Une souscription requiert une confirmation. Aucun moyen de paiement réel n'est encore connecté.</p>
-
       <section className="ak-pricing-compare" aria-labelledby="ak-pricing-compare-title">
         <div className="ak-pricing-section-head"><h2 id="ak-pricing-compare-title">Comparer les offres</h2><p>Les capacités essentielles sont incluses dès la première formule.</p></div>
         <div className="ak-pricing-table-scroll" role="region" aria-label="Comparatif des tarifs" tabIndex={0}>
@@ -79,13 +100,11 @@ export default function Pricing({ navigate }) {
           </table>
         </div>
       </section>
-
       <section className="ak-pricing-assurances" aria-label="Principes AUTOKOM">
         <div><GitBranch size={22}/><strong>GitHub intégré</strong><p>Choisissez votre dépôt, votre branche et votre dossier source.</p></div>
         <div><ShieldCheck size={22}/><strong>Infrastructure protégée</strong><p>La sécurité de l’infrastructure AUTOKOM reste toujours active.</p></div>
         <div><Workflow size={22}/><strong>Déploiement suivi</strong><p>Retrouvez le pipeline et les journaux dans chaque fiche de projet.</p></div>
       </section>
-
       <section className="ak-pricing-faq" aria-labelledby="ak-pricing-faq-title">
         <div className="ak-pricing-section-head"><h2 id="ak-pricing-faq-title"><CircleHelp size={24}/> Questions fréquentes</h2></div>
         <div className="ak-pricing-questions">{questions.map(item=><details key={item.question}><summary>{item.question}</summary><p>{item.answer}</p></details>)}</div>

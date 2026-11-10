@@ -61,3 +61,22 @@
 @media(max-width:870px) { .ak-pricing-cards { grid-template-columns:1fr; max-width:610px; margin:0 auto; } .ak-pricing-card-top { min-height:0; } }
 @media(max-width:620px) { .ak-pricing-hero { padding:27px 0 27px; } .ak-pricing-switch-inner { white-space:normal; } .ak-pricing-switch button { padding:10px; } .ak-pricing-cards { grid-template-columns:1fr; } .ak-pricing-card { padding:22px 20px; } .ak-pricing-benefits { gap:11px; } .ak-pricing-compare,.ak-pricing-faq { padding-top:48px; } .ak-pricing-assurances { display:block; padding:0; margin-top:45px; } .ak-pricing-assurances > div { border-right:0; border-bottom:1px solid var(--ak-border); padding:22px 0; } .ak-pricing-assurances > div:last-child { border:0; } .ak-pricing-questions { grid-template-columns:1fr; } }
 @media(prefers-reduced-motion:reduce) { .ak-pricing-card, .ak-pricing-select, .ak-pricing-switch button { transition:none; } }
+
+/* L'abonnement réellement actif est signalé indépendamment de l'offre recommandée. */
+.ak-pricing-card.is-active-subscription { border: 2px solid var(--ak-success, #25a878); box-shadow: 0 0 0 1px color-mix(in srgb, var(--ak-success, #25a878) 20%, transparent); }
+.ak-pricing-current { display:inline-flex; align-items:center; gap:6px; color:var(--ak-success, #25a878); border:1px solid var(--ak-success, #25a878); padding:7px 9px; font-size:11px; font-weight:800; }
+.ak-pricing-select.is-current-plan, .ak-pricing-select.is-current-plan:disabled { border-color:var(--ak-success, #25a878); color:var(--ak-success, #25a878); background:color-mix(in srgb, var(--ak-success, #25a878) 10%, transparent); cursor:default; opacity:1; justify-content:center; }
+
+/* Interrupteur de disponibilité dans le parcours classique. Conserve le champ checkbox natif et son état. */
+.app-shell .ak-ha-choice { display:flex; align-items:center; justify-content:space-between; gap:18px; flex-wrap:wrap; position:relative; min-height:58px; }
+.app-shell .ak-ha-choice > span { flex:1 1 220px; }
+.app-shell .ak-ha-choice strong { display:inline-flex; align-items:center; gap:8px; font-weight:750; }
+.app-shell .ak-ha-choice strong::after { content:'ⓘ'; font-size:17px; font-weight:500; color:var(--ak-muted); cursor:help; }
+.app-shell .ak-ha-choice small { display:block; max-height:0; overflow:hidden; opacity:0; transition:max-height .18s ease,opacity .18s ease; }
+.app-shell .ak-ha-choice strong:hover + small, .app-shell .ak-ha-choice:focus-within small { max-height:150px; opacity:1; padding-top:8px; }
+.app-shell .ak-ha-choice input[type='checkbox'] { appearance:none; -webkit-appearance:none; display:inline-block; position:relative; flex:0 0 46px; width:46px; height:26px; margin:0; border:1px solid var(--ak-border-strong); border-radius:20px; background:var(--ak-surface-2); cursor:pointer; transition:background .18s ease,border-color .18s ease; }
+.app-shell .ak-ha-choice input[type='checkbox']::before { content:''; display:block; position:absolute; width:18px; height:18px; top:3px; left:3px; border-radius:50%; background:var(--ak-muted); transition:transform .18s ease,background .18s ease; }
+.app-shell .ak-ha-choice input[type='checkbox']:checked { border-color:var(--ak-success, #25a878); background:var(--ak-success, #25a878); }
+.app-shell .ak-ha-choice input[type='checkbox']:checked::before { transform:translateX(20px); background:white; }
+.app-shell .ak-ha-choice input[type='checkbox']:focus-visible { outline:3px solid var(--ak-accent); outline-offset:3px; }
+.app-shell .ak-ha-choice input[type='checkbox']:disabled { opacity:.55; cursor:not-allowed; }
