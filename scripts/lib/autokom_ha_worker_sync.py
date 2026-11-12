@@ -200,7 +200,7 @@ def install_timer():
             f'After=network-online.target\nWants=network-online.target\n\n'
             f'[Service]\nType=oneshot\nUser=root\n'
             f'ExecStart=/usr/bin/python3 {script} --apply\n'
-            f'TimeoutStartSec=600\nNoNewPrivileges=yes\n'
+            f'TimeoutStartSec=600\nNoNewPrivileges=no\n'
             f'ProtectSystem=full\nPrivateTmp=yes\n\n')
     timer = ('[Unit]\nDescription=Keep AUTOKOM HA worker code synchronized\n\n'
              '[Timer]\nOnBootSec=3min\nOnUnitInactiveSec=15min\n'

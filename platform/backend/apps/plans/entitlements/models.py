@@ -3,7 +3,6 @@ import uuid
 from django.db import models
 from django.utils import timezone
 
-
 class ApplicationEntitlement(models.Model):
     """Droit accordé par application/environnement ; les sélections frontend ne donnent aucun droit."""
     class Status(models.TextChoices):
@@ -28,7 +27,6 @@ class ApplicationEntitlement(models.Model):
     expires_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
     def clean(self):
         from django.core.exceptions import ValidationError
         if self.status == self.Status.ACTIVE and self.grant_source == self.GrantSource.SYSTEM:
@@ -48,22 +46,19 @@ class ApplicationEntitlement(models.Model):
                     checkout.resource_plan_id != self.resource_plan_id or
                     checkout.expires_at <= timezone.now()):
                 raise ValidationError({'sandbox_checkout': 'Reçu de test actif, conforme au plan et à l’environnement requis.'})
-
     def __str__(self):
         return f'{self.environment} — {self.mode_offer.code} / {self.resource_plan.code} ({self.status})'
 
     class Meta:
         db_table = 'plans_applicationentitlement'
 
-
 class HighAvailabilityOption(models.Model):
-    """Paid feature REQUEST, never proof of payment or right to provision replicas."""
+    """Option HA autorisée par droit commercial ou par l'offre temporaire de lancement."""
     class Status(models.TextChoices):
         PENDING = 'PENDING', 'En attente de validation commerciale'
         ACTIVE = 'ACTIVE', 'Activée après validation'
         REJECTED = 'REJECTED', 'Refusée'
         EXPIRED = 'EXPIRED', 'Expirée'
-
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     environment = models.OneToOneField('environments.Environment', on_delete=models.PROTECT, related_name='ha_option')
     desired_replicas = models.PositiveSmallIntegerField(default=2)
@@ -77,12 +72,24 @@ class HighAvailabilityOption(models.Model):
     expires_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
     def clean(self):
         from django.core.exceptions import ValidationError
         if not 2 <= self.desired_replicas <= 20:
             raise ValidationError({'desired_replicas': 'Entre 2 et 20 réplicas.'})
         if self.status == self.Status.ACTIVE:
+            # A launch grant is NOT a commercial payment. It must match the
+            # server-side feature policy, the same environment and expiry.
+            from apps.plans.entitlements.mvp import MVP_HA_REF, enabled
+            if self.billing_reference == MVP_HA_REF:
+                if not enabled() or self.sandbox_checkout_id or self.approved_by_id or self.desired_replicas != 2:
+                    raise ValidationError('Option de lancement invalide.')
+                ent = ApplicationEntitlement.objects.filter(environment=self.environment).first()
+                if not ent or ent.grant_source != ApplicationEntitlement.GrantSource.SYSTEM or ent.status != 'ACTIVE':
+                    raise ValidationError('Droit de lancement absent.')
+                if (ent.expires_at != self.expires_at or
+                        (ent.expires_at and ent.expires_at <= timezone.now())):
+                    raise ValidationError('Validité de l’option de lancement incohérente.')
+                return
             if self.sandbox_checkout_id:
                 checkout = self.sandbox_checkout
                 if (checkout.status != SandboxCheckout.Status.ACCEPTED or
@@ -96,7 +103,6 @@ class HighAvailabilityOption(models.Model):
                     raise ValidationError('La HA de test exige un reçu simulé actif lié au même environnement.')
             elif not self.approved_by_id or not self.billing_reference or not self.activated_at:
                 raise ValidationError('La HA exige une approbation admin et une facturation vérifiée.')
-
     class Meta:
         db_table = 'plans_highavailabilityoption'
 
@@ -110,7 +116,6 @@ class SandboxCheckout(models.Model):
     class Period(models.TextChoices):
         MONTHLY = 'monthly', 'Mensuel'
         ANNUAL = 'annual', 'Annuel'
-
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     environment = models.ForeignKey('environments.Environment', on_delete=models.PROTECT, null=True, blank=True, related_name='sandbox_checkouts')
     created_by = models.ForeignKey('accounts.User', on_delete=models.PROTECT, related_name='sandbox_checkouts')
@@ -123,7 +128,6 @@ class SandboxCheckout(models.Model):
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.ACCEPTED)
     expires_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
-
     class Meta:
         db_table = 'plans_sandboxcheckout'
         constraints = [models.UniqueConstraint(fields=['environment', 'created_by', 'idempotency_key'], name='unique_sandbox_checkout_request')]
@@ -134,7 +138,6 @@ class SandboxCheckout(models.Model):
 
 class AccountSubscription(models.Model):
     """Current subscription of the signed-in account, independent of projects.
-
     Financial simulations are linked to immutable receipts and never grant
     entitlements to organizations owned by another account.
     """

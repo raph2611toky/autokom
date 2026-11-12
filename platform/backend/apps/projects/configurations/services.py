@@ -10,7 +10,6 @@ def get_config(env, config_id):
         raise NotFound('Configuration introuvable.')
     return cfg
 
-
 ALLOWED_STATIC_PROFILES = {'vite', 'npm_static', 'next_export', 'html'}
 BACKEND_RUNTIMES = {
     **dict.fromkeys(('python_fastapi', 'python_flask', 'python_django', 'python_wsgi'), 'PYTHON'),
@@ -21,10 +20,8 @@ BACKEND_RUNTIMES = {
 
 _NPM_SCRIPT = __import__('re').compile(r'^npm run [A-Za-z][A-Za-z0-9:_-]{0,63}$')
 
-
 def managed_internal_port(build_method, settings):
     """New managed backend configurations use 8000, frontend uses 8080.
-
     Dockerfile (user-supplied) configurations are not rewritten.
     Existing finalized configurations and their deployed endpoints are untouched.
     """
@@ -34,7 +31,6 @@ def managed_internal_port(build_method, settings):
     if build_method in (DeploymentConfig.BuildMethod.STATIC, DeploymentConfig.BuildMethod.AUTO):
         return 8080
     return None
-
 
 def check_configuration(cfg):
     """Explicitly allow only the fixed trusted frontend recipes in the isolated runner."""
@@ -99,7 +95,6 @@ def validate_branch(user, cfg):
             break
     raise ValidationError({'branch': 'Branche non trouvée parmi les branches autorisées.'})
 
-
 @transaction.atomic
 def create_config(user, env, attrs):
     latest = DeploymentConfig.objects.filter(environment=env).order_by('-version').first()
@@ -114,9 +109,11 @@ def create_config(user, env, attrs):
     return DeploymentConfig.objects.create(environment=env, created_by=user,
         version=(latest.version+1) if latest else 1, is_draft=True, **data)
 
-
 def check_entitlement(cfg):
-    """Draft may request premium; finalization requires an actual granted entitlement."""
+    """Authorize server side. MVP is a distinct FREE launch grant, never paid checkout."""
+    from apps.plans.entitlements.mvp import enabled as mvp_enabled, authorize as mvp_authorize
+    if mvp_enabled():
+        return mvp_authorize(cfg)
     from rest_framework.exceptions import PermissionDenied
     from django.utils import timezone
     entitlement = getattr(cfg.environment, 'entitlement', None)
@@ -137,9 +134,6 @@ def check_entitlement(cfg):
                 receipt.resource_plan_id != entitlement.resource_plan_id or
                 receipt.expires_at <= timezone.now()):
             raise PermissionDenied('Abonnement de démonstration désactivé, expiré ou non valide.')
-    # Free plan is still limited by assigned CPU/RAM/quota; only fixed, non-Dockerfile
-    # frontend recipes are allowed. Custom services remain paid.
-    # A client must not gain a paid backend runtime by editing request JSON.
     if not entitlement.resource_plan.is_premium and cfg.build_method not in (DeploymentConfig.BuildMethod.STATIC, DeploymentConfig.BuildMethod.AUTO):
         raise PermissionDenied('L’offre Découverte autorise les recettes frontend approuvées, sans Dockerfile personnalisé.')
     if cfg.mode == 'DEVSECOPS' and entitlement.mode_offer.code != 'DEVSECOPS':
