@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ArrowRight, Check, CheckCircle2, CircleHelp, GitBranch, ShieldCheck, Server, Workflow } from 'lucide-react'
+import { PRICING_PLANS } from '../config/pricing.js'
 import { billingApi } from '../services/billingApi.js'
 import { API_AVAILABLE } from '../config/runtime.js'
 import { useAuth } from '../context/AuthContext.jsx'
@@ -18,8 +19,12 @@ const questions = [
   { question: 'Que se passe-t-il à expiration ?', answer: 'Les accès publics sont suspendus. Les conteneurs restent conservés pendant 24 heures ; la suppression définitive dépendra de la disponibilité d’un parcours de renouvellement.' },
 ]
 export function activePricingPlan(subscription) {
-  if (subscription?.launch_offer) return 'launch'
-  return subscription?.active ? subscription?.plan : 'free'
+  // Preserve the public helper's contract for legacy UI/tests while treating
+  // the temporary launch entitlement as free, not as a paid subscription.
+  if (!subscription || typeof subscription !== 'object') return null
+  if (subscription.launch_offer) return 'free'
+  const plan = subscription.active ? subscription.plan : 'free'
+  return PRICING_PLANS.some(item => item.id === plan) ? plan : null
 }
 export default function Pricing({ navigate }) {
   const [subscription, setSubscription] = useState(null)
