@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """AUTOKOM worker desired-state reconciliation. No inbound management socket.
 
-The worker reads *only* its own manifest from a private GCS bucket, pulls
-immutable digests using a short-lived workload token, and runs bounded Docker
-containers behind the local nginx ingress.  It never obtains controller IAM.
+Read the private GCS manifest, pull immutable images, and route applications
+through the worker's nginx. Customer containers remain on internal-only Docker
+bridges; the HOST accesses the container IP directly instead of publishing a
+loopback port (which Docker may silently omit for --internal bridges).
 """
 from __future__ import annotations
 
-import base64
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -61,7 +62,7 @@ def read_manifest(bucket, name, credential):
             raw = response.read(262145)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            return None  # Newly created MIG VM, no assignment yet.
+            return None
         raise WorkerError('GCS read HTTP_' + str(exc.code)) from None
     if len(raw) > 262144:
         raise WorkerError('Manifest size limit exceeded')
@@ -95,6 +96,8 @@ def validate(data, cfg, instance, zone):
             raise WorkerError('Untrusted container reference')
         if not isinstance(hostnames, list) or not (1 <= len(hostnames) <= 8) or any(not isinstance(h, str) or not HOST.fullmatch(h) or h in hosts for h in hostnames):
             raise WorkerError('Invalid or conflicting hostname')
+        # Legacy bind_port is retained in the GCS schema for compatibility,
+        # but is NOT published on the host or used to address the container.
         if type(binding) is not int or not 21000 <= binding <= 55000 or binding in ports:
             raise WorkerError('Invalid or conflicting bind port')
         if type(internal) is not int or not 1024 <= internal <= 65535:
@@ -134,6 +137,25 @@ def is_running(name, image):
     return result.returncode == 0 and result.stdout.strip() == 'true|' + image
 
 
+def container_ipv4(app):
+    """Read only the IP on this application's dedicated internal Docker bridge.
+
+    The IP comes from Docker, not from a GCS manifest or user input. Never
+    inspect a generic 'first available' network, which could be public.
+    """
+    result = docker('container', 'inspect', container_name(app), timeout=10)
+    try:
+        obj = json.loads(result.stdout)
+        row = obj[0]['NetworkSettings']['Networks'][network_name(app)]
+        address = row['IPAddress']
+        parsed = ipaddress.IPv4Address(address)
+        if not parsed.is_private or parsed.is_loopback or parsed.is_link_local or parsed.is_multicast or parsed.is_unspecified:
+            raise ValueError('Unexpected Docker IP')
+        return str(parsed)
+    except (IndexError, KeyError, TypeError, ValueError) as exc:
+        raise WorkerError('Missing private Docker bridge IP for ' + app['environment_id']) from exc
+
+
 def pull(image):
     with tempfile.TemporaryDirectory(prefix='ak-docker-', dir='/run/autokom-ha') as conf:
         os.chmod(conf, 0o700)
@@ -145,7 +167,11 @@ def pull(image):
 
 
 def health(app):
-    url = f"http://127.0.0.1:{app['bind_port']}{app['healthcheck']}"
+    try:
+        address = container_ipv4(app)
+    except WorkerError:
+        return False
+    url = f"http://{address}:{app['internal_port']}{app['healthcheck']}"
     req = urllib.request.Request(url, headers={'Host': app['hosts'][0]})
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -162,18 +188,22 @@ def health(app):
 
 def install_app(app):
     name = container_name(app)
-    if is_running(name, app['image']) and health(app):
-        return
+    if is_running(name, app['image']):
+        if health(app):
+            return
+        # Keep a running but unhealthy candidate for inspection. The old code
+        # killed/re-pulled it every ~2 minutes, hiding the real error.
+        raise WorkerError('Running app unhealthy; container preserved: ' + app['environment_id'])
     exists = docker('container', 'inspect', name, check=False, timeout=10)
     if exists.returncode == 0:
-        # If an identically named container is unhealthy, restart only that owned candidate.
         docker('rm', '-f', name, timeout=30)
     pull(app['image'])
     network = network_name(app)
     if docker('network', 'inspect', network, check=False, timeout=10).returncode:
         docker('network', 'create', '--internal', '--driver', 'bridge', network, timeout=30)
+    # The --internal bridge blocks Docker port publishing on the installed
+    # engine. Instead, reach its container address via the local bridge only.
     docker('run', '-d', '--name', name, '--network', network,
-           '--publish', f"127.0.0.1:{app['bind_port']}:{app['internal_port']}",
            '--cpus', str(app['cpu_millicores'] / 1000), '--memory', str(app['memory_mb']) + 'm',
            '--memory-swap', str(app['memory_mb']) + 'm', '--pids-limit', '128',
            '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--read-only',
@@ -202,10 +232,15 @@ def _atomic_write(dest, content, mode=0o644):
 def render_nginx(apps):
     lines = ['# AUTOKOM HA - generated only from validated private GCS desired state.']
     for app in apps:
+        address = container_ipv4(app)
         for host in app['hosts']:
             lines += ['server {', '    listen 8080;', '    server_name ' + host + ';',
-                      '    client_max_body_size 25m;', '    location / {',
-                      f"        proxy_pass http://127.0.0.1:{app['bind_port']};",
+                      '    client_max_body_size 25m;',
+                      # Keep the private health route authoritative even when
+                      # the request Host selects this application's vhost.
+                      '    location ^~ /__autokom_health/ { proxy_pass http://127.0.0.1:18080; }',
+                      '    location / {',
+                      f"        proxy_pass http://{address}:{app['internal_port']};",
                       '        proxy_http_version 1.1;', '        proxy_set_header Host $host;',
                       '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
                       '        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;',
@@ -224,7 +259,17 @@ def reconcile(cfg, apps):
             previous = {}
     for app in apps:
         install_app(app)
-    new_routes = {row['environment_id']: {'port': row['bind_port'], 'healthcheck': row['healthcheck'], 'host': row['hosts'][0], 'run_id': row['run_id']} for row in apps}
+    new_routes = {
+        row['environment_id']: {
+            'port': row['bind_port'],  # schema compatibility, no host publish
+            'container_ip': container_ipv4(row),
+            'container_port': row['internal_port'],
+            'healthcheck': row['healthcheck'],
+            'host': row['hosts'][0],
+            'run_id': row['run_id'],
+        }
+        for row in apps
+    }
     rendered = render_nginx(apps)
     original = NGINX.read_text() if NGINX.is_file() else ''
     _atomic_write(NGINX, rendered)
@@ -239,7 +284,6 @@ def reconcile(cfg, apps):
             _atomic_write(NGINX, original)
             _atomic_write(ROUTES, json.dumps(previous.get('routes', {}), sort_keys=True) + '\n')
             raise WorkerError('Nginx reload failed; old configuration restored')
-    # Only prune containers once the new ingress was accepted; no other Docker images touched.
     old_names = previous.get('containers', []) if isinstance(previous, dict) else []
     new_names = [container_name(a) for a in apps]
     for name in old_names:
@@ -263,13 +307,12 @@ def loop():
             if content is not None:
                 apps = validate(content, cfg, instance, zone)
                 fingerprint = json.dumps(apps, sort_keys=True)
-                # Recheck state even with unchanged manifest (containers may have crashed).
                 if fingerprint != previous or any(not is_running(container_name(a), a['image']) or not health(a) for a in apps):
                     count = reconcile(cfg, apps)
                     print(f'AUTOKOM_HA_APPS_READY count={count}', flush=True)
                     previous = fingerprint
         except (WorkerError, OSError, ValueError, TypeError, subprocess.TimeoutExpired, urllib.error.URLError) as exc:
-            print('AUTOKOM_HA_WORKER_RECONCILE_ERROR reason=' + type(exc).__name__, flush=True)
+            print('AUTOKOM_HA_WORKER_RECONCILE_ERROR reason=' + type(exc).__name__ + ' detail=' + str(exc)[:180], flush=True)
         time.sleep(35)
 
 

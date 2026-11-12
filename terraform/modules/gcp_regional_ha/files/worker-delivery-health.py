@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Private readiness service behind nginx: MIG and per-application health."""
+"""Private readiness behind nginx: MIG and per-application health."""
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
 from pathlib import Path
 import re
@@ -37,20 +38,27 @@ def healthy_app(env: str, run_id: str, routes: Path = ROUTES) -> bool:
         row = json.loads(routes.read_text(encoding='utf-8')).get(env)
         if not isinstance(row, dict) or row.get('run_id') != run_id:
             return False
-        port = row['port']; health = row['healthcheck']; host = row['host']
-        if type(port) is not int or not 21000 <= port <= 55000 or not isinstance(health, str) or not health.startswith('/') or len(health) > 120 or not isinstance(host, str):
+        host = row['host']; health = row['healthcheck']
+        address = row.get('container_ip')
+        port = row.get('container_port')
+        if not isinstance(host, str) or not isinstance(health, str) or not health.startswith('/') or len(health) > 120:
+            return False
+        if type(port) is not int or not 1024 <= port <= 65535:
+            return False
+        ip = ipaddress.IPv4Address(address)
+        if not ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast:
             return False
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, req, fp, code, msg, headers, newurl):
                 return None
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
-        request = urllib.request.Request(f'http://127.0.0.1:{port}{health}', headers={'Host': host})
+        request = urllib.request.Request(f'http://{ip}:{port}{health}', headers={'Host': host})
         try:
             with opener.open(request, timeout=3) as response:
                 return 200 <= response.status < 400
         except urllib.error.HTTPError as exc:
             return 300 <= exc.code < 400
-    except (OSError, ValueError, TypeError, KeyError, urllib.error.URLError, TimeoutError):
+    except (OSError, ValueError, TypeError, KeyError, urllib.error.URLError, TimeoutError, ipaddress.AddressValueError):
         return False
 
 
@@ -77,10 +85,8 @@ def handler_factory(health_path: str, check=prepared, app_check=healthy_app):
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-
         def log_message(self, fmt, *args):
             pass
-
     return Handler
 
 

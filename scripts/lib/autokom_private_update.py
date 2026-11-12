@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-"""AUTOKOM Core — GitHub App Device Flow pour mise à jour d'un dépôt privé.
+"""AUTOKOM Core — secure fast-forward update using GitHub CLI or Device Flow.
 
-Dépendances : bibliothèque standard Python, Git. PAS de GitHub CLI, PAT,
-clé SSH, secret d'application ou jeton persistent.
-
-Le Client ID (public) est lu depuis /etc/autokom/update.env ou
-AUTOKOM_UPDATE_GITHUB_CLIENT_ID. Pour GitHub App : Device Flow doit être actif
-et l'app installée avec Contents: read sur raph2611toky/autokom.
-
-Le jeton éphémère reste en mémoire et dans l'environnement du processus Git
-uniquement pendant le fetch. Le script GIT_ASKPASS créé temporairement
-ne contient aucune information d'authentification.
+When AUTOKOM_UPDATE_GITHUB_USER explicitly names a login, use that account's
+already stored GitHub CLI credential WITHOUT switching the global gh account.
+If not configured, retain the original short-lived GitHub App Device Flow.
+Never store a token in this repository, the remote URL, or Git CLI arguments.
 """
 from __future__ import annotations
 
@@ -51,12 +45,7 @@ REQUIRED_CORE = (
     "ansible/playbooks/foundation.yml",
 )
 PROTECTED_AREAS = ("scripts/", "ansible/", "autokom", "install.sh")
-# Retraits intentionnels, déjà approuvés : ce sont des modèles de configuration
-# publics obsolètes, et NON des composants exécutables du Core.
-# Ne jamais généraliser cette exception à tous les chemins *.env.example.
-APPROVED_NON_CORE_REMOVALS = frozenset({
-    "scripts/dev/platform-runtime.env.example",
-})
+APPROVED_NON_CORE_REMOVALS = frozenset({"scripts/dev/platform-runtime.env.example"})
 DEVICE_URL = "https://github.com/login/device/code"
 TOKEN_URL = "https://github.com/login/oauth/access_token"
 
@@ -71,11 +60,10 @@ def _run(args, root, *, env=None, timeout=120, check=True):
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise UpdateError("Impossible d'exécuter la commande requise ou délai dépassé.") from exc
     if check and proc.returncode:
-        # L'erreur git ne doit pas être reproduite brute (peut contenir une URL secrète).
         if args[0] == "git" and "fetch" in args:
             raise UpdateError(
-                "Git fetch refusé : vérifier que la GitHub App est installée sur le dépôt "
-                "et possède Contents: Read-only, et que ton compte GitHub a accès au dépôt."
+                "Git fetch refusé : vérifier l'accès de ton compte GitHub au dépôt "
+                "raph2611toky/autokom (Contents: Read-only minimum)."
             )
         detail = (proc.stderr or "").strip()[:500]
         raise UpdateError(f"Commande {args[0]} échouée ({proc.returncode}) : {detail}")
@@ -138,9 +126,6 @@ def _check_target(root, old, new):
     if old != new:
         deleted = _git(root, "diff", "--name-only", "--diff-filter=D", old, new,
                        "--", *PROTECTED_AREAS)
-        # Contrôle TOUJOURS bloquant pour les suppressions de vrai code,
-        # rôles, scripts et playbooks ; exception explicite pour les anciens
-        # exemples .env retirés volontairement du dépôt.
         blocked = [path for path in deleted.splitlines()
                    if path not in APPROVED_NON_CORE_REMOVALS]
         if blocked:
@@ -150,7 +135,8 @@ def _check_target(root, old, new):
             )
 
 
-def _client_id_from_file(path=CONFIG_FILE):
+def _config_value(name, path=CONFIG_FILE):
+    """Read only named, non-secret account/client-id settings."""
     if not path.is_file():
         return ""
     if path.is_symlink():
@@ -160,11 +146,15 @@ def _client_id_from_file(path=CONFIG_FILE):
             line = raw.strip()
             if line.startswith("export "):
                 line = line[7:].strip()
-            if line.startswith("AUTOKOM_UPDATE_GITHUB_CLIENT_ID="):
+            if line.startswith(name + "="):
                 return line.partition("=")[2].strip().strip('"\'')
     except (OSError, UnicodeError) as exc:
         raise UpdateError("Impossible de lire la configuration locale GitHub") from exc
     return ""
+
+
+def _client_id_from_file(path=CONFIG_FILE):
+    return _config_value("AUTOKOM_UPDATE_GITHUB_CLIENT_ID", path)
 
 
 def _client_id():
@@ -181,16 +171,45 @@ def _client_id():
     return value
 
 
+def _gh_user():
+    user = (os.environ.get('AUTOKOM_UPDATE_GITHUB_USER') or _config_value('AUTOKOM_UPDATE_GITHUB_USER')).strip()
+    if user and (not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?', user) or '--' in user):
+        raise UpdateError('AUTOKOM_UPDATE_GITHUB_USER : identifiant GitHub invalide')
+    return user
+
+
+def _gh_token_for_user(user):
+    """Use a specific stored GH account, without switching or logging out others."""
+    env = os.environ.copy()
+    # GH_TOKEN / GITHUB_TOKEN override the gh credential store; never let them
+    # redirect a named-user request to an unrelated CI identity.
+    for key in ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'):
+        env.pop(key, None)
+    try:
+        proc = subprocess.run(
+            ['gh', 'auth', 'token', '--hostname', 'github.com', '--user', user],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            check=False, timeout=15, env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UpdateError('GitHub CLI indisponible : installer gh et connecter le compte root') from exc
+    secret = proc.stdout.strip()
+    if proc.returncode or len(secret) < 24 or '\n' in secret or '\r' in secret:
+        raise UpdateError(
+            'Le compte GitHub ' + user + ' n\'est pas authentifié dans gh pour cet utilisateur Linux. '
+            'Exécuter gh auth login --hostname github.com --git-protocol https --web.'
+        )
+    return secret
+
+
 def _post_github(url, payload):
     request = Request(
-        url,
-        data=urlencode(payload).encode("ascii"),
+        url, data=urlencode(payload).encode("ascii"),
         headers={
             "Accept": "application/json",
             "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": "AUTOKOM-Core-Device-Flow/1.0",
-        },
-        method="POST",
+        }, method="POST",
     )
     try:
         with urlopen(request, timeout=20) as response:
@@ -224,12 +243,10 @@ def _authorize(client_id):
         raise UpdateError("Réponse Device Flow GitHub invalide") from exc
     if uri != "https://github.com/login/device":
         raise UpdateError("URL d'autorisation GitHub inattendue")
-
     print("\nAUTOKOM — Autorisation GitHub", flush=True)
     print(f"  1. Ouvrir dans le navigateur : {uri}", flush=True)
     print(f"  2. Entrer ce code : {user_code}", flush=True)
     print("  3. Confirmer l'autorisation. AUTOKOM attend la réponse…\n", flush=True)
-
     deadline = time.monotonic() + duration
     while True:
         if time.monotonic() + interval > deadline:
@@ -258,8 +275,6 @@ def _authorize(client_id):
 
 
 def _fetch_with_memory_token(root, branch, token):
-    # Jamais d'identifiant dans l'URL Git, les options Git, un fichier Git ou la CLI.
-    # Le helper ne lit le jeton qu'à partir de l'environnement du sous-processus.
     with tempfile.TemporaryDirectory(prefix="autokom-git-") as folder:
         os.chmod(folder, 0o700)
         helper = Path(folder) / "askpass.sh"
@@ -280,7 +295,6 @@ def _fetch_with_memory_token(root, branch, token):
         env["GIT_ASKPASS"] = str(helper)
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["AUTOKOM_GIT_TOKEN"] = token
-        # credential.helper= vide neutralise les helpers d'identifiants persistants.
         _run(
             ("git", "-c", "credential.helper=", "-c", "credential.useHttpPath=true",
              "fetch", "--no-tags", "origin", f"refs/heads/{branch}"),
@@ -290,10 +304,6 @@ def _fetch_with_memory_token(root, branch, token):
 
 
 def _print_git_changes(root, old, new):
-    """Show true Git changes between commits: added/deleted lines and files.
-
-    No Git credentials are inspected, persisted or printed. Colors only on a TTY.
-    """
     raw = _git(root, 'diff', '--numstat', '--no-renames', old, new)
     changes = []
     added = removed = 0
@@ -307,11 +317,9 @@ def _print_git_changes(root, old, new):
         if d.isdigit():
             removed += int(d)
         changes.append((path, a, d))
-
     tty = sys.stdout.isatty()
     def color(value, shade):
         return f'\x1b[{shade}m{value}\x1b[0m' if tty else value
-
     print(f'\n  MODIFICATIONS GIT · {len(changes)} fichier(s) · origin/{UPDATE_BRANCH}', flush=True)
     shown = changes[:40]
     for path, a, d in shown:
@@ -342,9 +350,14 @@ def update(root: Path, *, check=False):
         return 0 if not missing else 2
     if not shutil_which_git():
         raise UpdateError("Git n'est pas installé (prévu dans le playbook Ansible foundation)")
-    client_id = _client_id()
-    token = _authorize(client_id)
-    print("Autorisation reçue. Vérification du dépôt distant…", flush=True)
+    user = _gh_user()
+    if user:
+        token = _gh_token_for_user(user)
+        print('AUTOKOM — GitHub CLI : compte ' + user + ' (authentification conservée).', flush=True)
+    else:
+        client_id = _client_id()
+        token = _authorize(client_id)
+        print("Autorisation reçue. Vérification du dépôt distant…", flush=True)
     try:
         _fetch_with_memory_token(root, UPDATE_BRANCH, token)
     finally:
@@ -373,7 +386,7 @@ def shutil_which_git():
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Mise à jour AUTOKOM par GitHub Device Flow (sans gh)")
+    parser = argparse.ArgumentParser(description="Mise à jour AUTOKOM : compte gh nominatif ou GitHub Device Flow")
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--check", action="store_true", help="Diagnostic local seulement")
     args = parser.parse_args(argv)
