@@ -1,10 +1,10 @@
-# AUTOKOM — Migration HA 2 vCPU / 4 Go / 100 Go et autoscaling lié aux applications
+# AUTOKOM — Migration HA 2 vCPU / 4 Go / 70 Go et autoscaling lié aux applications
 
 ## Périmètre exact du correctif
 
 - MIG régional `autokom-ha-rmig`, zones `us-central1-a` et `us-central1-f`.
-- Template VM `e2-custom-2-4096`, disque système **100 Go `pd-balanced`**, instances privées et mêmes tags/IAM/NAT que le déploiement existant.
-- Autoscaler **2 à 6 workers**, CPU cible **55 %**, initialisation de politique à **90 s** ; **30 min de stabilisation du scale-in** pour éviter les oscillations. Le bootstrap Ubuntu/Docker peut toujours prendre plusieurs minutes ; 90 s n'est pas une promesse de VM utilisable en 90 s.
+- Template VM `e2-custom-2-4096`, disque système **70 Go `pd-balanced`**, instances privées et mêmes tags/IAM/NAT que le déploiement existant.
+- Autoscaler **2 à 5 workers**, CPU cible **55 %**, initialisation de politique à **90 s** ; **30 min de stabilisation du scale-in** pour éviter les oscillations. Le bootstrap Ubuntu/Docker peut toujours prendre plusieurs minutes ; 90 s n'est pas une promesse de VM utilisable en 90 s.
 - Réconciliation applicative : **3 072 Mio et 1 600 millicœurs** réservés aux conteneurs sur chaque nouveau worker, le reste pour Ubuntu/Docker/Nginx. Une application isolée ne peut pas demander plus de 2 800 Mio / 1 600 millicœurs.
 - Le contrôleur relève automatiquement `minNumReplicas` à hauteur des demandes lorsque la capacité est insuffisante, en conservant le scaling CPU et les plafonds GCP. Le nouveau planificateur préserve **2 zones distinctes par application HA**. Le minimum redescend après 30 min de demande moindre, sans effacer les autres paramètres de l'autoscaler.
 - Pendant le remplacement progressif, un ancien worker `e2-small` reste limité à son **ancien budget de 1 500 Mio** : aucune surcharge temporaire ne lui est attribuée.
@@ -57,7 +57,9 @@ Si le plan est conforme :
 sudo autokom iac ha upgrade --apply
 ```
 
-Après la commande, saisir `APPLIQUER-GCP`. Elle sauvegarde `terraform.tfvars`, prépare et applique le plan approuvé. Les mises à jour sont `PROACTIVE`, `SUBSTITUTE`, `max_surge_fixed=2`, `max_unavailable_fixed=0`, et attendent 300 secondes après la disponibilité d’infrastructure des nouvelles VM, pour laisser les agents et manifestes converger. Cette attente ne vérifie toutefois pas la santé applicative avant retrait des anciennes VM. Le fournisseur GCP et le quota peuvent imposer des délais et erreurs de stock ; aucun « zero downtime » n'est garanti pendant les changements d'instance tant que la santé applicative et le routage public HTTPS ne sont pas validés.
+Après la commande, saisir `APPLIQUER-GCP`. Elle sauvegarde `terraform.tfvars`, prépare et applique le plan approuvé. Les mises à jour sont `PROACTIVE`, `SUBSTITUTE`, `max_surge_fixed=2`, `max_unavailable_fixed=0`, et reposent sur les contrôles de santé du MIG avant retrait des anciennes VM. Le paramètre `min_ready_sec` a été retiré car il n’est pas compatible avec le fournisseur Terraform installé. Cette attente ne vérifie toutefois pas la santé applicative avant retrait des anciennes VM. Le fournisseur GCP et le quota peuvent imposer des délais et erreurs de stock ; aucun « zero downtime » n'est garanti pendant les changements d'instance tant que la santé applicative et le routage public HTTPS ne sont pas validés.
+
+Le disque `pd-balanced` de 70 Go continue à consommer le quota SSD régional. Avec `max_surge_fixed=2`, il faut au moins **140 Go de quota SSD libre** pendant une rotation du template ; sinon Google Cloud conserve les anciens workers et refuse la création des nouveaux.
 
 **Ne pas** lancer en parallèle `gcloud ... resize`, `delete-instances`, `stop`, `recreate-instances` ou `terraform apply` depuis une autre session. Le MIG doit rester sous autoscaler et Terraform.
 
@@ -86,9 +88,9 @@ gcloud compute instance-groups managed describe autokom-ha-rmig \
   --format='value(status.isStable)'
 ```
 
-Vérifier pour les nouvelles instances : `machineType=e2-custom-2-4096`, disque de boot de 100 Go, santé MIG `HEALTHY`; les applications HA doivent disposer de deux endpoints `HEALTHY` situés dans deux zones distinctes. Pour la montée en capacité, lancer `sudo autokom iac ha delivery --check` et lire `capacity.required`/`capacity.target`/`capacity.status` ; **aucune surcharge artificielle de production** n'est nécessaire. Une simulation `--check` n'ajoute aucune VM.
+Vérifier pour les nouvelles instances : `machineType=e2-custom-2-4096`, disque de boot de 70 Go, santé MIG `HEALTHY`; les applications HA doivent disposer de deux endpoints `HEALTHY` situés dans deux zones distinctes. Pour la montée en capacité, lancer `sudo autokom iac ha delivery --check` et lire `capacity.required`/`capacity.target`/`capacity.status` ; **aucune surcharge artificielle de production** n'est nécessaire. Une simulation `--check` n'ajoute aucune VM.
 
-Une erreur IAM `compute.autoscalers.update`, un quota Compute Engine insuffisant ou une pénurie régionale se traduit par `CAPACITY_SCALE_ERROR` et doit être corrigée côté autorisations/quota. N'augmenter le plafond de six VM qu'après vérification des quotas et de la distribution des zones.
+Une erreur IAM `compute.autoscalers.update`, un quota Compute Engine insuffisant ou une pénurie régionale se traduit par `CAPACITY_SCALE_ERROR` et doit être corrigée côté autorisations/quota. N'augmenter le plafond de cinq VM qu'après vérification des quotas et de la distribution des zones.
 
 ## HTTPS public et bascule DNS : étape distincte
 
@@ -103,4 +105,4 @@ Le statut `HTTP_LB_READY_NOT_HTTPS` reste donc explicitement non public. Ce corr
 - Si le plan Terraform comporte des changements inconnus, ne pas appliquer : aucun changement GCP n'est effectué.
 - `terraform.tfvars.bak-<date>` est conservé sur le serveur ; en cas d'échec **avant** l'application Terraform, restaurer son contenu et refaire un plan.
 - En cas de remplacement de VMs déjà commencé, **ne pas supprimer** les nouvelles instances manuellement ; examiner le statut MIG, les quotas et les logs avant tout retour vers l'ancien template.
-- Le `google_compute_instance_template` crée de nouvelles instances avec un disque de 100 Go ; le disque de chaque ancien worker est jetable par conception. Les images applicatives restent dans Artifact Registry et les manifests désirés privés GCS.
+- Le `google_compute_instance_template` crée de nouvelles instances avec un disque de 70 Go ; le disque de chaque ancien worker est jetable par conception. Les images applicatives restent dans Artifact Registry et les manifests désirés privés GCS.

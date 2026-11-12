@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan/apply the AUTOKOM 2-vCPU/4-GiB/100-GiB regional MIG upgrade.
+"""Plan/apply the AUTOKOM 2-vCPU/4-GiB/70-GiB regional MIG upgrade.
 
 Only the approved Terraform-managed MIG template, MIG updater and autoscaler
 may change. No remote SSH, unmanaged resource deletion, or implicit DNS cutover.
@@ -20,8 +20,8 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 ENV_DIR = ROOT / 'terraform/environments/gcp-ha'
 TFVARS = ENV_DIR / 'terraform.tfvars'
-SAFETY = {'machine_type': '"e2-custom-2-4096"', 'boot_disk_size_gb': '100',
-          'min_replicas': '2', 'max_replicas': '6', 'cpu_target': '0.55',
+SAFETY = {'machine_type': '"e2-custom-2-4096"', 'boot_disk_size_gb': '70',
+          'min_replicas': '2', 'max_replicas': '5', 'cpu_target': '0.55',
           'cooldown_seconds': '90'}
 ALLOWED = {
     'module.regional_web_ha.google_compute_instance_template.web',
@@ -120,7 +120,7 @@ def run(*, apply):
         raise UpgradeError('bootstrap_mode="worker" requis : controle des VM deja en production')
     changed = render_tfvars(original)
     if not apply:
-        print('AUTOKOM HA : previsualisation 2 vCPU / 4 GiB / 100 Go, 2-6 workers, CPU 55 %')
+        print('AUTOKOM HA : previsualisation 2 vCPU / 4 GiB / 70 Go, 2-5 workers, CPU 55 %')
         print('Ancien fichier terraform.tfvars preserve. Parametres planifies :')
         for k, v in SAFETY.items():
             print(f'  {k} = {v}')

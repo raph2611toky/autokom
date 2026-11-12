@@ -109,10 +109,10 @@ def test_upgrade_preserves_active_flags_and_rejects_unrelated_changes():
     sample = 'project_id = "project"\nbootstrap_mode = "worker"\nenable_app_delivery = true\nmachine_type = "e2-small"\n'
     transformed = render_tfvars(sample)
     assert 'machine_type = "e2-custom-2-4096"' in transformed
-    assert 'boot_disk_size_gb = 100' in transformed
+    assert 'boot_disk_size_gb = 70' in transformed
     assert 'bootstrap_mode = "worker"' in transformed
     assert 'enable_app_delivery = true' in transformed
-    assert 'max_replicas = 6' in transformed
+    assert 'max_replicas = 5' in transformed
     plan = {'resource_changes':[{'address':'module.regional_web_ha.google_compute_instance_template.web',
                                  'change':{'actions':['delete','create']}}]}
     assert validate_plan(plan)

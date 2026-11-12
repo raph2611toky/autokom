@@ -27,8 +27,8 @@ variable "machine_type" {
 }
 variable "boot_disk_size_gb" {
   type        = number
-  default     = 100
-  description = "Taille disque SSD des workers (Go)."
+  default     = 70
+  description = "Taille disque pd-balanced des workers (Go)."
 }
 variable "boot_image" {
   type    = string
@@ -52,7 +52,7 @@ variable "min_replicas" {
 }
 variable "max_replicas" {
   type    = number
-  default = 6
+  default = 5
 }
 variable "cpu_target" {
   type    = number

@@ -36,11 +36,11 @@ variable "machine_type" {
 }
 variable "boot_disk_size_gb" {
   type        = number
-  default     = 100
+  default     = 70
   description = "Taille du disque systeme des workers du MIG (Go)."
   validation {
-    condition     = var.boot_disk_size_gb >= 100 && floor(var.boot_disk_size_gb) == var.boot_disk_size_gb
-    error_message = "Le disque systeme doit faire au moins 100 Go."
+    condition     = var.boot_disk_size_gb >= 70 && floor(var.boot_disk_size_gb) == var.boot_disk_size_gb
+    error_message = "Le disque systeme doit faire au moins 70 Go."
   }
 }
 variable "boot_image" {
@@ -79,7 +79,7 @@ variable "min_replicas" {
 }
 variable "max_replicas" {
   type    = number
-  default = 6
+  default = 5
 }
 variable "cpu_target" {
   type    = number

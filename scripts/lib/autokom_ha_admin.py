@@ -330,7 +330,7 @@ def main(argv=None):
     mode.add_argument('--check', action='store_true', help='Prévol sans modification')
     mode.add_argument('--apply', action='store_true', help='Activer le contrôleur systemd (root)')
     mode.add_argument('--status', action='store_true', help='Rapport de réconciliation et santé applicative')
-    upgrade = commands.add_parser('upgrade', help='Mettre a niveau les workers MIG 2 vCPU / 4 Go / 100 Go')
+    upgrade = commands.add_parser('upgrade', help='Mettre a niveau les workers MIG 2 vCPU / 4 Go / 70 Go')
     upgr_mode = upgrade.add_mutually_exclusive_group(required=True)
     upgr_mode.add_argument('--check', action='store_true', help='Plan Terraform sans changement')
     upgr_mode.add_argument('--apply', action='store_true', help='Upgrade progressif confirme')
