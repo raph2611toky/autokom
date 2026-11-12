@@ -332,6 +332,38 @@ def _print_git_changes(root, old, new):
     print('  TOTAL : ' + color(f'+{added}', '32') + ' ' + color(f'-{removed}', '31') + ' lignes\n', flush=True)
 
 
+def _sync_ha_workers_after_update(root, old, new, *,
+                                  timer=Path('/etc/systemd/system/autokom-ha-worker-sync.timer'),
+                                  production_root=Path('/opt/autokom/source')):
+    """Opt-in rolling update. Never run on developers' machines by accident."""
+    if root != production_root or not timer.is_file() or timer.is_symlink():
+        return
+    relevant = (
+        'terraform/modules/gcp_regional_ha/files/worker-agent.py',
+        'terraform/modules/gcp_regional_ha/files/worker-delivery-health.py',
+        'scripts/lib/autokom_ha_worker_remote_apply.py',
+        'scripts/lib/autokom_ha_worker_sync.py',
+    )
+    paths = set(_git(root, 'diff', '--name-only', old, new).splitlines())
+    if not paths.intersection(relevant):
+        print('AUTOKOM HA : fichiers workers inchangés ; timer conservé.')
+        return
+    script = root / 'scripts/lib/autokom_ha_worker_sync.py'
+    if not script.is_file() or script.is_symlink():
+        raise UpdateError('Synchroniseur HA absent après mise à jour ; rolling update non réalisé')
+    print('AUTOKOM HA — synchronisation des workers du MIG…', flush=True)
+    try:
+        result = subprocess.run([sys.executable, str(script), '--apply'],
+                                cwd=str(root), check=False, timeout=540)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UpdateError('Core mis à jour ; synchronisation HA interrompue, le timer réessaiera') from exc
+    if result.returncode:
+        raise UpdateError(
+            'Core mis à jour ; HA sync incomplète (retour ' + str(result.returncode) +
+            '). Le timer HA réessaiera ; consulter autokom-ha-worker-sync.service.'
+        )
+
+
 def update(root: Path, *, check=False):
     root = Path(root).resolve(strict=True)
     branch = _repository(root)
@@ -377,6 +409,7 @@ def update(root: Path, *, check=False):
         raise UpdateError("Mise à jour appliquée mais composants manquants : " + ", ".join(remaining))
     print("AUTOKOM Core restauré / mis à jour. Aucun service redémarré.")
     print("Backend : utiliser autokom app deploy séparément après vérification.")
+    _sync_ha_workers_after_update(root, old, new)
     return 0
 
 
