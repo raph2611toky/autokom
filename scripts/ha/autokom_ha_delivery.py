@@ -32,6 +32,12 @@ LB_MAP = 'autokom-ha-map'
 NETWORK = 'default'
 SUBNET = 'default'
 PORT = 8080
+APP_MEMORY_BUDGET_MB = 3072
+APP_CPU_BUDGET_MILLICORES = 1600
+BASELINE_WORKERS = 2
+MAX_WORKERS = 6
+AUTOSCALER = 'autokom-ha-autoscaler'
+SCALE_IN_DELAY_SECONDS = 1800
 BUCKET = f'{PROJECT}-autokom-ha-state'
 STATE = Path('/var/lib/autokom/client-runtime')
 PUBLISHED = Path('/var/lib/autokom/ha/published')
@@ -78,7 +84,7 @@ def operation(doc, scope):
     name = doc.get('name') if isinstance(doc, dict) else None
     if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9-]{1,100}', name):
         raise DeliveryError('Compute operation ID missing')
-    if scope not in ('global', 'zones/us-central1-a', 'zones/us-central1-f'):
+    if scope not in ('global', 'regions/us-central1', 'zones/us-central1-a', 'zones/us-central1-f'):
         raise DeliveryError('Unapproved Compute operation scope')
     route = f'/global/operations/{name}' if scope == 'global' else f'/{scope}/operations/{name}'
     for _ in range(65):
@@ -175,8 +181,8 @@ def committed_apps():
         internal, health, mem, cpu = (current.get(field) for field in ('internal_port','healthcheck','memory_mb','cpu_millicores'))
         if (type(internal) is not int or not 1024 <= internal <= 65535 or
             not isinstance(health, str) or not health.startswith('/') or len(health) > 120 or any(x in health for x in ('?', '#', '%', '\\', '\r', '\n', ' ', '://')) or
-            type(mem) is not int or not 128 <= mem <= 1400 or
-            type(cpu) is not int or not 100 <= cpu <= 1800):
+            type(mem) is not int or not 128 <= mem <= 2800 or
+            type(cpu) is not int or not 100 <= cpu <= 1600):
             continue
         hosts = selected_hosts(folder.name)
         if not hosts:
@@ -209,12 +215,20 @@ def running_workers():
         ip = ((detail.get('networkInterfaces') or [{}])[0]).get('networkIP')
         if not isinstance(ip, str) or not re.fullmatch(r'10\.(?:\d{1,3}\.){2}\d{1,3}', ip):
             continue
-        output.append({'name': name, 'zone': zone, 'ip': ip, 'memory': 0, 'cpu': 0})
+        # During a rolling template change the old e2-small instances may
+        # coexist with the new e2-custom-2-4096 generation. Do not overload
+        # a still-running old worker by assuming it already has 4 GiB RAM.
+        machine = str(detail.get('machineType') or '').rsplit('/', 1)[-1]
+        new_class = machine == 'e2-custom-2-4096'
+        output.append({'name': name, 'zone': zone, 'ip': ip, 'memory': 0, 'cpu': 0,
+                       'memory_limit': APP_MEMORY_BUDGET_MB if new_class else 1500,
+                       'cpu_limit': APP_CPU_BUDGET_MILLICORES if new_class else 2000,
+                       'generation': 'custom-2-4096' if new_class else 'legacy'})
     return sorted(output, key=lambda r: (r['zone'], r['name']))
 
 
 def assign(apps, workers):
-    """Default exactly ONE worker; HA exactly TWO healthy workers in DISTINCT zones."""
+    """Standard=1 worker; HA=2 distinct zones; reject requests beyond measured budgets."""
     manifests = {row['name']: [] for row in workers}
     decisions = []
     used_ports = {row['name']: set() for row in workers}
@@ -222,7 +236,8 @@ def assign(apps, workers):
         wanted = 2 if app['ha'] else 1
         choice = []
         for worker in sorted(workers, key=lambda w: (w['memory'], w['cpu'], w['zone'], w['name'])):
-            if worker['memory'] + app['memory_mb'] > 1500 or worker['cpu'] + app['cpu_millicores'] > 2000:
+            if (worker['memory'] + app['memory_mb'] > worker.get('memory_limit', APP_MEMORY_BUDGET_MB) or
+                    worker['cpu'] + app['cpu_millicores'] > worker.get('cpu_limit', APP_CPU_BUDGET_MILLICORES)):
                 continue
             if any(existing['zone'] == worker['zone'] for existing in choice):
                 continue
@@ -247,6 +262,130 @@ def assign(apps, workers):
                           'workers': [{'name': w['name'], 'zone': w['zone'], 'ip': w['ip']} for w in choice],
                           'run_id': app['run_id'], 'hosts': app['hosts']})
     return manifests, decisions
+
+
+def minimum_workers_for_demand(apps, max_workers=MAX_WORKERS):
+    """Compute a minimum autoscaler floor before placement.
+
+    Assumes GCP regional redistribution evenly balances the two zones;
+    actual placement always revalidates the health of distinct VMs. A floor
+    raises capacity for *pending applications*, not only CPU load.
+    """
+    if not apps:
+        return BASELINE_WORKERS
+    for size in range(BASELINE_WORKERS, max_workers + 1):
+        predicted = [
+            {'name': f'autokom-ha-web-plan{i}',
+             'zone': ('us-central1-a' if i % 2 == 0 else 'us-central1-f'),
+             'ip': f'10.0.0.{i+1}', 'memory': 0, 'cpu': 0}
+            for i in range(size)
+        ]
+        _, states = assign(apps, predicted)
+        if all(row['status'] == 'ASSIGNED' for row in states):
+            return size
+    return None
+
+
+def autoscaler_status():
+    doc = compute('GET', f'/regions/{REGION}/autoscalers/{AUTOSCALER}')
+    policy = doc.get('autoscalingPolicy') if isinstance(doc, dict) else None
+    if not isinstance(policy, dict):
+        raise DeliveryError('Autoscaler configuration missing')
+    minimum = policy.get('minNumReplicas')
+    maximum = policy.get('maxNumReplicas')
+    if type(minimum) is not int or type(maximum) is not int or not 2 <= minimum <= maximum:
+        raise DeliveryError('Invalid regional autoscaler min/max')
+    return minimum, maximum
+
+
+def desired_floor(apps, previous, *, now=None, autoscaler_min, autoscaler_max):
+    """Scale out immediately; scale in only after 30min stable low demand."""
+    now = int(time.time() if now is None else now)
+    required = minimum_workers_for_demand(apps, min(MAX_WORKERS, autoscaler_max))
+    if required is None:
+        return {'required': None, 'target': autoscaler_min, 'status': 'CAPACITY_LIMIT',
+                'lower_since': 0}
+    if required > autoscaler_min:
+        return {'required': required, 'target': required, 'status': 'SCALE_OUT_REQUESTED',
+                'lower_since': 0}
+    if required == autoscaler_min:
+        return {'required': required, 'target': autoscaler_min, 'status': 'STABLE',
+                'lower_since': 0}
+    # Existing HTTP traffic must remain routed while new manifests settle.
+    old_capacity = previous.get('capacity') if isinstance(previous, dict) else None
+    before = old_capacity if isinstance(old_capacity, dict) else {}
+    lower_since = before.get('lower_since', 0)
+    if before.get('required') != required or type(lower_since) is not int or lower_since <= 0:
+        lower_since = now
+    if now - lower_since < SCALE_IN_DELAY_SECONDS:
+        return {'required': required, 'target': autoscaler_min, 'status': 'SCALE_IN_STABILIZING',
+                'lower_since': lower_since}
+    return {'required': required, 'target': required, 'status': 'SCALE_IN_REQUESTED',
+            'lower_since': 0}
+
+
+def apply_capacity_floor(capacity, current_min):
+    """Patch only minNumReplicas; preserve GCP's CPU/load policy and max."""
+    target = capacity['target']
+    if target == current_min:
+        return False
+    if type(target) is not int or not BASELINE_WORKERS <= target <= MAX_WORKERS:
+        raise DeliveryError('Unsafe autoscaler minimum')
+    uri = (f'{BASE}/regions/{REGION}/autoscalers?'
+           + urllib.parse.urlencode({'autoscaler': AUTOSCALER}))
+    result = api('PATCH', uri, {'autoscalingPolicy': {'minNumReplicas': target}})
+    operation(result, 'regions/' + REGION)
+    return True
+
+
+def deleted_environments(previous, apps):
+    """Only remove routes of a previously owned release after local teardown.
+
+    Project deletion broker removes both current.json and owner markers. Do
+    not infer deletion from missing GCS, failed image delivery, or capacity.
+    """
+    active = {a['environment_id'] for a in apps}
+    orphaned = []
+    # Retry URL-map removal if the previous cycle failed. Removing a deleted
+    # release is idempotent, and no live environment is ever targeted.
+    candidates = list(previous.get('applications', [])) if isinstance(previous, dict) else []
+    if isinstance(previous, dict):
+        candidates += [{'environment': env} for env in previous.get('pending_deletions', [])
+                       if isinstance(env, str)]
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        env = item.get('environment')
+        if not valid_uuid(env) or env in active:
+            continue
+        directory = STATE / env
+        if ((directory / 'current.json').exists() or
+                (directory / 'previous.json').exists() or selected_hosts(env)):
+            continue
+        orphaned.append(env)
+    return sorted(set(orphaned))
+
+
+def unroute_deleted(environments):
+    """Remove only AUTOKOM-owned URL map host rules and path matchers.
+
+    Never delete shared load balancer, Terraform resources or another app's
+    rule. Unrouted app-specific backends can be garbage-collected separately.
+    """
+    if not environments:
+        return False
+    doc = compute('GET', '/global/urlMaps/' + LB_MAP)
+    target = {'akp-' + env.replace('-', '')[:20] for env in environments}
+    old_rules = list(doc.get('hostRules') or [])
+    old_matchers = list(doc.get('pathMatchers') or [])
+    rules = [row for row in old_rules if row.get('pathMatcher') not in target]
+    matchers = [row for row in old_matchers if row.get('name') not in target]
+    if len(rules) == len(old_rules) and len(matchers) == len(old_matchers):
+        return False
+    operation(compute('PATCH', '/global/urlMaps/' + LB_MAP,
+                      {'hostRules': rules, 'pathMatchers': matchers,
+                       'fingerprint': doc.get('fingerprint')}), 'global')
+    return True
 
 
 def get_or_create(route, body, collection, scope='global'):
@@ -399,16 +538,49 @@ def reconcile(*, dry_run=False):
     workers = running_workers()
     if len(workers) < 1:
         raise DeliveryError('No healthy MIG workers')
+    # In dry runs the same scaling proposal is reported without any mutation.
+    previous = _private_json(REPORT, max_bytes=262144) or {}
+    autoscaler_min, autoscaler_max = autoscaler_status()
+    capacity = desired_floor(apps, previous, autoscaler_min=autoscaler_min,
+                             autoscaler_max=autoscaler_max)
     manifests, decisions = assign(apps, workers)
+    # A pending workload must remain visible to the client, not become a false
+    # service failure while additional workers bootstrap.
+    for decision in decisions:
+        if decision['status'] == 'INSUFFICIENT_CAPACITY' and capacity['required'] is not None:
+            if (capacity['target'] <= autoscaler_min and
+                    any(worker.get('generation') == 'legacy' for worker in workers)):
+                decision['status'] = 'WAITING_WORKER_UPGRADE'
+            else:
+                decision['status'] = 'SCALING_UP'
+        elif decision['status'] == 'INSUFFICIENT_CAPACITY' and capacity['required'] is None:
+            decision['status'] = 'CAPACITY_LIMIT'
+    orphaned = deleted_environments(previous, apps)
     report = {'schema': 1, 'updated': int(time.time()), 'workers': len(workers),
-              'applications': decisions, 'cloud_https_ready': False}
+              'applications': decisions, 'cloud_https_ready': False,
+              'capacity': capacity, 'deleted_environments': orphaned}
     if dry_run:
         return report
+    if capacity['target'] != autoscaler_min:
+        try:
+            apply_capacity_floor(capacity, autoscaler_min)
+        except (DeliveryError, OSError, ValueError, urllib.error.URLError):
+            # Never sacrifice healthy existing allocations on autoscaler errors.
+            capacity['status'] = 'CAPACITY_SCALE_ERROR'
+            report['capacity_error'] = True
     # GCS desired-state must be committed before creating app-specific health checks.
     for worker in workers:
         desired = {'schema': 1, 'instance': worker['name'], 'zone': worker['zone'],
                    'applications': manifests[worker['name']]}
         gcs_put('desired/' + worker['name'] + '.json', desired)
+    # A project removed in AUTOKOM must stop being routed by the cloud LB.
+    # Workers remove its containers when the empty manifest is reconciled.
+    if orphaned:
+        try:
+            unroute_deleted(orphaned)
+        except (DeliveryError, OSError, ValueError):
+            report['cleanup_error'] = True
+            report['pending_deletions'] = orphaned
     for app in apps:
         decision = next((d for d in decisions if d['environment'] == app['environment_id']), None)
         if not decision or decision['status'] != 'ASSIGNED':
@@ -442,7 +614,7 @@ def main(argv=None):
             fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
             doc = reconcile(dry_run=args.check)
         print(json.dumps(doc, indent=2, ensure_ascii=False))
-        return 0 if all(item['status'] in ('HTTP_LB_READY_NOT_HTTPS', 'WAITING_FOR_HEALTH', 'ASSIGNED') for item in doc['applications']) else 3
+        return 0 if not doc.get('capacity_error') and not doc.get('cleanup_error') and all(item['status'] in ('HTTP_LB_READY_NOT_HTTPS', 'WAITING_FOR_HEALTH', 'ASSIGNED', 'SCALING_UP', 'WAITING_WORKER_UPGRADE', 'INSUFFICIENT_CAPACITY', 'CAPACITY_LIMIT') for item in doc['applications']) else 3
     except BlockingIOError:
         print('AUTOKOM_HA_CONTROLLER_BUSY')
         return 0

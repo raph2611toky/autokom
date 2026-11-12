@@ -8,15 +8,16 @@ subnetwork_name = "default"
 name_prefix     = "autokom-ha"
 
 # Les instances du MIG sont NOUVELLES ; ubuntu-server-2 et le serveur principal restent intacts : ni l'orchestrateur ni les serveurs existants ne sont modifies.
-machine_type       = "e2-small"
+machine_type       = "e2-custom-2-4096"
+boot_disk_size_gb   = 100
 assign_external_ip = false
 # Sortie internet : necessaire si bootstrap Ubuntu installe des paquets externes.
 # Cloud NAT couvre le sous-reseau entier, pas seulement les instances MIG.
 enable_cloud_nat  = false
 min_replicas       = 2
-max_replicas       = 4
-cpu_target         = 0.80
-cooldown_seconds   = 180
+max_replicas       = 6
+cpu_target         = 0.55
+cooldown_seconds   = 90
 backend_port       = 8080
 health_check_path  = "/healthz"
 # Les paquets Docker ont pris >10 min sur les VM GCP initiales. Pas d'effet

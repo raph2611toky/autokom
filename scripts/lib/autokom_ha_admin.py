@@ -203,6 +203,15 @@ def cmd_delivery(args):
             print(str(app.get('environment')) + ' · ' + str(app.get('status')) +
                   ' · replicas=' + str(app.get('healthy_replicas', 'indisponible')) +
                   ' · HA=' + str(app.get('ha')))
+        capacity = report.get('capacity') if isinstance(report.get('capacity'), dict) else {}
+        if capacity:
+            print('Capacite du MIG : besoin=' + str(capacity.get('required')) +
+                  ' · minimum demande=' + str(capacity.get('target')) +
+                  ' · etat=' + str(capacity.get('status')))
+        if report.get('cleanup_error'):
+            print('ATTENTION : nettoyage des anciennes routes LB a reessayer')
+        if report.get('capacity_error'):
+            print('ATTENTION : demande de capacite GCP refusee; voir IAM/autoscaler')
         print('HTTPS et DNS clients : non basculés (serveur principal préservé)')
         return 0
     _use_gce_identity()
@@ -321,6 +330,10 @@ def main(argv=None):
     mode.add_argument('--check', action='store_true', help='Prévol sans modification')
     mode.add_argument('--apply', action='store_true', help='Activer le contrôleur systemd (root)')
     mode.add_argument('--status', action='store_true', help='Rapport de réconciliation et santé applicative')
+    upgrade = commands.add_parser('upgrade', help='Mettre a niveau les workers MIG 2 vCPU / 4 Go / 100 Go')
+    upgr_mode = upgrade.add_mutually_exclusive_group(required=True)
+    upgr_mode.add_argument('--check', action='store_true', help='Plan Terraform sans changement')
+    upgr_mode.add_argument('--apply', action='store_true', help='Upgrade progressif confirme')
     apps = commands.add_parser('apps', help='Applications par worker, répliques et statut HA (lecture seule)')
     apps.add_argument('--ha-only', action='store_true', help='Afficher uniquement les applications demandant la HA')
     apps.add_argument('--json', action='store_true', help='Inventaire JSON, sans secrets')
@@ -344,6 +357,9 @@ def main(argv=None):
         return cmd_rights(args)
     if args.action == 'delivery':
         return cmd_delivery(args)
+    if args.action == 'upgrade':
+        from autokom_ha_infra_upgrade import run as upgrade_run
+        return upgrade_run(apply=args.apply)
     if args.action == 'apps':
         return cmd_apps(args)
     return 2

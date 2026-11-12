@@ -142,7 +142,7 @@ class HaAppsWideAndDiagnosticsTests(unittest.TestCase):
 
     def test_report_filter_identifies_broker_inputs_not_delivery_eligible(self):
         doc = {'run_id': RUN, 'cloud_delivery_requested': True,
-               'internal_port': 8080, 'healthcheck': '/', 'memory_mb': 2048,
+               'internal_port': 8080, 'healthcheck': '/', 'memory_mb': 3300,
                'cpu_millicores': 2000, 'variables_present': False}
         errors = module._delivery_blocks(doc, {'run_id': RUN,
             'image': 'us-central1-docker.pkg.dev/plucky-stacker-480421-c4/autokom-ha-images/x@sha256:'+'a'*64},

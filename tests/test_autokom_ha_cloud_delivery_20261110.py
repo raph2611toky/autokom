@@ -59,7 +59,7 @@ def test_ha_single_zone_fails_closed():
 
 def test_ha_insufficient_memory_never_assigns_one_of_two():
     all_workers = workers()
-    all_workers[1]['memory'] = 1300
+    all_workers[1]['memory'] = 2900
     manifest, choices = ctl.assign([app(ha=True)], all_workers)
     assert choices[0]['status'] == 'INSUFFICIENT_CAPACITY'
     assert not any(manifest.values())
@@ -84,16 +84,17 @@ def test_worker_rejects_wrong_identity_and_large_capacity():
     document = {'schema':1,'instance':worker['name'],'zone':worker['zone'], 'applications':manifest[worker['name']]}
     with pytest.raises(agent.WorkerError, match='identity'):
         agent.validate(document, CFG, 'another-instance', worker['zone'])
-    bad = deepcopy(document); bad['applications'][0]['memory_mb'] = 2000
+    bad = deepcopy(document); bad['applications'][0]['memory_mb'] = 3300
     with pytest.raises(agent.WorkerError, match='resource'):
         agent.validate(bad, CFG, worker['name'], worker['zone'])
 
 
-def test_nginx_only_renders_exact_safe_hostname():
+def test_nginx_only_renders_exact_safe_hostname(monkeypatch):
+    monkeypatch.setattr(agent, 'container_ipv4', lambda app: '172.18.0.2')
     manifest, _ = ctl.assign([app()], workers())
     conf = agent.render_nginx(next(rows for rows in manifest.values() if rows))
     assert 'server_name foo.auto.ikom.mg;' in conf
-    assert 'proxy_pass http://127.0.0.1:' in conf
+    assert 'proxy_pass http://172.18.0.2:8080' in conf
     assert 'listen 8080;' in conf
 
 

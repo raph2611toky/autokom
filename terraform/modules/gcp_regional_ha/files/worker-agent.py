@@ -104,14 +104,15 @@ def validate(data, cfg, instance, zone):
             raise WorkerError('Invalid container port')
         if not isinstance(health, str) or not health.startswith('/') or len(health) > 120 or any(x in health for x in ('?', '#', '%', '\\', '\r', '\n', ' ', '://')):
             raise WorkerError('Invalid health path')
-        if type(memory) is not int or not 128 <= memory <= 1400 or type(cpu) is not int or not 100 <= cpu <= 1800:
+        if type(memory) is not int or not 128 <= memory <= 2800 or type(cpu) is not int or not 100 <= cpu <= 1600:
             raise WorkerError('Invalid resource limits')
         envs.add(env); ports.add(binding); hosts.update(hostnames)
         out.append({'environment_id': env, 'run_id': run, 'image': image, 'hosts': hostnames,
                     'bind_port': binding, 'internal_port': internal, 'healthcheck': health,
                     'memory_mb': memory, 'cpu_millicores': cpu})
-    if sum(a['memory_mb'] for a in out) > 1500 or sum(a['cpu_millicores'] for a in out) > 2000:
-        raise WorkerError('Capacity exceeded: e2-small worker is overloaded')
+    # Budget reserve 1024 MiB and 400m CPU to Ubuntu, Docker, nginx, agents.
+    if sum(a['memory_mb'] for a in out) > 3072 or sum(a['cpu_millicores'] for a in out) > 1600:
+        raise WorkerError('Capacity exceeded: 2 vCPU / 4 GiB worker budget')
     return out
 
 
@@ -288,7 +289,17 @@ def reconcile(cfg, apps):
     new_names = [container_name(a) for a in apps]
     for name in old_names:
         if isinstance(name, str) and re.fullmatch(r'ak-[a-f0-9]{12}-[a-f0-9]{12}', name) and name not in new_names:
+            # Routes are removed before deleting the old workload. Only networks
+            # belonging to environments absent from the new desired state are
+            # garbage-collected; updated releases may reuse their bridge.
             docker('rm', '-f', name, timeout=30, check=False)
+    old_routes = previous.get('routes', {}) if isinstance(previous, dict) else {}
+    if isinstance(old_routes, dict):
+        for env in old_routes:
+            if (isinstance(env, str) and UUID.fullmatch(env) and
+                    env not in new_routes):
+                network = 'aknet-' + env.replace('-', '')[:16]
+                docker('network', 'rm', network, timeout=20, check=False)
     _atomic_write(OBSERVED, json.dumps({'containers': new_names, 'routes': new_routes}, sort_keys=True) + '\n', 0o600)
     return len(apps)
 

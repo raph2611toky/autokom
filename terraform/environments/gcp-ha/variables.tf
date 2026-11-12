@@ -23,7 +23,12 @@ variable "name_prefix" {
 }
 variable "machine_type" {
   type    = string
-  default = "e2-small"
+  default = "e2-custom-2-4096"
+}
+variable "boot_disk_size_gb" {
+  type        = number
+  default     = 100
+  description = "Taille disque SSD des workers (Go)."
 }
 variable "boot_image" {
   type    = string
@@ -47,15 +52,15 @@ variable "min_replicas" {
 }
 variable "max_replicas" {
   type    = number
-  default = 4
+  default = 6
 }
 variable "cpu_target" {
   type    = number
-  default = 0.80
+  default = 0.55
 }
 variable "cooldown_seconds" {
   type    = number
-  default = 180
+  default = 90
 }
 variable "bootstrap_mode" {
   type    = string

@@ -283,9 +283,9 @@ def _delivery_blocks(current, published, *, hosts=(), pending_previous=False):
         errors.append('HEALTHCHECK_NON_ELIGIBLE')
     memory = current.get('memory_mb')
     cpu = current.get('cpu_millicores')
-    if type(memory) is not int or not 128 <= memory <= 1400:
+    if type(memory) is not int or not 128 <= memory <= 2800:
         errors.append('RAM_HORS_BORNE_DELIVERY')
-    if type(cpu) is not int or not 100 <= cpu <= 1800:
+    if type(cpu) is not int or not 100 <= cpu <= 1600:
         errors.append('CPU_HORS_BORNE_DELIVERY')
     if not hosts:
         errors.append('DOMAINE_NON_ASSOCIE')

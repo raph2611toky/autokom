@@ -19,6 +19,7 @@ module "regional_web_ha" {
   subnetwork_name       = var.subnetwork_name
   name_prefix           = var.name_prefix
   machine_type          = var.machine_type
+  boot_disk_size_gb     = var.boot_disk_size_gb
   boot_image            = var.boot_image
   assign_external_ip    = var.assign_external_ip
   enable_cloud_nat      = var.enable_cloud_nat

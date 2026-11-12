@@ -32,7 +32,16 @@ variable "subnetwork_name" {
 }
 variable "machine_type" {
   type    = string
-  default = "e2-small"
+  default = "e2-custom-2-4096"
+}
+variable "boot_disk_size_gb" {
+  type        = number
+  default     = 100
+  description = "Taille du disque systeme des workers du MIG (Go)."
+  validation {
+    condition     = var.boot_disk_size_gb >= 100 && floor(var.boot_disk_size_gb) == var.boot_disk_size_gb
+    error_message = "Le disque systeme doit faire au moins 100 Go."
+  }
 }
 variable "boot_image" {
   type        = string
@@ -70,11 +79,11 @@ variable "min_replicas" {
 }
 variable "max_replicas" {
   type    = number
-  default = 4
+  default = 6
 }
 variable "cpu_target" {
   type    = number
-  default = 0.80
+  default = 0.55
   validation {
     condition     = var.cpu_target >= 0.1 && var.cpu_target <= 0.9
     error_message = "cpu_target doit etre compris entre 0.1 et 0.9."
@@ -82,7 +91,7 @@ variable "cpu_target" {
 }
 variable "cooldown_seconds" {
   type    = number
-  default = 180
+  default = 90
 }
 variable "bootstrap_mode" {
   type        = string

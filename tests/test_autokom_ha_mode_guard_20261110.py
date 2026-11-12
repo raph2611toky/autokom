@@ -51,7 +51,7 @@ def test_ha_pending_option_does_not_silently_deploy_single():
 
 
 def test_ha_active_uses_one_local_safe_candidate_and_two_cloud_replicas():
-    FakeOption.objects=FakeObjects(types.SimpleNamespace(status='ACTIVE'))
+    FakeOption.objects=FakeObjects(types.SimpleNamespace(status='ACTIVE', expires_at=None))
     f=load_function('platform/backend/apps/deployments/runs/services.py','effective_replicas',
                     {'HighAvailabilityOption':FakeOption,'DeploymentConflict':DeploymentConflict})
     import pytest

@@ -28,7 +28,7 @@ resource "google_compute_instance_template" "web" {
     boot         = true
     auto_delete  = true
     source_image = var.boot_image
-    disk_size_gb = 20
+    disk_size_gb = var.boot_disk_size_gb
     disk_type    = "pd-balanced"
   }
 
@@ -151,6 +151,19 @@ resource "google_compute_region_instance_group_manager" "web" {
     port = var.backend_port
   }
 
+  # Nouvelle generation du template : les VMs sont remplacees, jamais
+  # redimensionnees en place. Garder les anciennes en service jusqu'a la
+  # disponibilite des nouvelles (2 zones => surge minimal de deux VMs).
+  update_policy {
+    type                           = "PROACTIVE"
+    minimal_action                 = "REPLACE"
+    most_disruptive_allowed_action = "REPLACE"
+    replacement_method             = "SUBSTITUTE"
+    max_surge_fixed                = 2
+    max_unavailable_fixed          = 0
+    min_ready_sec                  = 300
+  }
+
   # Les workers installent Docker au premier demarrage. Dans le contexte GCP
   # observe, les seuls telechargements apt ont dure plus de dix minutes.
   # La verification HTTP conserve son code 503 tant que la preparation echoue;
@@ -182,8 +195,18 @@ resource "google_compute_region_autoscaler" "web" {
     cpu_utilization {
       target = var.cpu_target
     }
+    # Le controleur applicatif peut hausser temporairement minNumReplicas
+    # pour une nouvelle application (independamment de la charge CPU).
+    # L'autoscaler ne doit pas effacer immediatement cette reserve.
+    scale_in_control {
+      max_scaled_in_replicas { fixed = 1 }
+      time_window_sec = 1800
+    }
   }
   lifecycle {
+    # Minima augmente/diminue au besoin par le controleur HA via API GCP.
+    # Les autres parametres demeurent sous controle Terraform.
+    ignore_changes = [autoscaling_policy[0].min_replicas]
     precondition {
       condition     = var.max_replicas >= var.min_replicas
       error_message = "max_replicas doit etre >= min_replicas."
