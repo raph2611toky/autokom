@@ -10,3 +10,6 @@
 **/backend.hcl
 **/autokom-ha.tfplan
 **/autokom-ha.tfplan.*
+# AUTOKOM legacy upgrade backups. Ignore only generated tfvars backups,
+# not Terraform sources or customer deployment files.
+**/terraform.tfvars.bak-*
