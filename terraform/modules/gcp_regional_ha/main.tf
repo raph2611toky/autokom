@@ -161,7 +161,8 @@ resource "google_compute_region_instance_group_manager" "web" {
     replacement_method             = "SUBSTITUTE"
     max_surge_fixed                = 2
     max_unavailable_fixed          = 0
-    min_ready_sec                  = 300
+    # min_ready_sec is beta-only; standard hashicorp/google rejects it.
+    # MIG health checking still gates worker readiness during replacements.
   }
 
   # Les workers installent Docker au premier demarrage. Dans le contexte GCP
