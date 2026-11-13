@@ -42,12 +42,62 @@ def write_once(path, values):
         raise
 
 
+def write_private(path, values):
+    if path.is_symlink():
+        raise ValueError('Lien symbolique interdit pour la configuration.')
+    fd, name = tempfile.mkstemp(prefix='.autokom-stage-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            for key, value in sorted(values.items()):
+                if not re.fullmatch(r'[A-Z][A-Z0-9_]*', key) or any(c in value for c in ('\n', '\r', '\x00')):
+                    raise ValueError('Paramètre de configuration invalide.')
+                esc = value.replace(chr(92), chr(92)*2).replace(chr(34), chr(92)+chr(34))
+                stream.write(f'{key}="{esc}"\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def stage_backend_identity(values):
+    return (values.get('DB_NAME'), values.get('DB_USER'), values.get('DB_HOST'),
+            values.get('DB_TEST_NAME'), values.get('AUTOKOM_CONTROL_SOCKET'), values.get('FRONTEND_URL'))
+
+
+def provision_database(password, reset=False):
+    if not re.fullmatch(r'[a-f0-9]{64}', password):
+        raise ValueError('Identifiant MySQL préproduction non conforme.')
+    sql = f"""CREATE DATABASE IF NOT EXISTS autokom_preprod CHARACTER SET utf8mb4;
+CREATE USER IF NOT EXISTS 'autokom_preprod'@'127.0.0.1' IDENTIFIED BY '{password}';
+"""
+    if reset:
+        sql += f"ALTER USER 'autokom_preprod'@'127.0.0.1' IDENTIFIED BY '{password}';\n"
+    sql += "GRANT ALL ON autokom_preprod.* TO 'autokom_preprod'@'127.0.0.1';\n"
+    subprocess.run(['mysql', '--protocol=socket', '--user=root'], input=sql,
+                   text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+
+def check_stage_database(password):
+    if not re.fullmatch(r'[a-f0-9]{64}', password):
+        raise ValueError('Identifiant MySQL préproduction non conforme.')
+    with tempfile.NamedTemporaryFile(mode='w', dir=ETC) as options:
+        options.write('[client]\nuser=autokom_preprod\nhost=127.0.0.1\npassword='+password+'\n')
+        options.flush()
+        result = subprocess.run(['mysql', '--defaults-file='+options.name, '--protocol=TCP',
+                                 'autokom_preprod', '-Nse', 'SELECT DATABASE()'], text=True,
+                                capture_output=True, timeout=15)
+    if result.returncode or result.stdout.strip() != 'autokom_preprod':
+        raise RuntimeError('MySQL préproduction : authentification ou base dédiée non confirmée.')
+
+
 def init():
     old_runtime = private(Path('/etc/autokom/secrets/runtime.env'))
     old_dns = private(Path('/etc/autokom/secrets/cloudflare-dns.env'))
     if not ipaddress.IPv4Address(old_runtime['AUTOKOM_INGRESS_IPV4']).is_global:
         raise ValueError('IP publique de la VM principale absente.')
-    write_once(ETC / 'backend.env', {
+    backend_path = ETC / 'backend.env'
+    defaults = {
         'DB_NAME': 'autokom_preprod', 'DB_USER': 'autokom_preprod',
         'DB_PASSWORD': secrets.token_hex(32), 'DB_HOST': '127.0.0.1', 'DB_PORT': '3306',
         'DB_TEST_NAME': 'test_autokom_preprod', 'DEBUG': 'false',
@@ -62,7 +112,50 @@ def init():
         'AUTOKOM_MVP_ENABLED': 'true',
         'EMAIL_BACKEND': 'django.core.mail.backends.dummy.EmailBackend',
         'AUTOKOM_PREPROD_EMAIL_ENABLED': 'false',
-    })
+    }
+    repair = False
+    if backend_path.exists() or backend_path.is_symlink():
+        existing = private(backend_path)
+        if stage_backend_identity(existing) != stage_backend_identity(defaults):
+            prod = private(Path('/etc/autokom/secrets/backend.env'))
+            # Repair only the known copied production configuration. Never
+            # guess at a custom staging database or migrate through it.
+            if not prod.get('DB_NAME') or (existing.get('DB_NAME'), existing.get('DB_USER'),
+                    existing.get('DB_PASSWORD')) != (prod.get('DB_NAME'), prod.get('DB_USER'),
+                                                    prod.get('DB_PASSWORD')):
+                raise RuntimeError('Préproduction : backend.env non isolé et copie de production non reconnue.')
+            backup_fd, backup_name = tempfile.mkstemp(prefix='backend.env.production-copy-', dir=ETC)
+            with os.fdopen(backup_fd, 'wb') as stream:
+                stream.write(backend_path.read_bytes())
+            repair = True
+        else:
+            defaults = existing
+    prod_backend = private(Path('/etc/autokom/secrets/backend.env'))
+    for key in ('DJANGO_SECRET_KEY', 'CLIENT_JWT_SIGNING_KEY', 'AUTOKOM_FIELD_ENCRYPTION_KEY',
+                'AUTOKOM_RUNNER_SHARED_KEY', 'TOKEN_ENCRYPTION_KEY', 'DB_PASSWORD'):
+        if not defaults.get(key) or defaults[key] in {prod_backend.get(key), old_runtime.get(key)}:
+            raise RuntimeError('Préproduction : secret manquant ou partagé avec la production.')
+    provision_database(defaults['DB_PASSWORD'], reset=repair)
+    check_stage_database(defaults['DB_PASSWORD'])
+    if repair or not backend_path.exists():
+        write_private(backend_path, defaults)
+    if repair:
+        print('Copie de production mise de côté en root:0600. Base, utilisateur et clés de préproduction restaurés.')
+    # Optional, separately provisioned GitHub App settings survive recovery.
+    git_config = ETC / 'github.env'
+    if git_config.exists() or git_config.is_symlink():
+        extra = private(git_config)
+        permitted = {'GITHUB_APP_CLIENT_ID','GITHUB_APP_CLIENT_SECRET','GITHUB_APP_SLUG',
+                     'GITHUB_WEBHOOK_SECRET'}
+        callbacks = {'GITHUB_APP_CALLBACK_URL':'https://'+HOST+'/api/projects/git/github/callback/',
+                     'GITHUB_AUTH_CALLBACK_URL':'https://'+HOST+'/auth/github/callback'}
+        if not all(extra.get(key) for key in permitted - {'GITHUB_WEBHOOK_SECRET'}):
+            raise RuntimeError('GitHub App de préproduction incomplète.')
+        if extra.get('GITHUB_WEBHOOK_SECRET') and extra['GITHUB_WEBHOOK_SECRET'] == prod_backend.get('GITHUB_WEBHOOK_SECRET'):
+            raise RuntimeError('Le secret webhook doit être distinct de celui de production.')
+        updated = {**defaults, **{k:v for k,v in extra.items() if k in permitted}, **callbacks}
+        if updated != defaults:
+            write_private(backend_path, updated)
     write_once(ETC / 'runtime.env', {
         **{k: old_runtime.get(k, '') for k in (
             'AUTOKOM_INGRESS_IPV4', 'AUTOKOM_ACME_EMAIL', 'AUTOKOM_JENKINS_URL')},
@@ -73,16 +166,6 @@ def init():
     write_once(ETC / 'cloudflare-dns.env', {
         k: old_dns.get(k, '') for k in ('CLOUDFLARE_ZONE_ID', 'CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ZONE_NAME')
     })
-    pwd = private(ETC / 'backend.env')['DB_PASSWORD']
-    if not re.fullmatch('[a-f0-9]{64}', pwd):
-        raise ValueError('Mot de passe initial non conforme.')
-    query = f"""
-CREATE DATABASE IF NOT EXISTS autokom_preprod CHARACTER SET utf8mb4;
-CREATE USER IF NOT EXISTS 'autokom_preprod'@'127.0.0.1' IDENTIFIED BY '{pwd}';
-GRANT ALL ON autokom_preprod.* TO 'autokom_preprod'@'127.0.0.1';
-"""
-    subprocess.run(['mysql', '--protocol=socket', '--user=root'], input=query,
-                   text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 
 def publish_dns_and_tls():
@@ -100,7 +183,7 @@ def publish_dns_and_tls():
     if not ipaddress.IPv4Address(ip).is_global or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', email):
         raise ValueError('IP publique ou contact Certbot absent.')
     if not plugin_available():
-        raise ValueError('Plugin Certbot DNS Cloudflare absent.')
+        raise RuntimeError('Préproduction : plugin Certbot DNS Cloudflare absent.')
     conf = Path('/etc/nginx/sites-available/autokom-preprod.conf')
     link = Path('/etc/nginx/sites-enabled/autokom-preprod.conf')
     marker = '# AUTOKOM PREPROD MANAGED'
@@ -175,6 +258,51 @@ server {{
         raise
     finally:
         os.close(lock)
+
+
+def worker_configured():
+    runtime = private(ETC / 'runtime.env')
+    backend = private(ETC / 'backend.env')
+    return all(runtime.get(k) for k in ('AUTOKOM_JENKINS_USER','AUTOKOM_JENKINS_API_TOKEN',
+                                        'AUTOKOM_PREPROD_ALLOWED_HOSTS')) and all(
+        backend.get(k) for k in ('GITHUB_APP_CLIENT_ID','GITHUB_APP_CLIENT_SECRET',
+                                 'GITHUB_APP_SLUG','GITHUB_APP_CALLBACK_URL'))
+
+
+def connect():
+    import getpass
+    if not sys.stdin.isatty():
+        raise RuntimeError('Connexion initiale à exécuter dans un terminal.')
+    runtime_path = ETC / 'runtime.env'
+    runtime = private(runtime_path)
+    git_path = ETC / 'github.env'
+    git = private(git_path) if git_path.exists() else {}
+    print('Paramètres dédiés de préproduction. Les jetons sont saisis sans affichage.')
+    def required(label, old='', secret=False):
+        prompt = label + (' (Entrée : conserver)' if old else '') + ' : '
+        value = (getpass.getpass(prompt) if secret else input(prompt)).strip() or old
+        if not value:
+            raise RuntimeError('Configuration non enregistrée : valeur requise absente.')
+        return value
+    for key, label in (('GITHUB_APP_CLIENT_ID','Client ID GitHub App'),('GITHUB_APP_SLUG','Slug GitHub App')):
+        git[key] = required(label, git.get(key,''))
+    git['GITHUB_APP_CLIENT_SECRET'] = required('Client secret GitHub App', git.get('GITHUB_APP_CLIENT_SECRET',''), True)
+    for key, label, secret in (
+            ('AUTOKOM_JENKINS_USER','Compte Jenkins préproduction',False),
+            ('AUTOKOM_JENKINS_API_TOKEN','Jeton Jenkins préproduction',True),
+            ('AUTOKOM_PREPROD_ALLOWED_HOSTS','Domaines clients séparés par des virgules',False)):
+        runtime[key] = required(label, runtime.get(key,''), secret)
+    prod = private(Path('/etc/autokom/secrets/runtime.env'))
+    if any(runtime[k] == prod.get(k) for k in ('AUTOKOM_JENKINS_USER','AUTOKOM_JENKINS_API_TOKEN')):
+        raise RuntimeError('Le compte Jenkins de production ne peut pas être réutilisé.')
+    admin_user = input('Compte Jenkins avec droits de création (Entrée : réutiliser le compte dédié) : ').strip()
+    if admin_user:
+        admin = {'AUTOKOM_JENKINS_USER':admin_user,
+                 'AUTOKOM_JENKINS_API_TOKEN':required('Jeton API Jenkins de provisioning', secret=True)}
+        write_private(ETC / 'jenkins-admin.env', admin)
+    write_private(git_path, git)
+    write_private(runtime_path, runtime)
+    print('Connexions préproduction enregistrées. La CLI configure les callbacks côté AUTOKOM.')
 
 
 def validate_worker():
@@ -285,16 +413,27 @@ if __name__ == '__main__':
         action = sys.argv[1]
         if action == 'init':
             init()
+        elif action == 'busy':
+            run_manage(['shell', '-c', 'from apps.deployments.runs.models import DeploymentRun, StackDeployment; import sys; sys.exit(5 if DeploymentRun.objects.filter(status__in=["QUEUED","RUNNING","PREPARED"]).exists() or StackDeployment.objects.filter(status__in=["QUEUED","PREPARING","ACTIVATING"]).exists() else 0)'])
         elif action == 'publish':
             publish_dns_and_tls()
         elif action == 'assets':
             publish_assets(sys.argv[2])
         elif action == 'validate-worker':
             validate_worker()
+        elif action == 'worker-configured':
+            raise SystemExit(0 if worker_configured() else 4)
+        elif action == 'connect':
+            connect()
         elif action == 'django':
             run_manage(sys.argv[2:])
         else:
             raise ValueError('Action inconnue.')
+    except RuntimeError as exc:
+        # Our RuntimeError messages above contain only fixed diagnostics.
+        if type(exc) is RuntimeError:
+            raise SystemExit(str(exc)) from None
+        raise SystemExit('Configuration privée invalide.') from None
     except ValueError as exc:
         if type(exc) is ValueError and exc.args and isinstance(exc.args[0], str) and not isinstance(exc, UnicodeError):
             print('Préproduction : précondition non satisfaite.', file=sys.stderr)

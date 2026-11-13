@@ -117,9 +117,10 @@ def _create_run(env, cfg, resources, *, actor, trigger, sha, idem, event=None):
     stage_specs = [('source','Récupération du projet','git'), ('sast','Analyse du code','semgrep'),
                    ('sca','Vérification des dépendances','trivy'), ('build','Création de votre application','buildkit'),
                    ('release','Mise en ligne','docker'),
+                   ('dast','Contrôle dynamique HTTP','autokom-runtime'),
                    ('health','Vérification du site','nginx')]
     if cfg.mode == 'DEVOPS':
-        stage_specs = [st for st in stage_specs if st[0] not in ('sast', 'sca')]
+        stage_specs = [st for st in stage_specs if st[0] not in ('sast', 'sca', 'dast')]
     PipelineStageRun.objects.bulk_create([
         PipelineStageRun(deployment=run, stage_key=k, name=n, position=i, tool_name=tool)
         for i, (k,n,tool) in enumerate(stage_specs, start=1)])

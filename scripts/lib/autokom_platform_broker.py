@@ -1645,6 +1645,14 @@ def handle(action,params):
                     'public_https_ready':False}}
         except (OSError,ValueError,TypeError,AttributeError):
             return {'application':default}
+    if action=='runtime.dynamic.check':
+        from autokom_dynamic_checks import inspect_candidate
+        env, rid = valid_id(params.get('environment_id')), valid_id(params.get('run_id'))
+        state = _load_state(env)
+        if (not state or state.get('run_id') != rid or state.get('ingress_mode') != ingress.MODE
+                or not ingress.probe_relay(valid_container_name(state.get('name')), state.get('port'))):
+            raise BrokerError('AUTOKOM_DYNAMIC_CANDIDATE_MISSING: Candidat non vérifié.')
+        return inspect_candidate(state['port'], state['healthcheck'])
     if action=='runtime.status':
         env=valid_id(params.get('environment_id'))
         return {'runtime':_load_state(env)}

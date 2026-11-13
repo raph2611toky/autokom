@@ -1,9 +1,9 @@
 /** Real chronological view: technical includes every summary event plus diagnostics. */
 import { cleanCustomerLog, phaseTitles, publicationLabel } from './deploymentPresentation.js'
 
-const STAGE = /^AUTOKOM_STAGE:(source|sast|sca|build|release|health):(RUNNING|SUCCESS|FAILED|SKIPPED)$/
-const TECH = /^AUTOKOM_TECH:(source|sast|sca|build|release|health):([\s\S]{1,800})$/
-const DETAIL = /^AUTOKOM_TRACE:(source|sast|sca|build|release|health):(broker|docker|application|pipeline):([^\r\n]{1,700})$/
+const STAGE = /^AUTOKOM_STAGE:(source|sast|sca|build|release|dast|health):(RUNNING|SUCCESS|FAILED|SKIPPED)$/
+const TECH = /^AUTOKOM_TECH:(source|sast|sca|build|release|dast|health):([\s\S]{1,800})$/
+const DETAIL = /^AUTOKOM_TRACE:(source|sast|sca|build|release|dast|health):(broker|docker|application|pipeline):([^\r\n]{1,700})$/
 
 export function technicalTimeline(messages) {
   let current = 'source'

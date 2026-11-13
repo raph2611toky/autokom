@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from autokom_runtime_admin import (jenkins_request, pipeline_xml, _read_jenkins_job_pipeline,
                                    _canonical_pipeline, isolated_agent_status)
 from configure import private, ETC
+from autokom_jenkins_credentials import provision
 
 JOB = 'autokom-preprod-client-deploy'
 CONFIG = '/job/' + JOB + '/config.xml'
@@ -37,14 +38,29 @@ def sync(env, source, apply=False):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--configured', action='store_true')
     args = parser.parse_args()
     env = private(ETC / 'runtime.env')
-    env['AUTOKOM_JENKINS_USER'] = input('Compte administrateur Jenkins : ').strip()
-    env['AUTOKOM_JENKINS_API_TOKEN'] = getpass.getpass('Jeton API Jenkins (masqué) : ')
+    if args.configured:
+        admin_file = ETC / 'jenkins-admin.env'
+        if admin_file.exists():
+            admin = private(admin_file)
+            for key in ('AUTOKOM_JENKINS_USER', 'AUTOKOM_JENKINS_API_TOKEN'):
+                env[key] = admin.get(key, '')
+        if not env.get('AUTOKOM_JENKINS_USER') or not env.get('AUTOKOM_JENKINS_API_TOKEN'):
+            raise SystemExit('Jenkins préprod : fournir le compte dédié dans runtime.env et, si nécessaire, jenkins-admin.env.')
+    else:
+        env['AUTOKOM_JENKINS_USER'] = input('Compte administrateur Jenkins : ').strip()
+        env['AUTOKOM_JENKINS_API_TOKEN'] = getpass.getpass('Jeton API Jenkins (masqué) : ')
+    env['AUTOKOM_RUNNER_SHARED_KEY'] = private(ETC / 'backend.env')['AUTOKOM_RUNNER_SHARED_KEY']
+    state = provision(env, jenkins_request, apply=args.apply, credential_id='autokom-preprod-runner-key')
+    print('Credential runner préprod : ' + state)
     source = Path(__file__).with_name('Jenkinsfile').read_text(encoding='utf-8')
     print(sync(env, source, apply=args.apply))
     ready, _ = isolated_agent_status(env)
     print('Agent BuildKit isolé : ' + ('prêt' if ready else 'non disponible'))
+    if not ready and args.apply:
+        raise SystemExit(2)
 
 
 if __name__ == '__main__':

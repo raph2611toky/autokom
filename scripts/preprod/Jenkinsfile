@@ -11,9 +11,6 @@ pipeline {
         AUTOKOM_RUNNER_PROFILE = 'preprod'
         AUTOKOM_API_BASE = 'https://pre.auto.ikom.mg'
         AUTOKOM_ARTIFACT_DIR = '/var/lib/autokom-preprod/build-artifacts'
-        AUTOKOM_SAST_REPORTS = '1'
-        AUTOKOM_DEEPSAST_PYTHON = '/opt/autokom-preprod/deepsast-venv/bin/python'
-        AUTOKOM_DEEPSAST_MODEL = '/opt/autokom-preprod/model'
         AUTOKOM_SEMGREP_RULES = '/opt/autokom-preprod/source/scripts/runtime/autokom-client-semgrep-rules.yml'
     }
     stages {

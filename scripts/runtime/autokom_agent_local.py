@@ -309,14 +309,17 @@ def scan(doc,kind):
             if not Path(rules).is_file() or not os.access(rules,os.R_OK):
                 fail('DevSecOps indisponible : règles Semgrep approuvées illisibles.')
             print('AUTOKOM_TECH:DevSecOps : analyse SAST Semgrep en cours.',flush=True)
-            if os.getenv('AUTOKOM_SAST_REPORTS') != '1':
+            if doc.get('sast_reports') is not True and os.getenv('AUTOKOM_SAST_REPORTS') != '1':
                 execute(['semgrep','scan','--metrics','off','--config',rules,'--error',str(path)])
             else:
                 from autokom_sast_report import collect
                 safe_env = {name: os.environ[name] for name in ('PATH', 'LANG', 'LC_ALL') if name in os.environ}
                 try:
+                    shared = Path('/opt/autokom-deepsast')
+                    enabled = (shared / 'ready').is_file()
                     report, exit_code = collect(path, rules, safe_env,
-                        os.getenv('AUTOKOM_DEEPSAST_PYTHON'), os.getenv('AUTOKOM_DEEPSAST_MODEL'))
+                        str(shared / 'venv/bin/python') if enabled else None,
+                        str(shared / 'model') if enabled else None)
                 except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
                     fail('Le contrôle Semgrep n’a pas produit de rapport valide.')
                 try:

@@ -33,20 +33,7 @@ if [[ "$action" == enable-worker ]]; then
 fi
 
 if [[ "$action" == model ]]; then
-    export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-    model="$src/models/deep_sast_model_3_Hbol"
-    [[ -f "$model/model.safetensors" && ! -L "$model/model.safetensors" ]] || exit 2
-    expected=befaff21716f1d4a6f06298ef97c54116538a6c16483795b62544e3eaab82062
-    [[ "$(sha256sum "$model/model.safetensors" | cut -d' ' -f1)" == "$expected" ]] || {
-        echo 'Poids LFS absents ou SHA-256 différent. Exécuter git lfs pull dans le checkout.' >&2; exit 2; }
-    install -d -m 0755 "$root/model"
-    for f in config.json tokenizer.json tokenizer_config.json special_tokens_map.json vocab.txt model.safetensors; do
-        install -o root -g root -m 0644 "$model/$f" "$root/model/$f"
-    done
-    python3 -m venv "$root/deepsast-venv"
-    "$root/deepsast-venv/bin/pip" install --index-url https://download.pytorch.org/whl/cpu 'torch>=2.6,<3'
-    "$root/deepsast-venv/bin/pip" install 'transformers==4.57.1' 'safetensors>=0.4.5,<1'
-    runuser -u autokom-builder -- "$root/deepsast-venv/bin/python" -I -c       'from pathlib import Path; from transformers import AutoModelForSequenceClassification; AutoModelForSequenceClassification.from_pretrained(Path("/opt/autokom-preprod/model"), local_files_only=True, trust_remote_code=False, use_safetensors=True)'
+    PYTHONPATH="$repo/scripts/lib" python3 -c 'from autokom_deepsast_admin import install; install()'
     exit
 fi
 
@@ -66,8 +53,11 @@ fi
 
 # Application and builds remain readable, but are not writable by either service account.
 if systemctl is-active --quiet autokom-preprod-worker.service; then
-    echo 'Arrêter le worker de préproduction après la fin de ses exécutions, puis relancer deploy.' >&2
-    exit 2
+    if ! python3 "$repo/scripts/preprod/configure.py" busy; then
+        echo 'Impossible de confirmer une file préproduction inactive. Réessayer après les exécutions.' >&2
+        exit 2
+    fi
+    systemctl stop autokom-preprod-worker.service
 fi
 python3 -m venv "$root/venv"
 "$root/venv/bin/pip" install --quiet -r "$src/platform/backend/requirements.txt"

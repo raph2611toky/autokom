@@ -126,7 +126,7 @@ function RunDetails({ navigate, projectId, runId }) {
         const [label,tone] = publicationLabel(stage.status)
         return <li key={stage.stage_key} className={`ak-run-detail-stage state-${tone}`}>
           <span className="ak-run-detail-marker" aria-hidden="true">{tone === 'success' ? <CheckCircle2 size={21}/> : tone === 'running' ? <LoaderCircle className="ak-spin" size={21}/> : <Clock3 size={19}/>}</span>
-          <span className="ak-run-detail-stage-main"><strong>{phaseTitles[stage.stage_key] || 'Vérification'}</strong>{stage.started_at && <small>Début : {dateTime(stage.started_at)}</small>}</span>
+          <span className="ak-run-detail-stage-main"><strong>{phaseTitles[stage.stage_key] || 'Vérification'}</strong>{stage.started_at && <small>Début : {dateTime(stage.started_at)}</small>}{stage.stage_key === 'dast' && stage.summary && <small>{stage.summary}</small>}</span>
           <span className="ak-run-detail-state">{label}</span>
         </li>
       })}</ol> : <p className="ak-deployment-hint">Les étapes apparaîtront dès le début de la préparation.</p>}

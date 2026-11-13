@@ -4,7 +4,6 @@ set -Eeuo pipefail
 SCRIPT="$(readlink -f -- "${BASH_SOURCE[0]}")"
 ROOT="$(cd -- "$(dirname -- "$SCRIPT")" && pwd -P)"
 if [[ "$ROOT" == /opt/autokom-preprod/source && "${1:-}" != update ]]; then
-    echo 'Préproduction : utiliser scripts/preprod/manage.sh. Seule la commande update est disponible ici.' >&2
-    exit 2
+    exec python3 "$ROOT/scripts/lib/autokom_preprod_admin.py" "$@"
 fi
 exec python3 "$ROOT/scripts/lib/autokom_cli.py" "$@"

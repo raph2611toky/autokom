@@ -1,5 +1,8 @@
 # AUTOKOM préproduction · branche master
 
+> Ce guide décrit le premier patch. Pour les commandes automatisées, utiliser
+> [AUTOKOM-DEVSECOPS-PREPROD-AUTO.md](AUTOKOM-DEVSECOPS-PREPROD-AUTO.md).
+
 Ce patch part de `172c70c`. Le serveur et le checkout de production restent sur
 `main`. Ne pas lancer `autokom app deploy`, `install.sh`, Terraform ou le
 contrôleur HA depuis le checkout de préproduction.

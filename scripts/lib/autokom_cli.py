@@ -721,9 +721,13 @@ Une phase Jenkins interrompue reste à terminer, même si le paquet est install�
     subcommand('runtime', help='Runtime Docker/Jenkins/socket et environnement')
     subcommand('app', help='Service Django AUTOKOM : setup, deploy, backend env, status, logs')
     subcommand('domains', help='Découverte et migration progressive des domaines vers ikom.mg')
+    deep = subcommand('devsecops', help='Préparer et vérifier DeepSAST')
+    deep.add_argument('action', choices=('check','apply'))
+    deep.add_argument('--deploy', action='store_true', help='Publier Django et React avec ces changements')
     up = subcommand('update', help='Mise à jour privée via code GitHub (fast-forward uniquement)',
                     epilog='Exemple : sudo autokom update')
     up.add_argument('--check', action='store_true', help='Vérifier localement sans accéder à GitHub')
+    up.add_argument('channel', nargs='?', choices=('preprod',), help='Installer ou mettre à jour autokom-pre')
     up.add_argument('--preprod', action='store_true', help='Mettre à jour uniquement le checkout master préproduction')
     return p
 
@@ -771,7 +775,8 @@ def main(argv=None):
         mutating=(env_edit or backend_domain_write or dns_write or frontend_write or
             (cmd=='domains' and '--apply' in arguments) or
             (cmd=='runtime' and '--apply' in arguments) or
-            (cmd in ('update','configure')) or
+            (cmd in ('update','configure') and '--check' not in arguments) or
+            (cmd=='devsecops' and arguments[1:2]==['apply']) or
             (cmd=='recover' and '--apply' in arguments) or
             (cmd=='app' and any(flag in arguments[1:] for flag in ('--mode-test','--mode-prod'))) or
             (cmd=='app' and len(arguments)>1 and arguments[1] in ('setup','deploy') and '--check' not in arguments) or
@@ -869,6 +874,18 @@ def main(argv=None):
     if not a.cmd:
         parser.print_help()
         return 0
+    if a.cmd == 'devsecops':
+        from autokom_deepsast_admin import main as deep_main
+        try:
+            return deep_main([a.action] + (['--deploy'] if a.deploy else []))
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            raise CLIError(str(exc) if type(exc) is RuntimeError else 'Installation DeepSAST non confirmée.') from None
+    if a.cmd == 'update' and a.channel == 'preprod':
+        from autokom_preprod_admin import update_and_deploy
+        try:
+            return update_and_deploy(a.check)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            raise CLIError(str(exc) if type(exc) is RuntimeError else 'Préproduction : étape non confirmée, voir la sortie précédente.') from None
     if a.cmd == 'update':
         from autokom_private_update import update as private_update, UpdateError
         if os.geteuid() != 0:

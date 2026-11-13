@@ -14,6 +14,7 @@ export const publicationStatus = Object.freeze({
   PENDING: ['En attente', 'waiting'],
 })
 export const phaseTitles = Object.freeze({
+  dast: 'Contrôle dynamique HTTP',
   source: 'Récupération du projet',
   sast: 'Analyse du code',
   sca: 'Contrôles de sécurité',
@@ -21,7 +22,7 @@ export const phaseTitles = Object.freeze({
   release: 'Publication',
   health: 'Vérification du site',
 })
-export const phaseOrder = ['source','sast','sca','build','release','health']
+export const phaseOrder = ['source','sast','sca','build','release','dast','health']
 export function publicationLabel(status) {
   return publicationStatus[String(status || '').toUpperCase()] || ['À vérifier', 'muted']
 }

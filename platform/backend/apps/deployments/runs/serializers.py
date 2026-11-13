@@ -50,7 +50,7 @@ class DeploymentLogSerializer(serializers.ModelSerializer):
     def get_stage_key(self, instance):
         if instance.level == 'TECH' and instance.message.startswith('AUTOKOM_TECH:'):
             parts = instance.message.split(':', 2)
-            if len(parts) == 3 and parts[1] in ('source','sast','sca','build','release','health'):
+            if len(parts) == 3 and parts[1] in ('source','sast','sca','build','release','dast','health'):
                 return parts[1]
         return ''
 

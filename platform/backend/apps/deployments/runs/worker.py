@@ -33,7 +33,7 @@ def add_customer_trace(run, stage, channel, message):
     repository stdout, subprocess command lines, variables or user-supplied
     exception strings here. The existing summary stream remains unchanged.
     """
-    if stage not in {'source', 'sast', 'sca', 'build', 'release', 'health'}:
+    if stage not in {'source', 'sast', 'sca', 'build', 'release', 'dast', 'health'}:
         raise ValueError('Stage de trace invalide.')
     if channel not in {'pipeline', 'broker', 'docker', 'application'}:
         raise ValueError('Origine de trace invalide.')
@@ -59,7 +59,7 @@ def add_log(run, line, level='INFO'):
         DeploymentLogEntry.objects.create(
             deployment=run, sequence=last + 1, level=level, message=line)
         stage = re.search(
-            r'^AUTOKOM_STAGE:(source|sast|sca|build|release|health):'
+            r'^AUTOKOM_STAGE:(source|sast|sca|build|release|dast|health):'
             r'(RUNNING|SUCCESS|FAILED|SKIPPED)$', line)
         if stage:
             key, status = stage.groups()
@@ -433,6 +433,25 @@ def _release_docker_and_proxy(run, *, stack=None, stack_role=None):
     },timeout=280)
     add_log(run, 'AUTOKOM_TECH:release:Docker · conteneur et contrôle HTTP interne validés.', level='TECH')
     add_customer_trace(run, 'release', 'docker', 'Réponse HTTP interne conforme : la nouvelle version est candidate à l’activation HTTPS.')
+    if run.mode_snapshot == 'DEVSECOPS' and PipelineStageRun.objects.filter(deployment=run, stage_key='dast').exists():
+        add_log(run, 'AUTOKOM_STAGE:dast:RUNNING')
+        try:
+            dynamic = request_control('runtime.dynamic.check', {
+                'environment_id': str(run.environment_id), 'run_id': str(run.pk),
+            }, timeout=10)
+            status = dynamic.get('http')
+            if type(status) is not int or not 200 <= status < 400:
+                raise ValueError('AUTOKOM_DYNAMIC_HTTP_FAILED')
+            labels = {'CSP_MISSING': 'CSP absente', 'NOSNIFF_MISSING': 'nosniff absent',
+                      'FRAME_POLICY_MISSING': 'protection iframe absente'}
+            found = [labels[key] for key in labels if key in (dynamic.get('warnings') or [])]
+            summary = 'HTTP %d. %s' % (status, ', '.join(found) if found else 'Aucun avertissement applicable.')
+            PipelineStageRun.objects.filter(deployment=run, stage_key='dast').update(summary=summary)
+            add_customer_trace(run, 'dast', 'pipeline', summary)
+        except Exception:
+            add_log(run, 'AUTOKOM_STAGE:dast:FAILED')
+            raise
+        add_log(run, 'AUTOKOM_STAGE:dast:SUCCESS')
     # The container is a candidate, not a committed public release yet.
     # Do not show 'Publication: Terminé' until TLS and the public site pass.
     PipelineStageRun.objects.filter(deployment=run,stage_key='health').update(status='RUNNING',started_at=timezone.now())
