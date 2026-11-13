@@ -14,7 +14,7 @@ export const publicationStatus = Object.freeze({
   PENDING: ['En attente', 'waiting'],
 })
 export const phaseTitles = Object.freeze({
-  dast: 'Contrôle dynamique HTTP',
+  dast: 'DAST · Contrôle dynamique HTTP',
   source: 'Récupération du projet',
   sast: 'Analyse du code',
   deepsast: 'Analyse IA · DeepSAST',

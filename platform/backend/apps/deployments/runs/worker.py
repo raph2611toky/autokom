@@ -531,6 +531,8 @@ def run_tick():
     reconcile_stack_deployments(limit=4)
     from apps.deployments.runs.restore import flag_abandoned_stack_restores, process_restore, process_stack_restore
     flag_abandoned_stack_restores()
+    from apps.deployments.runs.runner_dast import process_dast_previews
+    previewed = process_dast_previews()
     restored = process_stack_restore() or process_restore()
     global _NEXT_GITHUB_HEAD_CHECK, _GITHUB_HEAD_CHECK_OFFSET, _STACK_HEAD_CHECK_OFFSET
     # Retry HMAC-verified events on each tick (database only).
@@ -565,13 +567,13 @@ def run_tick():
     # A health endpoint does not prove Jenkins/socket are available. Retry on
     # subsequent ticks instead of crashing the management command every 5s.
     if not DeploymentRun.objects.filter(status__in=['QUEUED', 'RUNNING']).exists():
-        return restored
+        return restored or previewed
     try:
         client = JenkinsClient()
     except (JenkinsUnavailable, AutokomControlUnavailable) as exc:
         logger.warning('Broker/Jenkins indisponible (%s). Nouvelle tentative au prochain tick.',
                        type(exc).__name__)
-        return restored
+        return restored or previewed
     # Dispatch up to two jobs per tick so both members of a stack can build
     # concurrently in Jenkins (subject to its available agent executors).
     dispatched = False
@@ -584,4 +586,4 @@ def run_tick():
     for run_id in DeploymentRun.objects.filter(status='RUNNING').exclude(external_run_id='').order_by('created_at').values_list('pk', flat=True)[:20]:
         polled = poll_one(client, run_id) or polled
     reconcile_stack_deployments(limit=4)
-    return bool(restored or dispatched or polled)
+    return bool(previewed or restored or dispatched or polled)

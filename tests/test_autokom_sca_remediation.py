@@ -57,7 +57,7 @@ class ScaTests(unittest.TestCase):
                 p = dest/'package-lock.json'
                 p.write_text(p.read_text().replace('"version":"1.0.0"', '"version":"1.0.1"'))
                 return True
-            with patch.object(sca,'scan_tree',side_effect=[initial,final,final]) as scan, patch.object(sca,'repair_lock',side_effect=repair) as fix, patch.object(runner,'send_security_report',side_effect=send_error) as send:
+            with patch.object(sca,'scan_tree',side_effect=[initial,final,final]) as scan, patch.object(sca,'repair_lock',side_effect=repair) as fix, patch.object(runner,'buildkit_preflight'), patch.object(runner,'send_security_report',side_effect=send_error) as send:
                 try:
                     runner.security_scan_dependencies(doc,path)
                     passed = True

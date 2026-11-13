@@ -77,6 +77,20 @@ class RunnerSCAReportAPIView(RunnerSASTReportAPIView):
     kind = 'sca'
 
 
+class RunnerDASTAPIView(RunnerSASTReportAPIView):
+    def post(self, request, run_id):
+        try:
+            # Distinct signature so a read-only manifest signature is not reusable.
+            if request.META.get('CONTENT_LENGTH') != '2' or request.body != b'{}':
+                raise PermissionDenied('Requête de contrôle dynamique non valide.')
+            verify_report_signature(run_id, request.headers.get('X-Autokom-Runner-Time'),
+                                    request.headers.get('X-Autokom-Runner-Signature'), b'{}', 'dast')
+            from apps.deployments.runs.runner_dast import runner_dast_status
+            return api_success({'status':runner_dast_status(run_id)}, 'Contrôle dynamique du runner.')
+        except Exception as exc:
+            return handle_error(exc, 'runner_dast')
+
+
 class SecurityFeedbackAPIView(APIView):
     permission_classes = [IsClientUser]
     parser_classes = [JSONParser]

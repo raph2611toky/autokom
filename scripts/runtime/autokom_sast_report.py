@@ -18,7 +18,7 @@ def summarize(rows):
     return dict(sorted(rules.items(), key=lambda kv: (-kv[1], kv[0]))[:20])
 
 
-def collect(path, rules, env, ai_python, ai_model, *, run=subprocess.run, on_inference=lambda: None):
+def scan_semgrep(path, rules, env, *, run=subprocess.run):
     with tempfile.TemporaryDirectory(prefix='autokom-sast-') as folder:
         output = Path(folder) / 'semgrep.json'
         env = {**env, 'HOME': folder, 'XDG_CACHE_HOME': folder, 'XDG_CONFIG_HOME': folder}
@@ -32,12 +32,14 @@ def collect(path, rules, env, ai_python, ai_model, *, run=subprocess.run, on_inf
     rows = document.get('results')
     if not isinstance(rows, list) or bool(rows) != (process.returncode == 1):
         raise ValueError('Résultat Semgrep incohérent.')
+    locations = [{'path': item.get('path'), 'start': {'line': (item.get('start') or {}).get('line')},
+                  'end': {'line': (item.get('end') or {}).get('line')}} for item in rows[:24]]
+    return {'count': len(rows), 'rules': summarize(rows), 'locations': locations}, process.returncode
+
+
+def infer_locations(path, locations, env, ai_python, ai_model, *, run=subprocess.run):
     ai = {'status': 'DISABLED', 'analyzed': 0}
     if ai_python and ai_model:
-        on_inference()
-        # Only location coordinates pass to the local inference process.
-        locations = [{'path': item.get('path'), 'start': {'line': (item.get('start') or {}).get('line')},
-                      'end': {'line': (item.get('end') or {}).get('line')}} for item in rows[:24]]
         ai_env = {key: value for key, value in env.items() if key in ('PATH', 'LANG', 'LC_ALL')}
         try:
             result = run([ai_python, '-I', str(Path(__file__).with_name('autokom_deep_sast.py')),
@@ -47,5 +49,12 @@ def collect(path, rules, env, ai_python, ai_model, *, run=subprocess.run, on_inf
             ai = json.loads(result.stdout[:4096])
         except (ValueError, OSError, subprocess.SubprocessError):
             ai = {'status': 'UNAVAILABLE', 'analyzed': 0}
-    # Do not transmit snippets, location paths, command lines, tool errors, or raw output.
-    return {'count': len(rows), 'rules': summarize(rows), 'ai': ai}, process.returncode
+    return ai
+
+
+def collect(path, rules, env, ai_python, ai_model, *, run=subprocess.run, on_inference=lambda: None):
+    report, code = scan_semgrep(path, rules, env, run=run)
+    if ai_python and ai_model:
+        on_inference()
+    ai = infer_locations(path, report.pop('locations'), env, ai_python, ai_model, run=run)
+    return {**report, 'ai': ai}, code

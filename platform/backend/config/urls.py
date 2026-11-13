@@ -13,7 +13,7 @@ from config.views import SwaggerLoginPageAPIView, SwaggerLoginSubmitAPIView, Swa
 from config.health import PlatformHealthAPIView
 from config.contact import PublicContactAPIView
 from apps.deployments.runs.views import RunnerManifestAPIView, RunnerSourceArchiveAPIView
-from apps.deployments.runs.security_views import RunnerSASTReportAPIView, RunnerSCAReportAPIView, SecurityFeedbackAPIView
+from apps.deployments.runs.security_views import RunnerSASTReportAPIView, RunnerSCAReportAPIView, RunnerDASTAPIView, SecurityFeedbackAPIView
 
 # Only client APIs enter the generated schema; no internal/admin endpoints.
 client_api_patterns = [
@@ -45,6 +45,7 @@ def admin_documentation(view):
     return never_cache(staff_member_required(view, login_url='/docs/login/'))
 
 urlpatterns = [
+    path('api/internal/runner/deployments/<uuid:run_id>/dast/', RunnerDASTAPIView.as_view(), name='runner-dast'),
     path('api/internal/runner/deployments/<uuid:run_id>/sca/', RunnerSCAReportAPIView.as_view(), name='runner-sca-report'),
     path('api/internal/runner/deployments/<uuid:run_id>/sast/', RunnerSASTReportAPIView.as_view(),
          name='runner-sast-report'),

@@ -308,10 +308,12 @@ def send_security_report(doc, kind, report):
     with build_opener(NoRedirect()).open(req, timeout=10) as response:
         if response.status not in (200, 201):
             raise ValueError('Rapport refusé.')
+        if kind == 'dast':
+            return json.loads(response.read(4096))['data']['status']
 
 
 def security_scan_dependencies(doc, path):
-    from autokom_sca_remediation import NPM_PROFILES, repair_lock, scan_tree, summary
+    from autokom_sca_remediation import NPM_PROFILES, RemediationInputError, repair_lock, scan_tree, summary
     before = scan_tree(path, execute)
     count, secrets, _ = before
     after = None
@@ -329,17 +331,26 @@ def security_scan_dependencies(doc, path):
                     shutil.copyfile(src, staged/name)
                 original = lock.read_bytes()
                 for refresh in (False, True):
+                    attempt = 'npm update' if refresh else 'npm audit fix'
                     (staged/lock.name).write_bytes(original)
                     accepted = False
                     try:
+                        buildkit_preflight()
+                        print(f'AUTOKOM_LOG: Tentative de correction compatible · {attempt}.', flush=True)
                         if repair_lock(staged, staged, execute, refresh=refresh):
                             lock.write_bytes((staged/lock.name).read_bytes())
                             after = scan_tree(path, execute)
                             accepted = not any(after[:2])
                             if accepted:
                                 break
+                            print(f'AUTOKOM_LOG: Nouveau scan Trivy · {after[0]} alerte(s) bloquante(s).', flush=True)
+                        else:
+                            print('AUTOKOM_LOG: npm n’a proposé aucun changement de lockfile.', flush=True)
+                    except RemediationInputError as exc:
+                        print(f'AUTOKOM_LOG: Correction npm non applicable · {exc}.', flush=True)
+                        break
                     except (OSError, ValueError, TypeError, AttributeError, SystemExit):
-                        print('AUTOKOM_LOG: Une tentative de correction npm compatible n’a pas abouti.', flush=True)
+                        print(f'AUTOKOM_LOG: Correction {attempt} non confirmée · build isolé ou rescan indisponible.', flush=True)
                     finally:
                         if not accepted:
                             lock.write_bytes(original)
@@ -360,6 +371,99 @@ def security_scan_dependencies(doc, path):
     elif count or secrets:
         fail('Trivy bloque : %d vulnérabilité(s) restante(s), %d secret(s). Consulter le rapport de sécurité.' %
              (report['remaining'], report['secrets']))
+
+
+def jenkins_dast(doc):
+    stage('dast', 'RUNNING')
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        try:
+            status = send_security_report(doc, 'dast', {})
+        except (OSError, ValueError, TypeError, KeyError):
+            time.sleep(5)
+            continue
+        if status == 'JENKINS_DAST_PASSED':
+            stage('dast', 'SUCCESS')
+            print('AUTOKOM_LOG: DAST privé terminé · l’activation reste sous contrôle du broker.', flush=True)
+            return
+        if status == 'JENKINS_DAST_DEFERRED':
+            stage('dast', 'SKIPPED')
+            print('AUTOKOM_LOG: DAST privé non concluant sans variables live · contrôle AUTOKOM obligatoire.', flush=True)
+            raise SystemExit(12)
+        if status == 'JENKINS_DAST_FAILED':
+            break
+        time.sleep(5)
+    stage('dast', 'FAILED')
+    fail('DAST privé non confirmé. Le build ne sera pas activé.')
+
+def _sast_checkpoint(doc, path):
+    # Jenkins checkout is isolated per executor and cleaned before each build.
+    return path / ('.autokom-semgrep-' + doc['run_id'] + '.json')
+
+
+def _semgrep_env():
+    return {key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL') if key in os.environ}
+
+
+def split_semgrep(doc):
+    from autokom_sast_report import scan_semgrep
+    path = source(doc)
+    rules = os.getenv('AUTOKOM_SEMGREP_RULES', '/usr/local/share/autokom-security/client-semgrep-rules.yml')
+    stage('sast', 'RUNNING')
+    try:
+        report, code = scan_semgrep(path, rules, _semgrep_env())
+        checkpoint = _sast_checkpoint(doc, path)
+        # Ignore source-provided content at this reserved path. Never follow it.
+        if checkpoint.is_symlink() or checkpoint.is_file():
+            checkpoint.unlink()
+        fd = os.open(checkpoint, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump({'report':report, 'code':code}, stream)
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
+        stage('sast', 'FAILED')
+        fail('Le contrôle Semgrep n’a pas produit de rapport valide.')
+    stage('sast', 'FAILED' if code else 'SUCCESS')
+    if code:
+        # The next stage records the advisory inference even on a blocked run.
+        print('AUTOKOM_LOG: Semgrep a signalé des résultats bloquants.', flush=True)
+    return code
+
+
+def split_deepsast(doc):
+    from autokom_sast_report import infer_locations
+    path = source(doc)
+    checkpoint = _sast_checkpoint(doc, path)
+    stage('deepsast', 'RUNNING')
+    try:
+        if checkpoint.is_symlink() or not checkpoint.is_file() or checkpoint.stat().st_size > 65536:
+            raise ValueError
+        saved = json.loads(checkpoint.read_text(encoding='utf-8'))
+        checkpoint.unlink()
+        report, code = saved['report'], saved['code']
+        locations = report.pop('locations')
+        shared = Path('/opt/autokom-deepsast')
+        enabled = (shared/'ready').is_file()
+        ai = infer_locations(path, locations, _semgrep_env(),
+             str(shared/'venv/bin/python') if enabled else None, str(shared/'model') if enabled else None)
+        report['ai'] = ai
+        result = {'COMPLETE':'SUCCESS', 'UNAVAILABLE':'FAILED'}.get(ai['status'], 'SKIPPED')
+        stage('deepsast', result)
+        if result == 'SUCCESS':
+            print('AUTOKOM_LOG: DeepSAST · inférence locale terminée · %d extrait(s).' % ai['analyzed'], flush=True)
+        elif result == 'FAILED':
+            print('AUTOKOM_LOG: DeepSAST indisponible. Vérifier autokom devsecops check.', flush=True)
+        else:
+            print('AUTOKOM_LOG: DeepSAST non exécuté · modèle absent ou aucun extrait compatible.', flush=True)
+        if doc.get('sast_reports') is True:
+            try:
+                send_security_report(doc, 'sast', report)
+            except (OSError, ValueError, KeyError):
+                print('AUTOKOM_LOG: Rapport SAST indisponible. Le verdict Semgrep est conservé.', flush=True)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        stage('deepsast', 'FAILED')
+        fail('Rapport Semgrep manquant ou invalide.')
+    # The verdict is deliberately delayed until both Jenkins stages have reported.
+    return code, result
 
 
 def scan(doc,kind):
@@ -651,7 +755,7 @@ def build(doc):
 
 
 def main():
-    if len(sys.argv)!=2 or sys.argv[1] not in ('metadata','metadata-line','private-source','sast','sca','build'):
+    if len(sys.argv)!=2 or sys.argv[1] not in ('metadata','metadata-line','mode','private-source','sast','sast-semgrep','deepsast','sca','build','dast'):
         fail('Phase de build inconnue.')
     doc=manifest()
     if sys.argv[1]=='metadata':
@@ -659,7 +763,20 @@ def main():
     elif sys.argv[1]=='metadata-line':
         # Strict single-line protocol; repo and SHA are validated in manifest().
         print(f"{doc['repository']} {doc['commit_sha']}")
+    elif sys.argv[1] == 'mode':
+        print(doc['mode'])
     elif sys.argv[1] == 'private-source':private_source(doc)
+    elif sys.argv[1] in ('sast-semgrep','deepsast','dast'):
+        if doc['mode'] != 'DEVSECOPS':
+            fail('Ce contrôle est réservé au mode DevSecOps.')
+        if sys.argv[1] == 'sast-semgrep':
+            if split_semgrep(doc): raise SystemExit(10)
+        elif sys.argv[1] == 'deepsast':
+            _, result = split_deepsast(doc)
+            if result == 'FAILED': raise SystemExit(11)
+            if result == 'SKIPPED': raise SystemExit(12)
+        else:
+            jenkins_dast(doc)
     elif sys.argv[1] in ('sast','sca'):scan(doc,sys.argv[1])
     else:build(doc)
 

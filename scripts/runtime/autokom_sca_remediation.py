@@ -14,6 +14,23 @@ VERSION = re.compile(r'[0-9][0-9A-Za-z.+-]{0,60}\Z')
 ADVISORY = re.compile(r'(?:CVE-[0-9]{4}-[0-9]{4,}|GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|[A-Z][A-Z0-9-]{3,49})\Z')
 
 
+
+class RemediationInputError(ValueError):
+    """A fixed diagnostic code, never an untrusted npm field."""
+
+
+def registry_spec(value):
+    if not isinstance(value, str) or not 1 <= len(value) <= 1024:
+        return False
+    if value.startswith('npm:'):
+        alias = value[4:].rsplit('@', 1)
+        return len(alias) == 2 and bool(PACKAGE.fullmatch(alias[0])) and range_spec(alias[1])
+    return range_spec(value)
+
+
+def range_spec(value):
+    return bool(re.fullmatch(r'[0-9A-Za-z.*~^<>=|+\- ]{1,1024}', value)) and not value.startswith('-')
+
 def findings(document):
     rows, blockers, secrets = set(), 0, 0
     results = document.get('Results')
@@ -65,32 +82,31 @@ def validate_npm(path):
     manifest = read_json(path/'package.json', 65536)
     lock = read_json(path/'package-lock.json', MAX_LOCK)
     if manifest.get('workspaces') or lock.get('lockfileVersion') not in (2,3):
-        raise ValueError('Format npm non pris en charge pour la correction automatique.')
-    allowed_spec = re.compile(r'[0-9A-Za-z.*~^<>=|+\- xX]{1,120}\Z')
+        raise RemediationInputError('NPM_LOCK_FORMAT_UNSUPPORTED')
     if not isinstance(lock.get('packages'), dict) or '' not in lock['packages']:
-        raise ValueError('Table des paquets npm manquante.')
+        raise RemediationInputError('NPM_LOCK_PACKAGES_MISSING')
     for data in [manifest, *lock['packages'].values()]:
         if data.get('link'):
-            raise ValueError('Dépendance locale exclue de la correction automatique.')
+            raise RemediationInputError('NPM_LOCAL_DEPENDENCY')
         for key in ('dependencies','devDependencies','optionalDependencies','peerDependencies'):
-            if any(not PACKAGE.fullmatch(name) or not isinstance(spec, str) or not allowed_spec.fullmatch(spec)
+            if any(not PACKAGE.fullmatch(name) or not registry_spec(spec)
                    for name,spec in (data.get(key) or {}).items()):
-                raise ValueError('Dépendance npm non standard.')
+                raise RemediationInputError('NPM_DEPENDENCY_SPEC_UNSUPPORTED')
         url = data.get('resolved')
         if url:
             parts = urlsplit(url)
             if parts.netloc != 'registry.npmjs.org' or parts.scheme != 'https' or parts.query or parts.fragment:
-                raise ValueError('Registre npm non pris en charge.')
+                raise RemediationInputError('NPM_REGISTRY_UNSUPPORTED')
     if any(manifest.get(key) for key in ('bundleDependencies','bundledDependencies')):
-        raise ValueError('Dépendances embarquées exclues de la correction automatique.')
+        raise RemediationInputError('NPM_BUNDLED_DEPENDENCY')
     # Overrides can redirect dependency resolution even with a clean lock.
     def overrides(values):
         if not isinstance(values, dict):
             return False
-        return all((isinstance(spec, str) and allowed_spec.fullmatch(spec)) or overrides(spec)
+        return all((registry_spec(spec)) or overrides(spec)
                    for spec in values.values())
     if not overrides(manifest.get('overrides') or {}):
-        raise ValueError('Override npm non pris en charge.')
+        raise RemediationInputError('NPM_OVERRIDE_UNSUPPORTED')
     return manifest
 
 

@@ -290,6 +290,76 @@ def _save_state(environment,doc):
         tmp=fd.name
     os.replace(tmp,path)
 
+def _dynamic_preview(params):
+    """Run a health/header probe in a disposable, networkless candidate."""
+    rid = valid_id(params.get('run_id'))
+    port, path = params.get('internal_port'), params.get('healthcheck')
+    memory, cpu = params.get('memory_mb'), params.get('cpu_millicores')
+    if (type(port) is not int or not 1 <= port <= 65535 or
+            not isinstance(path, str) or not re.fullmatch(r'/[A-Za-z0-9/_~.\-]{0,127}', path)
+            or path.startswith('//') or type(memory) is not int or not 128 <= memory <= 32768
+            or type(cpu) is not int or not 100 <= cpu <= 8000):
+        raise BrokerError('AUTOKOM_DYNAMIC_PREVIEW_INVALID')
+    # An app bound only to its assigned container IP will require the normal
+    # candidate check. No client host, headers, variables or credentials enter here.
+    if port < 1024:
+        return {'http':0, 'warnings':[]}
+    probe_tag = 'docker.io/library/python:3.12-alpine'
+    try:
+        probe_image = run(['docker','image','inspect',probe_tag,'--format','{{.Id}}'],timeout=8).strip()
+    except BrokerError:
+        run(['docker','pull',probe_tag],timeout=65)
+        probe_image = run(['docker','image','inspect',probe_tag,'--format','{{.Id}}'],timeout=8).strip()
+    if not re.fullmatch(r'sha256:[a-f0-9]{64}', probe_image):
+        raise BrokerError('AUTOKOM_DYNAMIC_PROBE_IMAGE_INVALID: Image de contrôle indisponible.')
+    artifact = IMAGES/(rid+'.tar')
+    tag = ('autokom-preprod-local:' if PREPROD else 'autokom-local:') + rid
+    fd = os.open(artifact, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or not 1024 <= info.st_size <= 8*1024**3:
+            raise BrokerError('AUTOKOM_DYNAMIC_PREVIEW_ARTIFACT_INVALID')
+        if shutil.disk_usage(IMAGES).free < max(256*1024**2, info.st_size*2):
+            raise BrokerError('AUTOKOM_DISK_LOW')
+        run(['docker','load','--input',f'/proc/self/fd/{fd}'],timeout=80,pass_fds=(fd,))
+    finally:
+        os.close(fd)
+    image = run(['docker','image','inspect',tag,'--format','{{.Id}}']).strip()
+    if not re.fullmatch(r'sha256:[a-f0-9]{64}', image):
+        raise BrokerError('AUTOKOM_DYNAMIC_PREVIEW_ARTIFACT_INVALID')
+    name = 'autokom-dast-' + secrets.token_hex(12)
+    helper = name + '-probe'
+    options = ['--read-only','--cap-drop','ALL','--security-opt','no-new-privileges',
+               '--label','com.autokom.dast=temporary',
+               '--no-healthcheck','--log-driver','none','--user','10001:10001']
+    try:
+        run(['docker','run','-d','--name',name,'--network','none',*options,
+             '--cpus',str(cpu/1000),'--memory',f'{memory}m','--memory-swap',f'{memory}m',
+             '--pids-limit','128','--tmpfs','/tmp:rw,noexec,nosuid,size=128m',image],timeout=18)
+        probe = Path(__file__).resolve().with_name('autokom_dynamic_checks.py').read_text(encoding='utf-8')
+        # Keep the probe inside a short deadline. No proxy, redirects, exposed
+        # port, host namespace, shared filesystem or external destination.
+        program = probe + "\nimport json, sys, time\nfor _ in range(6):\n" + (
+            " result = inspect_candidate(int(sys.argv[1]), sys.argv[2])\n"
+            " if result['http']: break\n time.sleep(1)\nprint(json.dumps(result))\n")
+        # Docker cannot join a stopped candidate. A normal runtime with its
+        # configured environment is still checked after the Jenkins build.
+        try:
+            return json.loads(run(['docker','run','--rm','-i','--name',helper,
+                '--network','container:'+name,*options,'--pids-limit','32','--memory','64m',
+                '--entrypoint','python3',probe_image,'-I','-',str(port),path],
+                input=program,timeout=40))
+        except BrokerError:
+            running = run(['docker','inspect','--format','{{.State.Running}}',name],timeout=5).strip()
+            if running == 'false':
+                return {'http':0,'warnings':[]}
+            raise
+    finally:
+        for temporary in (helper, name):
+            if subprocess.run(['docker','container','inspect',temporary],capture_output=True,timeout=5).returncode == 0:
+                run(['docker','rm','-f',temporary],timeout=10)
+
+
 def _docker_deploy(params):
     """Serialize all Docker reservations to prevent local TCP port collisions."""
     STATE.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -1678,6 +1748,8 @@ def handle(action,params):
                     'public_https_ready':False}}
         except (OSError,ValueError,TypeError,AttributeError):
             return {'application':default}
+    if action=='runtime.dynamic.preview':
+        return _dynamic_preview(params)
     if action=='runtime.dynamic.check':
         from autokom_dynamic_checks import inspect_candidate
         env, rid = valid_id(params.get('environment_id')), valid_id(params.get('run_id'))
