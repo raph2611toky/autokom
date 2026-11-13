@@ -1267,12 +1267,17 @@ def main(argv=None):
         if args.action == 'backend' and args.backend_args[:2] == ['github', 'push-doctor']:
             push_parser = argparse.ArgumentParser(prog='autokom app backend github push-doctor')
             push_parser.add_argument('--repository', required=True)
+            push_parser.add_argument('--commit', default='')
             push_parser.add_argument('--apply', action='store_true')
             options = push_parser.parse_args(args.backend_args[2:])
             if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}', options.repository):
                 raise AppError('Indiquer un dépôt GitHub valide owner/repository.')
             command = [str(VENV / 'bin/python'), 'manage.py', 'autokom_push_doctor',
                        '--repository', options.repository]
+            if options.commit:
+                if not re.fullmatch(r'[a-fA-F0-9]{7,40}', options.commit):
+                    raise AppError('Indiquer un SHA GitHub de 7 à 40 caractères hexadécimaux.')
+                command.extend(['--commit', options.commit])
             if options.apply:
                 command.append('--apply')
             run_as_service(command, timeout=120 if options.apply else 30)

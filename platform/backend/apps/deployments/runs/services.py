@@ -219,9 +219,11 @@ def queue_verified_push(event):
             # A two-service project uses a coordinated stack transaction. Do
             # not enqueue its frontend/backend as independent public releases.
             from apps.projects.configurations.models import ServiceStack
-            stack = ServiceStack.objects.filter(project=project, auto_deploy=True).first()
+            stack = ServiceStack.objects.filter(project=project).first()
             if stack and env.pk in (stack.frontend_environment_id, stack.backend_environment_id):
-                if cfg.branch == event.branch:
+                if not stack.auto_deploy:
+                    last_skip_reason = 'AUTO_DEPLOY_DISABLED'
+                elif cfg.branch == event.branch:
                     eligible += 1
                     deferred = True
                     last_skip_reason = 'STACK_AWAITING_RECONCILIATION'
@@ -229,7 +231,7 @@ def queue_verified_push(event):
             if not cfg.auto_deploy:
                 last_skip_reason = 'AUTO_DEPLOY_DISABLED'
                 continue
-            if (cfg.auto_deploy_branch or cfg.branch) != event.branch:
+            if cfg.branch != event.branch or (cfg.auto_deploy_branch or cfg.branch) != event.branch:
                 last_skip_reason = 'BRANCH_MISMATCH'
                 continue
             eligible += 1

@@ -84,6 +84,10 @@ def validate_profile_source(path, profile, cfg):
     if target not in scripts:
         raise ValueError('Script npm de compilation absent de package.json.')
     dependencies = {**(package.get('dependencies') or {}), **(package.get('devDependencies') or {})}
+    if re.match(r'^\s*(?:npx\s+)?react-scripts\s+build\b', str(scripts[target])):
+        version = dependencies.get('react-scripts')
+        if not isinstance(version, str) or not version or re.fullmatch(r'[~^=]?0\.0\.0(?:[-+].*)?', version):
+            raise ValueError('Build React incohérent : le script appelle react-scripts, mais le paquet est absent ou déclaré en 0.0.0. Corriger le dépôt ou publier la branche migrée vers Vite.')
     if profile == 'vite' and 'vite' not in dependencies:
         raise ValueError('Recette Vite choisie sans dépendance vite.')
     if profile.startswith('next_') and 'next' not in dependencies:

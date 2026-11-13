@@ -51,6 +51,7 @@ test('fiche projet et historique utilisent TOUJOURS le flux consolidé, sans ind
   assert.match(runHistory,/stackApi\.history\(projectId,page,PAGE_SIZE\)/)
   assert.doesNotMatch(runHistory,/stackEnabled/)
   assert.match(runHistory,/publicationServices\(run\)/)
-  assert.match(runHistory,/window\.addEventListener\('focus', onFocus\)/)
+  assert.match(runHistory,/window\.addEventListener\('focus', refresh\)/)
+  assert.match(runHistory,/window\.setInterval\(refresh, 5000\)/)
   assert.doesNotMatch(runHistory,/deploymentsApi\.list/)
 })

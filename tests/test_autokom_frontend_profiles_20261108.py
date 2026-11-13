@@ -85,6 +85,11 @@ class ApprovedBuilds(unittest.TestCase):
             self.assertIn('/app/build/',src),
             self.assertIn('build-arg:REACT_APP_SITE=demo',args)))
 
+    def test_cra_zero_version_is_rejected_before_buildkit(self):
+        self.pkg({'react-scripts': '^0.0.0'}, scripts={'build': 'react-scripts build'})
+        with self.assertRaisesRegex(ValueError, 'react-scripts.*0.0.0'):
+            validate_profile_source(self.repo, 'npm_static', {})
+
     def test_next_export_requires_out(self):
         self.pkg({'next':'16','react':'19'})
         self.run_build(document('next_export','out',variables={'NEXT_PUBLIC_APP':'demo'}), lambda src,args,context: (

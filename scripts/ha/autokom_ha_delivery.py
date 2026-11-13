@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Automatic AUTOKOM cloud delivery (private worker GCS manifests + app-specific zonal NEGs).
 
-This service is NOT a DNS or TLS cutover. It validates each replica with the
-GCP application health checker before changing the HTTP load balancer URL map.
-The main AUTOKOM HTTPS runtime stays active until a separate verified TLS cutover.
+It validates each replica and automatically routes eligible managed HA domains
+after verifying HTTPS against the exact release. The primary remains available.
 """
 from __future__ import annotations
 
@@ -24,6 +23,8 @@ import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from autokom_ha_registry import metadata_token
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+import autokom_ha_dns as ha_dns
 
 PROJECT = 'plucky-stacker-480421-c4'
 REGION = 'us-central1'
@@ -450,15 +451,23 @@ def ensure_backend(app, workers):
     return f'{BASE}/global/backendServices/{backend_name}', desired_backends
 
 
-def backend_healthy(app, backends):
+def backend_healthy(app, backends, *, expected=None):
     name = name_for(app, 'b')
-    count = 0
+    healthy = set()
+    allowed = {(worker['zone'], worker['name']) for worker in expected} if expected is not None else None
     for backend in backends:
-        doc = compute('POST', '/global/backendServices/' + name + '/getHealth', {'group': backend['group']})
+        group = backend['group']
+        zone = re.search(r'/zones/([a-z0-9-]+)/networkEndpointGroups/', group)
+        if not zone:
+            continue
+        doc = compute('POST', '/global/backendServices/' + name + '/getHealth', {'group': group})
         for status in doc.get('healthStatus') or []:
-            if status.get('healthState') == 'HEALTHY':
-                count += 1
-    return count
+            instance = str(status.get('instance', '')).rsplit('/', 1)[-1]
+            key = (zone[1], instance)
+            if (status.get('healthState') == 'HEALTHY' and instance and
+                    (allowed is None or key in allowed)):
+                healthy.add(key)
+    return len(healthy)
 
 
 def route_host(app, backend):
@@ -511,11 +520,11 @@ def _metrics_from_report(report):
         count = item.get('healthy_replicas', 0)
         count = count if type(count) is int and 0 <= count <= 20 else 0
         wanted = 2 if mode == 'ha' else 1
-        http_ready = int(item.get('status') == 'HTTP_LB_READY_NOT_HTTPS')
+        http_ready = int(item.get('status') in ('HTTP_LB_READY_NOT_HTTPS', 'PUBLIC_DNS_PROPAGATING', 'PUBLIC_HTTPS_ACTIVE'))
         for key, value in (('autokom_ha_app_replicas_requested', wanted),
                            ('autokom_ha_app_replicas_healthy', count),
                            ('autokom_ha_app_http_ready', http_ready),
-                           ('autokom_ha_app_https_ready', 0)):
+                           ('autokom_ha_app_https_ready', int(item.get('status') == 'PUBLIC_HTTPS_ACTIVE'))):
             lines.append(f'{key}{labels} {value}')
     return '\n'.join(lines) + '\n'
 
@@ -533,10 +542,10 @@ def _write_public_metrics(report, destination=PUBLIC_METRICS):
         if os.path.exists(temp): os.unlink(temp)
 
 
-def reconcile(*, dry_run=False):
+def reconcile(*, dry_run=False, public_dns=False):
     apps = committed_apps()
     workers = running_workers()
-    if len(workers) < 1:
+    if not workers and dry_run:
         raise DeliveryError('No healthy MIG workers')
     # In dry runs the same scaling proposal is reported without any mutation.
     previous = _private_json(REPORT, max_bytes=262144) or {}
@@ -561,6 +570,33 @@ def reconcile(*, dry_run=False):
               'capacity': capacity, 'deleted_environments': orphaned}
     if dry_run:
         return report
+    # Do not replace or unroute a currently public worker release before DNS
+    # returns to the healthy primary. Retain the old manifests during its TTL.
+    by_environment = {decision['environment']: decision for decision in decisions}
+    cutovers = {}
+    for saved in ha_dns.tracked() if public_dns else ():
+        decision = by_environment.get(saved['environment'], {})
+        expected = sorted(w['name'] for w in decision.get('workers', ()))
+        if (decision.get('ha') is True and decision.get('run_id') == saved['run_id']
+                and saved['host'] in decision.get('hosts', ()) and expected == saved['workers']
+                and not saved.get('restored_at')):
+            continue
+        result = ha_dns.transition(saved['host'], saved['environment'], promote=False)
+        if result != 'PRIMARY':
+            cutovers[saved['host']] = result
+    if cutovers:
+        # Do not disturb healthy existing workloads while preserving DNS caches.
+        report['dns_fallback'] = cutovers
+        for decision in decisions:
+            if decision['ha']:
+                decision['status'] = 'WAITING_PRIMARY_DNS'
+        _atomic_report(report)
+        _write_public_metrics(report)
+        return report
+    if not workers:
+        _atomic_report(report)
+        _write_public_metrics(report)
+        raise DeliveryError('No healthy MIG workers')
     if capacity['target'] != autoscaler_min:
         try:
             apply_capacity_floor(capacity, autoscaler_min)
@@ -587,23 +623,42 @@ def reconcile(*, dry_run=False):
             continue
         try:
             backend, group = ensure_backend(app, decision['workers'])
-            healthy = backend_healthy(app, group)
+            healthy = backend_healthy(app, group, expected=decision['workers'])
             required = 2 if app['ha'] else 1
             decision['healthy_replicas'] = healthy
             if healthy < required:
                 decision['status'] = 'WAITING_FOR_HEALTH'
+                for host in app['hosts']:
+                    if public_dns and ha_dns.marker(host):
+                        ha_dns.transition(host, app['environment_id'], promote=False)
                 continue
             route_host(app, backend)
             decision['status'] = 'HTTP_LB_READY_NOT_HTTPS'
+            if app['ha'] and public_dns:
+                names = sorted(w['name'] for w in decision['workers'])
+                outcomes = {host: ha_dns.transition(host, app['environment_id'], app['run_id'],
+                                                    promote=True, workers=names) for host in app['hosts']}
+                decision['https_by_host'] = outcomes
+                for host, value in outcomes.items():
+                    if value in ('HTTPS_NOT_READY', 'HTTPS_PROBE_OR_DNS_UNAVAILABLE') and ha_dns.marker(host):
+                        ha_dns.transition(host, app['environment_id'], promote=False)
+                relevant = [value for value in outcomes.values() if value != 'DNS_NOT_ELIGIBLE']
+                if relevant and all(value == 'PUBLIC_HTTPS_ACTIVE' for value in relevant):
+                    decision['status'] = 'PUBLIC_HTTPS_ACTIVE'
+                elif any(value == 'DNS_PROPAGATING' for value in outcomes.values()):
+                    decision['status'] = 'PUBLIC_DNS_PROPAGATING'
         except (DeliveryError, OSError, ValueError) as exc:
             decision['status'] = 'RECONCILE_ERROR_' + type(exc).__name__
+    report['cloud_https_ready'] = any(d.get('status') == 'PUBLIC_HTTPS_ACTIVE' for d in decisions)
+    report['public_routing_verified'] = report['cloud_https_ready']
     _atomic_report(report)
     _write_public_metrics(report)
     return report
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='AUTOKOM HA app delivery controller (no DNS or TLS cutover)')
+    parser = argparse.ArgumentParser(description='AUTOKOM HA app delivery controller (verified per-app DNS cutover)')
+    parser.add_argument('--public-dns', action='store_true', help='Manage verified HA domains on the reserved GCP listener')
     parser.add_argument('--check', action='store_true', help='No state or Compute mutations')
     args = parser.parse_args(argv)
     if os.geteuid() != 0 and not args.check:
@@ -612,9 +667,9 @@ def main(argv=None):
     try:
         with open(LOCK, 'a+') as file:
             fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            doc = reconcile(dry_run=args.check)
+            doc = reconcile(dry_run=args.check, public_dns=args.public_dns)
         print(json.dumps(doc, indent=2, ensure_ascii=False))
-        return 0 if not doc.get('capacity_error') and not doc.get('cleanup_error') and all(item['status'] in ('HTTP_LB_READY_NOT_HTTPS', 'WAITING_FOR_HEALTH', 'ASSIGNED', 'SCALING_UP', 'WAITING_WORKER_UPGRADE', 'INSUFFICIENT_CAPACITY', 'CAPACITY_LIMIT') for item in doc['applications']) else 3
+        return 0 if not doc.get('capacity_error') and not doc.get('cleanup_error') and all(item['status'] in ('HTTP_LB_READY_NOT_HTTPS', 'PUBLIC_HTTPS_ACTIVE', 'PUBLIC_DNS_PROPAGATING', 'WAITING_PRIMARY_DNS', 'WAITING_FOR_HEALTH', 'ASSIGNED', 'SCALING_UP', 'WAITING_WORKER_UPGRADE', 'INSUFFICIENT_CAPACITY', 'CAPACITY_LIMIT') for item in doc['applications']) else 3
     except BlockingIOError:
         print('AUTOKOM_HA_CONTROLLER_BUSY')
         return 0

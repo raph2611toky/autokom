@@ -7,6 +7,9 @@ const deliveryLabels = {
   SCALING_UP: 'Augmentation de la capacité du MIG',
   INSUFFICIENT_CAPACITY: 'Capacité insuffisante',
   CAPACITY_LIMIT: 'Plafond de capacité atteint',
+  WAITING_PRIMARY_DNS: 'Retour vers le serveur principal en cours',
+  PUBLIC_DNS_PROPAGATING: 'HTTPS GCP prêt · propagation DNS en cours',
+  PUBLIC_HTTPS_ACTIVE: 'Routage public GCP validé',
   HTTP_LB_READY_NOT_HTTPS: 'Routage HTTP GCP prêt · bascule HTTPS non validée',
 }
 

@@ -721,6 +721,19 @@ def _dig(record,hostname):
     return sorted(answers[0] & answers[1])
 
 
+def _ha_ingress(host, origin, environment=None, record_id=None):
+    if PREPROD:
+        return None
+    from autokom_ha_dns import accepted_ip
+    return accepted_ip(host, origin, environment, record_id)
+
+
+def _managed_a_target(host, content, origin, environment=None, record_id=None):
+    return isinstance(content, str) and (
+        content == origin or content == _ha_ingress(host, origin, environment, record_id)
+    )
+
+
 def _check_dns(host,token,managed):
     valid_hostname(host)
     ingress=_runtime_dns_env().get('AUTOKOM_INGRESS_IPV4','')
@@ -735,9 +748,11 @@ def _check_dns(host,token,managed):
             raise BrokerError('Preuve de domaine manquante.')
         if 'autokom-verification='+token not in _dig('TXT','_autokom-challenge.'+host):
             raise BrokerError('AUTOKOM_DNS_TXT_PROOF_MISSING: Enregistrement TXT de propriété manquant.')
-    if ingress not in _dig('A',host):
+    answers = _dig('A',host)
+    ha_ip = _ha_ingress(host, ingress) if managed and ingress not in answers else None
+    if ingress not in answers and (not ha_ip or ha_ip not in answers):
         raise BrokerError('AUTOKOM_DNS_A_MISMATCH: A record DNS ne pointe pas vers l’ingress AUTOKOM.')
-    return {'verified':True,'ipv4':ingress}
+    return {'verified':True,'ipv4':ha_ip or ingress}
 
 def _runtime_dns_env():
     """Read authoritative root-owned runtime DNS settings for *every* request.
@@ -953,7 +968,7 @@ def _managed_hostname_reusable(host, environment_id):
     if len(records) != 1:
         return {'available': False, 'reason': 'dns_conflict'}
     record = records[0]
-    if (record.get('type') != 'A' or record.get('content') != cfg['address'] or
+    if (record.get('type') != 'A' or not _managed_a_target(host, record.get('content'), cfg['address'], env, record.get('id')) or
             record.get('proxied') is not False):
         return {'available': False, 'reason': 'dns_target_mismatch'}
     if record.get('comment') != DNS_COMMENT and not owner.is_file():
@@ -996,7 +1011,8 @@ def _cloudflare_record(host):
         data=cloudflare(req)
         results=[item for item in (data.get('result') or []) if isinstance(item,dict) and item.get('name','').rstrip('.').lower()==host]
         if results:
-            if (record_type != 'A' or len(results)!=1 or results[0].get('content')!=ingress
+            if (record_type != 'A' or len(results)!=1 or not _managed_a_target(
+                    host, results[0].get('content'), ingress, record_id=results[0].get('id'))
                     or results[0].get('proxied') is not False
                     or (PREPROD and results[0].get('comment') != DNS_COMMENT)
                     or (not PREPROD and results[0].get('comment') == 'AUTOKOM preprod managed A record')):
@@ -1040,7 +1056,8 @@ def _cloudflare_remove_owned_record(host, *, legacy_owned_vhost=False, dry_run=F
         raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Plusieurs enregistrements DNS pour ce nom.')
     record = records[0]
     identifier = record.get('id', '')
-    if (record.get('type') != 'A' or record.get('content') != config['address']
+    if (record.get('type') != 'A' or (record.get('content') != config['address'] and
+            not (legacy_owned_vhost and _managed_a_target(host, record.get('content'), config['address'], record_id=identifier)))
             or record.get('proxied') is not False
             or not isinstance(identifier, str) or not re.fullmatch(r'[a-f0-9]{32}', identifier)):
         raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Enregistrement DNS non conforme.')
@@ -1079,6 +1096,10 @@ def _remove_owned_domain(params):
     # Nginx vhost offline just to discover DNS cannot be safely removed.
     if managed:
         _cloudflare_remove_owned_record(host, legacy_owned_vhost=owned, dry_run=True)
+        if not PREPROD:
+            from autokom_ha_dns import marker, _change
+            if marker(host) and _change(host, env, None, False, None, retiring=True) != 'PRIMARY':
+                raise BrokerError('AUTOKOM_HA_DNS_RETIRE_FAILED: Domaine HA non retiré.')
     # `_deactivate_owned_vhost` validates the marker and restores on failure.
     _deactivate_owned_vhost(host, env)
     dns_cleanup = {'deleted': False}
@@ -1558,7 +1579,9 @@ def _domain_inspect(params):
         try:ipaddress.IPv4Address(expected_ip)
         except ValueError:
             raise BrokerError('AUTOKOM_INGRESS_IPV4_MISSING: IPv4 publique non configurée.')
-        active=expected_ip in _dig('A',host)
+        answers = _dig('A', host)
+        ha_ip = _ha_ingress(host, expected_ip, env) if expected_ip not in answers else None
+        active = expected_ip in answers or bool(ha_ip and ha_ip in answers)
     return {'active':bool(active)}
 
 
@@ -1647,8 +1670,13 @@ def _deprovision_environment(params):
             if hostname not in hosts:
                 raise BrokerError('AUTOKOM_DOMAIN_LIST_INCOMPLETE: Domaines gérés manquants.')
             owned.append(hostname)
-    # Stop external exposure before touching application containers.
+    # Return a cloud-managed A record to the primary before removing its owner.
+    # This path already holds the same runtime lock as the delivery timer.
     for host in owned:
+        if not PREPROD:
+            from autokom_ha_dns import marker, _change
+            if marker(host) and _change(host, env, None, False, None, retiring=True) != 'PRIMARY':
+                raise BrokerError('AUTOKOM_HA_DNS_RETIRE_FAILED: Domaine HA non retiré.')
         _deactivate_owned_vhost(host,env)
     for record,data in states:
         name=data['name']
@@ -1742,10 +1770,16 @@ def handle(action,params):
             status=str(row.get('status','UNKNOWN'))
             if not re.fullmatch(r'[A-Z0-9_]{3,60}',status):status='UNKNOWN'
             selected=row.get('ha') is True
+            observed_at=report.get('updated')
+            fresh=(type(observed_at) is int and 0 <= time.time() - observed_at <= 330)
+            public_ready=(selected and fresh and status=='PUBLIC_HTTPS_ACTIVE' and health>=2
+                          and report.get('public_routing_verified') is True)
+            if status=='PUBLIC_HTTPS_ACTIVE' and not public_ready:
+                status='UNAVAILABLE'
             return {'application':{'status':status,'healthy_replicas':health,
                     'requested_replicas':2 if selected else 1,
-                    'http_lb_ready':status=='HTTP_LB_READY_NOT_HTTPS',
-                    'public_https_ready':False}}
+                    'http_lb_ready':status in ('HTTP_LB_READY_NOT_HTTPS','PUBLIC_DNS_PROPAGATING','PUBLIC_HTTPS_ACTIVE'),
+                    'public_https_ready':public_ready}}
         except (OSError,ValueError,TypeError,AttributeError):
             return {'application':default}
     if action=='runtime.dynamic.preview':
@@ -1799,7 +1833,14 @@ def handle(action,params):
     if action=='domain.remove':
         return _runtime_lock_call(_remove_owned_domain, params)
     if action=='domain.deactivate':
-        return _runtime_lock_call(lambda p: {'deactivated':_deactivate_owned_vhost(valid_hostname(p.get('hostname')),valid_id(p.get('environment_id')))},params)
+        def deactivate(p):
+            host, env = valid_hostname(p.get('hostname')), valid_id(p.get('environment_id'))
+            if not PREPROD:
+                from autokom_ha_dns import marker, _change
+                if marker(host) and _change(host, env, None, False, None, retiring=True) != 'PRIMARY':
+                    raise BrokerError('AUTOKOM_HA_DNS_RETIRE_FAILED: Domaine HA non retiré.')
+            return {'deactivated': _deactivate_owned_vhost(host, env)}
+        return _runtime_lock_call(deactivate, params)
     raise BrokerError('Opération non autorisée.')
 
 class Handler(socketserver.StreamRequestHandler):

@@ -614,6 +614,7 @@ def protect_static_html_context(destination):
 
 
 def build(doc):
+    stage('build','RUNNING')
     path=source(doc)
     cfg=doc['build']
     lock_digest = doc.get('remediated_lock_sha256')
@@ -665,23 +666,8 @@ def build(doc):
             fail('Commande de démarrage personnalisée non autorisée pour Vite.')
         if cfg.get('runtime') != 'STATIC' or cfg.get('output_directory') != 'dist' or cfg.get('port') != 8080:
             fail('Configuration Vite statique invalide.')
-        package = path/'package.json'
-        lockfile = path/'package-lock.json'
-        if package.is_symlink() or lockfile.is_symlink() or not package.is_file() or not lockfile.is_file():
-            fail('Vite nécessite package.json et package-lock.json dans le dossier source.')
         try:
-            if package.stat().st_size > 65536: fail('Manifeste npm trop volumineux.')
-            parsed = json.loads(package.read_text(encoding='utf-8'))
-        except (OSError, ValueError):
-            fail('package.json non valide.')
-        deps = {**(parsed.get('dependencies') or {}), **(parsed.get('devDependencies') or {})}
-        if 'vite' not in deps or 'build' not in (parsed.get('scripts') or {}):
-            fail('Projet Vite avec script build requis pour ce build gratuit.')
-        try:
-            from autokom_frontend_recipes import script_name
-            build_script = script_name(cfg.get('build_command'))
-            if build_script not in (parsed.get('scripts') or {}):
-                fail('Script npm demandé absent de package.json.')
+            _, build_script = validate_profile_source(path, profile, cfg)
         except ValueError as exc:
             fail(str(exc))
         # Base images are provisioned by BuildKit and should be digest-pinned in production.
@@ -725,7 +711,6 @@ def build(doc):
                 recipe, frontend_args = frontend_recipe(profile, cfg, doc)
             except ValueError as exc:
                 fail(str(exc))
-    stage('build','RUNNING')
     buildkit_preflight()
     image_prefix = 'autokom-preprod-local' if os.getenv('AUTOKOM_RUNNER_PROFILE') == 'preprod' else 'autokom-local'
     with tempfile.NamedTemporaryFile(dir=artifact_dir,prefix='.building-',suffix='.tar',delete=False) as tmp:

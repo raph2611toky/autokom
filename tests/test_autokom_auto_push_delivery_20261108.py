@@ -18,7 +18,10 @@ def standalone_function(file, name):
     tree = ast.parse(file.read_text(encoding='utf-8'))
     fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
     fn.decorator_list = []
-    fn.body = [s for s in fn.body if not isinstance(s, ast.ImportFrom)]
+    class RemoveImports(ast.NodeTransformer):
+        def visit_ImportFrom(self, node):
+            return ast.copy_location(ast.Pass(), node)
+    fn = RemoveImports().visit(fn)
     return compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), str(file), 'exec')
 
 
@@ -52,6 +55,7 @@ class Database:
         self.busy = False
         self.last_sha = ''
         self.project_matches = True
+        self.stack = None
 
     def git_event_objects(self):
         return SimpleNamespace(select_for_update=lambda: QS([self.event]),
@@ -86,6 +90,7 @@ class AutoPushReliabilityTests(unittest.TestCase):
             'Project': SimpleNamespace(objects=db.project_objects(), Status=SimpleNamespace(ACTIVE='ACTIVE')),
             'Environment': SimpleNamespace(objects=db.environment_objects()),
             'DeploymentConfig': SimpleNamespace(objects=db.config_objects()),
+            'ServiceStack': SimpleNamespace(objects=SimpleNamespace(filter=lambda **kwargs: QS([db.stack] if db.stack else []))),
             'DeploymentRun': SimpleNamespace(objects=db.run_objects(), Trigger=SimpleNamespace(GIT_PUSH='GIT_PUSH')),
             'SHA_RE': re.compile(r'[0-9a-fA-F]{40}'),
             'timezone': SimpleNamespace(now=lambda: datetime.now(timezone.utc)),
@@ -125,6 +130,19 @@ class AutoPushReliabilityTests(unittest.TestCase):
         self.assertEqual(db.event.status, 'HANDLED')
         self.assertFalse(db.created)
 
+    def test_disabled_stack_cannot_start_one_service_independently(self):
+        db = Database()
+        db.stack = SimpleNamespace(frontend_environment_id='env', backend_environment_id='back', auto_deploy=False)
+        self.assertEqual(self.run_queue(db), 0)
+        self.assertEqual(db.event.error_message, 'AUTO_DEPLOY_DISABLED')
+        self.assertFalse(db.created)
+
+    def test_inconsistent_branch_cannot_queue_a_run(self):
+        db = Database()
+        db.cfg.branch = 'release'
+        self.assertEqual(self.run_queue(db), 0)
+        self.assertEqual(db.event.error_message, 'BRANCH_MISMATCH')
+
     def test_only_correct_repository_is_eligible(self):
         db = Database()
         db.project_matches = False
@@ -158,6 +176,7 @@ class AutoPushReliabilityTests(unittest.TestCase):
             def __init__(self):
                 self.pk = 'env'; self.project_id = 'project'
                 self.project = SimpleNamespace(created_by='owner')
+                self.frontend_stacks = self.backend_stacks = MockQuery()
 
         obj = MockEnvironment()
         MockEnvironment.objects = SimpleNamespace(
@@ -195,6 +214,9 @@ class AutoPushReliabilityTests(unittest.TestCase):
         self.assertEqual(status['created'], 0)
         state['last'] = 'other'
         state['busy'] = True
+        self.assertEqual(environment['reconcile_branch_heads'](limit=3)['created'], 0)
+        state['busy'] = False
+        obj.frontend_stacks = MockQuery([object()])
         self.assertEqual(environment['reconcile_branch_heads'](limit=3)['created'], 0)
 
     def test_worker_checks_pending_even_with_no_queued_run(self):

@@ -1,17 +1,11 @@
 import { useEffect, useState } from 'react'
-import { ArrowRight, Check, CheckCircle2, CircleHelp, GitBranch, ShieldCheck, Server, Workflow } from 'lucide-react'
-import { PRICING_PLANS } from '../config/pricing.js'
+import { ArrowRight, Check, CheckCircle2, CircleHelp, GitBranch, ShieldCheck, Workflow } from 'lucide-react'
+import { formatAr, getBillingPeriod, PRICING_PLANS } from '../config/pricing.js'
 import { billingApi } from '../services/billingApi.js'
 import { API_AVAILABLE } from '../config/runtime.js'
 import { useAuth } from '../context/AuthContext.jsx'
 import '../styles/pricing.css'
 
-const configurations = [
-  { id: 'frontend', title: 'Frontend uniquement', standard: '30 jours', ha: '15 jours',
-    description: 'React, Vite, site statique ou autre profil frontend pris en charge.' },
-  { id: 'stack', title: 'Frontend + backend', standard: '15 jours', ha: '7 jours',
-    description: 'Même dépôt GitHub ; backend ajouté sans perdre la configuration frontend.' },
-]
 const questions = [
   { question: 'Dois-je payer pour publier ?', answer: 'Non. L’offre gratuite de lancement est disponible sans paiement. Votre durée commence à la première mise en ligne réussie.' },
   { question: 'Puis-je changer de dépôt GitHub ?', answer: 'Avant le premier déploiement, oui. Après la première publication, le compte GitHub reste lié au dépôt publié, même si le projet est supprimé.' },
@@ -27,6 +21,7 @@ export function activePricingPlan(subscription) {
   return PRICING_PLANS.some(item => item.id === plan) ? plan : null
 }
 export default function Pricing({ navigate }) {
+  const [period, setPeriod] = useState(getBillingPeriod)
   const [subscription, setSubscription] = useState(null)
   const { status } = useAuth()
   useEffect(() => {
@@ -37,26 +32,44 @@ export default function Pricing({ navigate }) {
     return () => { live = false }
   }, [status])
   const launch = subscription?.launch_offer
+  const activePlan = activePricingPlan(subscription)
   return <div className="ak-pricing-page">
     <section className="ak-pricing-hero" aria-labelledby="ak-pricing-title">
       <div className="ak-pricing-heading">
         <h1 id="ak-pricing-title">Offre gratuite de lancement</h1>
         <p>Déployez votre application avec DevOps ou DevSecOps, avec ou sans haute disponibilité. Aucun paiement n’est demandé pour cette offre temporaire.</p>
       </div>
+      <fieldset className="ak-pricing-switch">
+        <legend>Facturation</legend>
+        <div className="ak-pricing-switch-inner">
+          <button type="button" className={period === 'monthly' ? 'is-current' : ''} aria-pressed={period === 'monthly'} onClick={() => setPeriod('monthly')}>Mensuelle</button>
+          <button type="button" className={period === 'annual' ? 'is-current' : ''} aria-pressed={period === 'annual'} onClick={() => setPeriod('annual')}>Annuelle <span>2 mois offerts</span></button>
+        </div>
+      </fieldset>
     </section>
     <div className="ak-pricing-cards">
-      {configurations.map(item => <article key={item.id} className="ak-pricing-card" aria-label={item.title}>
-        <div className="ak-pricing-card-top"><div><h2>{item.title}</h2><p>{item.description}</p></div></div>
-        <div className="ak-pricing-amount"><strong>Gratuit</strong></div>
-        <span className="ak-pricing-price-caption">{item.standard} sans haute disponibilité · {item.ha} avec haute disponibilité</span>
-        <ul className="ak-pricing-benefits">
-          {['DevOps et DevSecOps', 'Domaines AUTOKOM', 'Logs de publication', 'Option haute disponibilité sur deux workers'].map(feature =>
-            <li key={feature}><Check size={16} aria-hidden="true"/><span>{feature}</span></li>)}
-        </ul>
-        <button className="ak-pricing-select is-primary" type="button" onClick={() => navigate('/deploy')}>
-          Choisir mon dépôt <ArrowRight size={18}/>
-        </button>
-      </article>)}
+      {PRICING_PLANS.map(plan => {
+        const isActive = activePlan === plan.id
+        return <article key={plan.id} className={`ak-pricing-card ${plan.highlighted && !isActive ? 'is-highlighted' : ''} ${isActive ? 'is-active-subscription' : ''}`} aria-label={plan.name}>
+          <div className="ak-pricing-card-top"><div><h2>{plan.name}</h2><p>{plan.tagline}</p></div>
+            {isActive ? <span className="ak-pricing-current"><CheckCircle2 size={15}/> Offre actuelle</span> :
+              plan.highlighted && <span className="ak-pricing-popular">Recommandée</span>}
+          </div>
+          <div className="ak-pricing-amount"><strong>{plan.id === 'free' ? 'Gratuit' : formatAr(period === 'annual' ? plan.annual : plan.monthly)}</strong>
+            {plan.id !== 'free' && <span>/ {period === 'annual' ? 'an' : 'mois'}</span>}
+          </div>
+          <span className="ak-pricing-price-caption">{plan.id === 'free' ? 'Accès gratuit, sans paiement' : 'Tarif indicatif · souscription à venir'}</span>
+          {plan.id === 'free' ? <button className="ak-pricing-select is-primary" type="button" onClick={() => navigate('/deploy')}>
+            Choisir mon dépôt <ArrowRight size={18}/>
+          </button> : <button className="ak-pricing-select" type="button" disabled>Souscription bientôt disponible</button>}
+          <ul className="ak-pricing-benefits">
+            {(plan.id === 'free' ? ['DevOps et DevSecOps', 'Un dépôt GitHub et des domaines AUTOKOM',
+              'Journaux et suivi des publications', 'Frontend uniquement · 30 jours sans HA ou 15 jours avec HA',
+              'Frontend + backend · 15 jours sans HA ou 7 jours avec HA'] : plan.benefits).map(feature =>
+                <li key={feature}><Check size={16} aria-hidden="true"/><span>{feature}</span></li>)}
+          </ul>
+        </article>
+      })}
     </div>
     {launch && <section className="ak-pricing-compare" aria-label="Mon offre">
       <h2>{launch.unlimited ? 'Accès administrateur permanent' : 'Mon offre de lancement'}</h2>

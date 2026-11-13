@@ -40,6 +40,16 @@ def _report(*, metrics: bool = False, details: bool = True) -> dict:
                           pf.DEFAULT_LB_MAP, pf.DEFAULT_FORWARD_RULE, metrics)
     if details:
         report = extra.enrich(report, cpu_and_network=metrics)
+        from autokom_ha_apps import _read_delivery
+        import time
+        delivery, _ = _read_delivery()
+        timestamp = (delivery or {}).get('updated')
+        if (type(timestamp) is int and 0 <= time.time() - timestamp <= 330
+                and delivery.get('public_routing_verified') is True
+                and any(row.get('status') == 'PUBLIC_HTTPS_ACTIVE' and row.get('ha') is True
+                        for row in delivery['applications'] if isinstance(row, dict))):
+            report['issues'] = [issue for issue in report['issues'] if not issue.startswith('Delivery GCP')]
+            report['can_host_customer_applications'] = not report['issues']
     return report
 
 def _n(value, width=16):
@@ -189,7 +199,7 @@ def cmd_doctor(args):
     return 2 if critical else 0
 
 def cmd_delivery(args):
-    """Explicit installation / read-only status of cloud HTTP staging controller."""
+    """Explicit installation / read-only status of the GCP delivery timer."""
     if args.status:
         file = Path('/var/lib/autokom/ha/delivery-status.json')
         if file.is_symlink() or not file.is_file():
@@ -203,6 +213,10 @@ def cmd_delivery(args):
             print(str(app.get('environment')) + ' · ' + str(app.get('status')) +
                   ' · replicas=' + str(app.get('healthy_replicas', 'indisponible')) +
                   ' · HA=' + str(app.get('ha')))
+            for host, status in (app.get('https_by_host') or {}).items():
+                print('  ' + str(host) + ' · ' + str(status))
+        for host, status in (report.get('dns_fallback') or {}).items():
+            print('Retour DNS : ' + str(host) + ' · ' + str(status))
         capacity = report.get('capacity') if isinstance(report.get('capacity'), dict) else {}
         if capacity:
             print('Capacite du MIG : besoin=' + str(capacity.get('required')) +
@@ -212,7 +226,7 @@ def cmd_delivery(args):
             print('ATTENTION : nettoyage des anciennes routes LB a reessayer')
         if report.get('capacity_error'):
             print('ATTENTION : demande de capacite GCP refusee; voir IAM/autoscaler')
-        print('HTTPS et DNS clients : non basculés (serveur principal préservé)')
+        print('HTTPS public vérifié : ' + ('oui pour au moins une application HA' if report.get('cloud_https_ready') is True else 'non'))
         return 0
     _use_gce_identity()
     report = _report(details=False)
@@ -255,8 +269,9 @@ def cmd_delivery(args):
             raise HaError('Commande systemd échouée : ' + argv[-1])
     checked('systemctl', 'daemon-reload')
     checked('systemctl', 'enable', '--now', 'autokom-ha-delivery.timer')
+    checked('systemctl', 'start', '--no-block', 'autokom-ha-delivery.service')
     print('Service de reconciliation cloud activé (timer 90 s).')
-    print('Aucun DNS ni certificat HTTPS des applications modifié.')
+    print('Bascule automatique réservée aux applications HA éligibles, avec TLS et réplicas vérifiés.')
     print('Etat : autokom iac ha delivery --status')
     return 0
 

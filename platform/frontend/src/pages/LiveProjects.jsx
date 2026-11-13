@@ -55,17 +55,20 @@ export default function LiveProjects({ navigate, projectId = null }) {
   useEffect(() => {
     if (!projectId || !detail?.environment?.id) return
     let alive = true
+    let pending = false
     const refresh = () => {
+      if (pending || document.hidden) return
+      pending = true
       // Recharger également les publications terminées : un autre onglet ou un
       // webhook GitHub peuvent créer un groupe pendant que cette page est ouverte.
       stackApi.history(projectId, 1, 10).then(next => {
         if (alive) setDetail(previous => previous ? {...previous, runs:next?.runs || [], runCount: next?.count ?? previous.runCount} : previous)
-      }).catch(() => {})
+      }).catch(() => {}).finally(() => { pending = false })
     }
-    const timer = window.setInterval(refresh, detail.runs.some(run => isPublishing(run.status)) ? 10000 : 20000)
+    const timer = window.setInterval(refresh, 5000)
     window.addEventListener('focus', refresh)
     return () => { alive = false; window.clearInterval(timer); window.removeEventListener('focus', refresh) }
-  }, [projectId, detail?.environment?.id, detail?.runs?.map(run => run.status).join('|')])
+  }, [projectId, detail?.environment?.id])
 
   // Re-read the authoritative HTTPS state while an old deployed site's DNS
   // is being reconciled. Refreshing does not launch Jenkins or change domains.
@@ -147,7 +150,7 @@ export default function LiveProjects({ navigate, projectId = null }) {
           return <article className="ak-deployment-card" key={run.id}>
             <div className="ak-deployment-summary">
               <div className="ak-deployment-symbol"><Workflow size={19}/></div>
-              <div className="ak-deployment-summary-text"><strong>Publication du {formatDate(run.created_at)}</strong><small>{publicationKind(run)} · {run.trigger_type === 'ROLLBACK' ? 'Restauration' : run.trigger_type === 'GIT_PUSH' ? 'Mise à jour automatique' : 'Lancement manuel'} · Réf. {String(run.id).slice(0,8)}</small>{securityWarning(run) && <small className="ak-publication-pill state-waiting">{securityWarning(run)}</small>}{publicationServices(run) && <small className="ak-stack-run-services">{publicationServices(run)}</small>}</div>
+              <div className="ak-deployment-summary-text"><strong>Publication du {formatDate(run.created_at)}</strong><small>{publicationKind(run)} · {run.trigger_type === 'ROLLBACK' ? 'Restauration' : run.trigger_type === 'GIT_PUSH' ? (run.trigger_origin === 'GITHUB_WEBHOOK' ? 'Push GitHub · webhook' : 'Mise à jour automatique') : 'Lancement manuel'} · Réf. {String(run.id).slice(0,8)}</small>{securityWarning(run) && <small className="ak-publication-pill state-waiting">{securityWarning(run)}</small>}{publicationServices(run) && <small className="ak-stack-run-services">{publicationServices(run)}</small>}</div>
               <span className={`ak-publication-pill state-${tone}`}>{run.release_status === 'ACTIVE' ? 'Version en ligne' : label}</span>
               <button type="button" className="button-outline" onClick={() => navigate(publicationPath(project.id, run))}>Voir les détails <ArrowRight size={15}/></button>
             </div>
@@ -160,6 +163,7 @@ export default function LiveProjects({ navigate, projectId = null }) {
         <dl className="ak-site-info-grid ak-workspace-details">
           <div><dt>Dépôt GitHub</dt><dd>{project.repository_name}</dd></div>
           <div><dt>Branche</dt><dd>{cfg?.branch || project.default_branch}</dd></div>
+          {!project.has_service_stack && <div><dt>Déploiement sur push</dt><dd>{cfg && !cfg.is_draft && cfg.auto_deploy ? `Activé · ${cfg.auto_deploy_branch || cfg.branch}` : 'Désactivé'}</dd></div>}
           <div><dt>Répertoire source</dt><dd>{cfg?.root_directory || 'Racine'}</dd></div>
           <div><dt>Environnement</dt><dd>{environment.name}</dd></div>
           <div><dt>Type de publication</dt><dd>{cfg?.mode === 'DEVSECOPS' ? 'Sécurité renforcée' : 'Standard'}</dd></div>

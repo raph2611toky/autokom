@@ -4,6 +4,7 @@ import importlib.util
 import io
 from pathlib import Path
 import sys
+import time
 import unittest
 from unittest.mock import Mock
 
@@ -99,13 +100,13 @@ class HaAppsTests(unittest.TestCase):
         self.assertEqual(calls[-1][2]['group'], group)
 
     def test_positive_status_requires_external_verification(self):
-        doc = {'applications': [dict(DECISION, status='HTTPS_READY')],
-               'cloud_https_ready': True, 'public_routing_verified': True}
+        doc = {'applications': [dict(DECISION, status='PUBLIC_HTTPS_ACTIVE')],
+               'cloud_https_ready': True, 'public_routing_verified': True, 'updated': int(time.time())}
         result = self.full(report=doc)
         self.assertEqual(result['applications'][0]['ha_status'], 'ACTIVE')
 
     def test_https_flag_alone_not_enough(self):
-        doc = {'applications': [dict(DECISION, status='HTTPS_READY')], 'cloud_https_ready': True}
+        doc = {'applications': [dict(DECISION, status='PUBLIC_HTTPS_ACTIVE')], 'cloud_https_ready': True}
         self.assertEqual(self.full(report=doc)['applications'][0]['ha_status'],
                          'REPLIQUES_PRETES_HTTPS_NON_VALIDE')
 

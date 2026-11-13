@@ -11,11 +11,17 @@ class DeploymentStageSerializer(serializers.ModelSerializer):
 
 class DeploymentRunSerializer(serializers.ModelSerializer):
     error_message = serializers.SerializerMethodField()
+    trigger_origin = serializers.SerializerMethodField()
     security_feedback_enabled = serializers.SerializerMethodField()
     release_status = serializers.SerializerMethodField()
     security_actions = serializers.SerializerMethodField()
     remediation_suggestions = serializers.SerializerMethodField()
     correction_commands = serializers.SerializerMethodField()
+
+    def get_trigger_origin(self, run):
+        if run.trigger_type != 'GIT_PUSH':
+            return ''
+        return 'GITHUB_WEBHOOK' if run.webhook_event_id else 'GITHUB_HEAD_RECONCILIATION'
 
     def get_correction_commands(self, run):
         from apps.deployments.runs.security_feedback import correction_steps
@@ -61,7 +67,7 @@ class DeploymentRunSerializer(serializers.ModelSerializer):
     stages = DeploymentStageSerializer(many=True, read_only=True)
     class Meta:
         model = DeploymentRun
-        fields = ('id','environment','configuration','trigger_type','mode_snapshot','resources_snapshot',
+        fields = ('id','environment','configuration','trigger_type','trigger_origin','mode_snapshot','resources_snapshot',
                   'branch','commit_sha','status','created_at','started_at',
                   'finished_at','cancel_requested','error_message','jenkins_reference','stages','sast_report','sca_report','security_feedback_enabled','security_actions','remediation_suggestions','correction_commands','release_status','rollback_source')
         read_only_fields = fields

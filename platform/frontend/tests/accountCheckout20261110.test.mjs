@@ -34,8 +34,10 @@ test('la HA reste une décision séparée du plan de compte', () => {
   assert.match(source, /accountSubscription\?\.ha_available/)
 })
 
-test('les quatre durées de la MVP sont visibles dans Tarifs', () => {
+test('Tarifs retrouve ses trois cartes et les quatre durées restent dans Découverte', () => {
   const pricing = read('../src/pages/Pricing.jsx')
+  assert.match(pricing, /PRICING_PLANS\.map\(plan/)
+  assert.match(pricing, /Souscription bientôt disponible/)
   assert.match(pricing, /Frontend uniquement/)
   assert.match(pricing, /Frontend \+ backend/)
   assert.match(pricing, /30 jours/)

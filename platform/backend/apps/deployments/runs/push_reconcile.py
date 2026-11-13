@@ -54,9 +54,10 @@ def reconcile_branch_heads(*, offset=0, limit=5, repository=None):
         is_active=True, project__status=Project.Status.ACTIVE,
         project__git_connection__is_active=True,
         project__git_connection__installation_id__isnull=False,
+        frontend_stacks__isnull=True, backend_stacks__isnull=True,
     ).order_by('pk')
     if repository:
-        eligible_qs = eligible_qs.filter(project__repository_name=repository)
+        eligible_qs = eligible_qs.filter(project__repository_name__iexact=repository)
     count = eligible_qs.count()
     if not count:
         return {'created': 0, 'examined': 0, 'total': 0, 'next_offset': 0}
@@ -92,6 +93,8 @@ def reconcile_branch_heads(*, offset=0, limit=5, repository=None):
         idem = f'github-head:{env.pk}:{sha.lower()}'
         with transaction.atomic():
             locked = type(env).objects.select_for_update().get(pk=env.pk)
+            if locked.frontend_stacks.exists() or locked.backend_stacks.exists():
+                continue
             if DeploymentRun.objects.filter(environment=locked, status__in=['QUEUED', 'RUNNING']).exists():
                 continue
             if DeploymentRun.objects.filter(idempotency_key=idem).exists():

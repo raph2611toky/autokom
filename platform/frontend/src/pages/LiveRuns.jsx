@@ -22,9 +22,11 @@ function statusPill(value) {
   const [name, tone] = publicationLabel(value)
   return <span className={`ak-publication-pill state-${tone}`} role="status">{name}</span>
 }
-function displayTrigger(value) {
+function displayTrigger(value, origin) {
+  if (origin === 'GITHUB_WEBHOOK') return 'Push GitHub · webhook'
+  if (origin === 'GITHUB_HEAD_RECONCILIATION') return 'Mise à jour automatique · rattrapage GitHub'
   if (value === 'ROLLBACK') return 'Restauration d’une version'
-  return value === 'GIT_PUSH' ? 'Mise à jour automatique' : value === 'MANUAL' ? 'Déploiement manuel' : 'Nouvelle publication'
+  return value === 'GIT_PUSH' ? 'Push GitHub · automatique' : value === 'MANUAL' ? 'Déploiement manuel' : 'Nouvelle publication'
 }
 function mergeLogEntries(current, incoming) {
   const bySequence = new Map(current.map(item => [item.sequence,item]))
@@ -95,7 +97,7 @@ function RunDetails({ navigate, projectId, runId }) {
 
   useEffect(() => {
     if (!run || !isPublishing(run.status)) return
-    const timer = window.setInterval(() => { if (isPublishing(liveStatus.current)) refresh() },12000)
+    const timer = window.setInterval(() => { if (!document.hidden && isPublishing(liveStatus.current)) refresh() },5000)
     return () => window.clearInterval(timer)
   }, [refresh,run?.status])
 
@@ -121,7 +123,7 @@ function RunDetails({ navigate, projectId, runId }) {
   const repositoryUrl = githubRepositoryUrl(projectInfo.project.repository_name)
   return <>
     <div className="ak-back-line"><button type="button" className="button-quiet" onClick={() => navigate(`/projects/${projectId}`)}><ArrowLeft size={16}/> {projectInfo.project.name}</button></div>
-    <section className="page-hero ak-workspace-hero"><div><p className="ak-page-kicker">Détails de publication</p><h1>Publication {String(run.id).slice(0,8)}</h1><p>{dateTime(run.created_at)} · {displayTrigger(run.trigger_type)}</p></div><div className="ak-project-hero-actions">{statusPill(run.status)}<button className="button-outline" type="button" onClick={refresh}><RefreshCw size={16}/> Actualiser</button></div></section>
+    <section className="page-hero ak-workspace-hero"><div><p className="ak-page-kicker">Détails de publication</p><h1>Publication {String(run.id).slice(0,8)}</h1><p>{dateTime(run.created_at)} · {displayTrigger(run.trigger_type, run.trigger_origin)}</p></div><div className="ak-project-hero-actions">{statusPill(run.status)}<button className="button-outline" type="button" onClick={refresh}><RefreshCw size={16}/> Actualiser</button></div></section>
     {error && <p className="feedback error" role="alert">{error}</p>}
     <ProjectPublicSite site={projectInfo.project.public_site} onManage={() => navigate(`/sites/${projectId}`)}/>
     <div className="ak-project-detail-actions">
@@ -175,7 +177,7 @@ function RunDetails({ navigate, projectId, runId }) {
       {more && <button className="button-outline ak-run-loadmore" disabled={busy} onClick={loadMore}>{busy ? <LoaderCircle size={16} className="ak-spin"/> : <ArrowRight size={16}/>} Charger davantage de lignes</button>}
     </section>
     <details className="ak-workspace-sheet ak-project-config-fold"><summary className="ak-workspace-sheet-heading ak-project-config-summary"><h2>Configuration utilisée</h2><span className="ak-project-config-suffix"><GitBranch size={18}/></span></summary>
-      <dl className="ak-site-info-grid ak-workspace-details"><div><dt>Dépôt GitHub</dt><dd>{projectInfo.project.repository_name}</dd></div><div><dt>Branche</dt><dd>{run.branch || '—'}</dd></div><div><dt>Version</dt><dd>{run.commit_sha ? run.commit_sha.slice(0,12) : '—'}</dd></div><div><dt>Type de publication</dt><dd>{run.mode_snapshot === 'DEVSECOPS' ? 'Sécurité renforcée' : 'Standard'}</dd></div><div><dt>Début</dt><dd>{dateTime(run.started_at)}</dd></div><div><dt>Fin</dt><dd>{dateTime(run.finished_at)}</dd></div></dl>
+      <dl className="ak-site-info-grid ak-workspace-details"><div><dt>Dépôt GitHub</dt><dd>{projectInfo.project.repository_name}</dd></div><div><dt>Branche</dt><dd>{run.branch || '—'}</dd></div><div><dt>Version</dt><dd>{run.commit_sha ? run.commit_sha.slice(0,12) : '—'}</dd></div>{run.jenkins_reference && <div><dt>Jenkins</dt><dd>{run.jenkins_reference}</dd></div>}<div><dt>Type de publication</dt><dd>{run.mode_snapshot === 'DEVSECOPS' ? 'Sécurité renforcée' : 'Standard'}</dd></div><div><dt>Début</dt><dd>{dateTime(run.started_at)}</dd></div><div><dt>Fin</dt><dd>{dateTime(run.finished_at)}</dd></div></dl>
     </details>
   </>
 }
@@ -208,18 +210,20 @@ function RunHistory({ navigate, projectId }) {
   useEffect(() => {
     if (!info?.environment?.id) return
     let alive = true
-    const timer = window.setInterval(() => {
+    let pending = false
+    const refresh = () => {
+      if (pending || document.hidden) return
+      pending = true
       stackApi.history(projectId,page,PAGE_SIZE)
         .then(result => {
           if (alive) {setRuns(sortRecentRuns(result?.runs || []));setCount(result?.count ?? 0)}
-        }).catch(err=>{if(alive)setError(errorText(err))})
-    },runs.some(run=>isPublishing(run.status)) ? 10000 : 20000)
-    const onFocus = () => stackApi.history(projectId,page,PAGE_SIZE).then(result => {
-      if (alive) {setRuns(sortRecentRuns(result?.runs || []));setCount(result?.count ?? 0)}
-    }).catch(err => {if (alive) setError(errorText(err))})
-    window.addEventListener('focus', onFocus)
-    return () => {alive=false;window.clearInterval(timer);window.removeEventListener('focus',onFocus)}
-  },[projectId,info?.environment?.id,page,runs.map(run=>run.status).join('|')])
+        }).catch(err => {if (alive) setError(errorText(err))})
+        .finally(() => { pending = false })
+    }
+    const timer = window.setInterval(refresh, 5000)
+    window.addEventListener('focus', refresh)
+    return () => {alive=false;window.clearInterval(timer);window.removeEventListener('focus',refresh)}
+  },[projectId,info?.environment?.id,page])
   const pages = Math.max(1,Math.ceil(count / PAGE_SIZE))
   return <>
     <div className="ak-back-line"><button className="button-quiet" onClick={() => navigate(`/projects/${projectId}`)}><ArrowLeft size={16}/> Retour au projet</button></div>
@@ -229,7 +233,7 @@ function RunHistory({ navigate, projectId }) {
     {info?.project?.public_site?.current_stack_run_id && <p className="ak-deployment-hint">Version groupée actuellement en ligne · {String(info.project.public_site.current_stack_run_id).slice(0,8)} <button type="button" className="button-outline" onClick={() => navigate(publicationPath(projectId,{id:info.project.public_site.current_stack_run_id,kind:'stack'}))}>Voir la version</button></p>}
     {info?.project?.public_site?.current_run_id && !info.project.has_service_stack && <p className="ak-deployment-hint">Version actuellement en ligne · {String(info.project.public_site.current_run_id).slice(0,8)} <button type="button" className="button-outline" onClick={() => navigate(`/projects/${projectId}/deployments/${info.project.public_site.current_run_id}`)}>Voir la version</button></p>}
     <section className="ak-workspace-sheet"><div className="ak-workspace-sheet-heading"><h2>Toutes les publications</h2><span className="ak-project-state">Page {page} / {pages}</span></div>
-      {loading ? <div className="ak-workspace-empty" role="status"><LoaderCircle className="ak-spin"/> Chargement…</div> : runs.length ? <div className="ak-deployment-list">{runs.map(run => <article className="ak-deployment-card" key={run.id}><div className="ak-deployment-summary"><div className="ak-deployment-symbol"><Workflow size={19}/></div><div className="ak-deployment-summary-text"><strong>{dateTime(run.created_at)}</strong><small>{publicationKind(run)} · {displayTrigger(run.trigger_type)} · Réf. {String(run.id).slice(0,8)}</small>{publicationServices(run) && <small className="ak-stack-run-services">{publicationServices(run)}</small>}</div>{run.release_status === 'ACTIVE' ? <span className="ak-publication-pill state-success">Version en ligne</span> : statusPill(run.status)}
+      {loading ? <div className="ak-workspace-empty" role="status"><LoaderCircle className="ak-spin"/> Chargement…</div> : runs.length ? <div className="ak-deployment-list">{runs.map(run => <article className="ak-deployment-card" key={run.id}><div className="ak-deployment-summary"><div className="ak-deployment-symbol"><Workflow size={19}/></div><div className="ak-deployment-summary-text"><strong>{dateTime(run.created_at)}</strong><small>{publicationKind(run)} · {displayTrigger(run.trigger_type, run.trigger_origin)} · Réf. {String(run.id).slice(0,8)}</small>{publicationServices(run) && <small className="ak-stack-run-services">{publicationServices(run)}</small>}</div>{run.release_status === 'ACTIVE' ? <span className="ak-publication-pill state-success">Version en ligne</span> : statusPill(run.status)}
       {securityWarning(run) && <span className="ak-publication-pill state-waiting">{securityWarning(run)}</span>}
       {(run.kind === 'stack' || (!info?.project?.has_service_stack && info?.environment?.id)) && <RestorePublication projectId={projectId} environmentId={info?.environment?.id} run={run} navigate={navigate} busy={runs.some(item=>isPublishing(item.status))}/>}
       <button className="button-outline" type="button" onClick={() => navigate(publicationPath(projectId,run))}>Détails <ArrowRight size={16}/></button></div></article>)}</div> : <p className="ak-deployment-hint">Aucune publication enregistrée.</p>}

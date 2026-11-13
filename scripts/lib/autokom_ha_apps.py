@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts/ha'))
@@ -136,8 +137,9 @@ def assemble(mig, report, desired, health=None):
     for w in nodes:
         for app in w['applications']:
             group.setdefault(app['environment'], []).append((w, app))
-    public_ready = (isinstance(report, dict) and report.get('cloud_https_ready') is True
-                    and report.get('public_routing_verified') is True)
+    timestamp = report.get('updated') if isinstance(report, dict) else None
+    public_ready = (type(timestamp) is int and 0 <= time.time() - timestamp <= 330
+                    and report.get('cloud_https_ready') is True and report.get('public_routing_verified') is True)
     summary = []
     for env, entries in sorted(group.items()):
         decision = by_env.get(env, {})
@@ -152,7 +154,7 @@ def assemble(mig, report, desired, health=None):
             ha_state = 'INCONNUE'
         elif not wanted:
             ha_state = 'NON_DEMANDEE'
-        elif replicas_ok and public_ready and decision.get('status') in ('HTTPS_READY', 'ACTIVE'):
+        elif replicas_ok and public_ready and decision.get('status') == 'PUBLIC_HTTPS_ACTIVE':
             ha_state = 'ACTIVE'
         elif replicas_ok:
             ha_state = 'REPLIQUES_PRETES_HTTPS_NON_VALIDE'
@@ -171,7 +173,7 @@ def assemble(mig, report, desired, health=None):
             pending.append({'environment': env, 'status': str(decision.get('status', 'INCONNU')),
                             'ha_requested': decision.get('ha') is True})
     return {'workers': nodes, 'applications': summary, 'unassigned': pending,
-            'cloud_https_ready': bool(isinstance(report, dict) and report.get('cloud_https_ready') is True),
+            'cloud_https_ready': any(app['ha_status'] == 'ACTIVE' for app in summary),
             'public_routing_verified': bool(public_ready)}
 
 
