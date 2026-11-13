@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { readFileSync } from 'node:fs'
 import { estimateResources } from '../src/services/resourceEstimate.js'
 import { detectSource } from '../src/services/sourceAnalysis.js'
 
@@ -34,4 +35,27 @@ test('le récapitulatif additionne les services et les répliques demandées', (
 test('pas de chiffre présenté avant une analyse valide', () => {
   assert.equal(estimateResources([{profile:'vite',analysis:null}]),null)
   assert.equal(estimateResources([{profile:'unknown',analysis:valid}]),null)
+})
+
+test('les ressources recommandées utilisent une palette lisible en clair et en sombre', () => {
+  const read = path => readFileSync(new URL(path, import.meta.url), 'utf8')
+  const css = read('../src/styles/resource-estimate.css')
+  const jsx = read('../src/components/ResourceEstimate.jsx')
+  assert.match(jsx, /import '\.\.\/styles\/resource-estimate\.css'/)
+  assert.doesNotMatch(jsx, /ak-stack-component/)
+  assert.match(css, /background: var\(--ak-surface-2\)/)
+  assert.match(css, /\.ak-resource-estimate \.ak-review-list strong\s*\{\s*color: var\(--ak-text-strong\)/)
+  const palette = read('../src/styles/tokens.css').split(':root[data-theme="dark"]')
+  const luminance = hex => hex.match(/../g).map((part, i) => {
+    const n = Number.parseInt(part, 16) / 255
+    return [0.2126, 0.7152, 0.0722][i] * (n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4)
+  }).reduce((sum, n) => sum + n, 0)
+  for (const theme of palette) {
+    const get = token => luminance(theme.match(new RegExp(`--ak-${token}: #([a-f0-9]{6});`))[1])
+    const bg = get('surface-2')
+    for (const token of ['text-strong', 'muted', 'success']) {
+      const fg = get(token)
+      assert.ok((Math.max(bg, fg) + 0.05) / (Math.min(bg, fg) + 0.05) >= 4.5, token)
+    }
+  }
 })

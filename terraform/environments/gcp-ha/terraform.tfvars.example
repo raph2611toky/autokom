@@ -32,9 +32,12 @@ artifact_repository = "autokom-ha-images"
 bootstrap_mode                 = "validation"
 application_startup_script_file = ""
 
-# Phase initiale : HTTP pour test de reseau. Activer HTTPS apres creation DNS vers IP du LB.
-enable_https = false
-domain_name  = null
+# Laisser le listener 443 inactif jusqu'à validation du certificat.
+# https_dns_zone = "auto.ikom.mg" prépare *.auto.ikom.mg via un CNAME dédié.
+# Sans https_dns_zone, domain_name permet toujours le mode classique à un domaine.
+enable_https   = false
+domain_name    = null
+https_dns_zone = null
 
 # ATTENTION : 2+ machines + Load Balancer + IP globale generent des couts.
 # Conserver false jusqu'a revue du plan, quota, facturation et regles firewall.

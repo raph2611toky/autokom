@@ -13,6 +13,9 @@ output "validation_url_http" {
 output "https_url" {
   value = module.regional_web_ha.https_url
 }
+output "https_dns_record" {
+  value = module.regional_web_ha.https_dns_record
+}
 output "web_vm_service_account" {
   value = module.regional_web_ha.web_vm_service_account
 }

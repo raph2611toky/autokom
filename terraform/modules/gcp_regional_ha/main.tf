@@ -301,9 +301,9 @@ resource "google_compute_global_forwarding_rule" "http" {
   target                = google_compute_target_http_proxy.web.id
 }
 
-# HTTPS facultatif : certificat emis uniquement si DNS pointe deja sur l'IP ci-dessus.
+# HTTPS classique, avec validation via le load balancer, pour un seul domaine.
 resource "google_compute_managed_ssl_certificate" "web" {
-  count   = var.enable_https ? 1 : 0
+  count   = var.enable_https && var.https_dns_zone == null ? 1 : 0
   project = var.project_id
   name    = "${var.name_prefix}-cert"
   managed {
@@ -322,7 +322,11 @@ resource "google_compute_target_https_proxy" "web" {
   project          = var.project_id
   name             = "${var.name_prefix}-https-proxy"
   url_map          = google_compute_url_map.web.id
-  ssl_certificates = [google_compute_managed_ssl_certificate.web[0].id]
+  ssl_certificates = var.https_dns_zone == null ? [google_compute_managed_ssl_certificate.web[0].id] : null
+  certificate_map  = var.https_dns_zone == null ? null : "//certificatemanager.googleapis.com/${google_certificate_manager_certificate_map.web[0].id}"
+
+  # Ensure the wildcard entry exists before attaching the map.
+  depends_on = [google_certificate_manager_certificate_map_entry.web_wildcard]
 }
 
 resource "google_compute_global_forwarding_rule" "https" {

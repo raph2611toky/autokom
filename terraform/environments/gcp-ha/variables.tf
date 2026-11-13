@@ -80,6 +80,11 @@ variable "domain_name" {
   default  = null
   nullable = true
 }
+variable "https_dns_zone" {
+  type        = string
+  default     = null
+  description = "Suffixe à couvrir avec un certificat wildcard préparé par autorisation DNS."
+}
 variable "restrict_mig_ingress" {
   type        = bool
   default     = true

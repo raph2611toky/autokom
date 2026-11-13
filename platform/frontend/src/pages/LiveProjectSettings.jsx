@@ -3,6 +3,8 @@ import { ArrowLeft, Settings2, Trash2, Archive, RotateCcw, Save, LoaderCircle, H
 import { projectsApi } from '../services/projectsApi.js'
 import { deploymentsApi } from '../services/deploymentsApi.js'
 import { getRemoteProjectDetail, errorText } from '../services/projectWorkflow.js'
+import { publicSiteUrl } from '../services/sitePresentation.js'
+import { cloudAvailability } from '../services/cloudAvailability.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
 import ActionDialog from '../components/ActionDialog.jsx'
 
@@ -62,6 +64,7 @@ export default function LiveProjectSettings({ navigate, projectId }) {
   if(loading) return <section className="ak-workspace-empty" role="status"><LoaderCircle className="ak-spin" size={18}/> Chargement des paramètres…</section>
   if(!record) return <div className="ak-workspace-empty"><p role="alert">{error || 'Projet introuvable'}</p><button type="button" className="button-outline" onClick={() => navigate('/projects')}>Mes projets</button></div>
   const project=record.project
+  const availability=cloudAvailability(cloudStatus, Boolean(publicSiteUrl(project.public_site)))
   return <>
     <div className="ak-back-line"><button type="button" className="button-quiet" onClick={() => navigate(`/projects/${projectId}`)}><ArrowLeft size={16}/> Détails du projet</button></div>
     <section className="page-hero ak-workspace-hero"><div><h1><Settings2 size={26}/> Paramètres · {project.name}</h1><p>Gérer le projet, son adresse publique et son cycle de vie.</p></div><div className="ak-project-settings-shortcuts"><button type="button" className="button-outline" onClick={() => navigate(`/projects/${projectId}/configure`)} disabled={project.status === 'ARCHIVED'}><Settings2 size={16}/> Modifier la configuration</button><button type="button" className="button-outline" onClick={() => navigate(`/projects/${projectId}/history`)}><History size={16}/> Voir les déploiements</button></div></section>
@@ -70,11 +73,12 @@ export default function LiveProjectSettings({ navigate, projectId }) {
     <ProjectPublicSite site={project.public_site} onManage={() => navigate(`/sites/${projectId}`)}/>
     <section className="ak-workspace-sheet" aria-label="Disponibilité des applications GCP">
       <h2>Disponibilité et réplicas GCP</h2>
-      <p>Haute disponibilité : <strong>{cloudStatus?.ha?.status === 'ACTIVE' ? 'Option autorisée (déploiement à vérifier)' : cloudStatus?.ha?.status === 'PENDING' ? 'Option en attente de validation' : 'Désactivée par défaut'}</strong></p>
-      <p>Réplicas cloud sains : <strong>{cloudStatus?.cloud_delivery ? `${cloudStatus.cloud_delivery.healthy_replicas} / ${cloudStatus.cloud_delivery.requested_replicas}` : 'Non vérifiable'}</strong></p>
-      <p>Publication GCP : <strong>{cloudStatus?.cloud_delivery?.status || 'Aucune information disponible'}</strong></p>
-      <p>Load Balancer HTTP : {cloudStatus?.cloud_delivery?.http_lb_ready ? 'Vérifié pour cette application' : 'Non validé'}.</p>
-      <p>HTTPS public HA : <strong>{cloudStatus?.cloud_delivery?.public_https_ready ? 'Validé' : 'Non activé — hébergement HTTPS principal conservé'}</strong></p>
+      <p>Option haute disponibilité · <strong>{availability.option}</strong></p>
+      <p>Réplicas cloud sains · <strong>{availability.replicas}</strong></p>
+      <p>Publication GCP · <strong>{availability.delivery}</strong></p>
+      <p>Load balancer HTTP · <strong>{availability.http}</strong></p>
+      <p>HTTPS public via GCP · <strong>{availability.https}</strong></p>
+      {availability.note && <p>{availability.note}</p>}
     </section>
     <section className="ak-workspace-sheet ak-project-settings-main"><h2>Informations générales</h2>
       <form onSubmit={event => {event.preventDefault();operation(() => projectsApi.update(projectId,{name:name.trim(),description}), 'Paramètres enregistrés.')}}>

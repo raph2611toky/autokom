@@ -36,5 +36,6 @@ module "regional_web_ha" {
   application_startup_script = trimspace(var.application_startup_script_file) != "" ? file(abspath(var.application_startup_script_file)) : null
   enable_https          = var.enable_https
   domain_name           = var.domain_name
+  https_dns_zone        = var.https_dns_zone
   depends_on            = [terraform_data.cost_gate]
 }

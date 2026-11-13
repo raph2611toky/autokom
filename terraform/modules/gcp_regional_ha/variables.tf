@@ -111,13 +111,22 @@ variable "application_startup_script" {
 variable "enable_https" {
   type        = bool
   default     = false
-  description = "Pour activer HTTPS, faire pointer le domaine vers l'IP du LB."
+  description = "Ajoute le proxy HTTPS et la règle globale sur le port 443. Ne change pas les DNS."
 }
 variable "domain_name" {
   type        = string
   default     = null
   nullable    = true
   description = "FQDN pour certificat gere GCP, exemple www.exemple.mg."
+}
+variable "https_dns_zone" {
+  type        = string
+  default     = null
+  description = "Suffixe DNS du certificat wildcard Certificate Manager, sans * ni point final. Préparation indépendante de enable_https."
+  validation {
+    condition     = var.https_dns_zone == null ? true : length(var.https_dns_zone) <= 251 && can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$", var.https_dns_zone))
+    error_message = "https_dns_zone doit être un suffixe DNS comme auto.ikom.mg, en minuscules, sans wildcard ni point final."
+  }
 }
 variable "restrict_mig_ingress" {
   type        = bool
