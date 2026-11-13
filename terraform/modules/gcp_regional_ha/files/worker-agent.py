@@ -238,7 +238,7 @@ def render_nginx(apps):
              '    default "";',
              '    "~^akbench-[a-z0-9-]{1,40}$" $http_x_autokom_bench;',
              '}',
-             """log_format autokom_ha_request escape=json '{"time":"$time_iso8601","method":"$request_method","status":"$status","seconds":"$request_time","bytes":"$body_bytes_sent","tag":"$autokom_ha_bench"}';"""]
+             """log_format autokom_ha_request escape=json '{"time":"$time_iso8601","method":"$request_method","status":"$status","seconds":"$request_time","bytes":"$body_bytes_sent","rx":"$request_length","tx":"$bytes_sent","tag":"$autokom_ha_bench"}';"""]
     for app in apps:
         address = container_ipv4(app)
         for host in app['hosts']:

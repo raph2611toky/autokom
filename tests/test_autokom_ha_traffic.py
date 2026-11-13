@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import gzip
+from collections import Counter
 from pathlib import Path
 from queue import Queue
 import subprocess
@@ -35,7 +36,9 @@ class TrafficTests(unittest.TestCase):
             traffic.select_workers('portfoliolady.ikom.mg', WORKERS, REPORT, follow=True)
 
     def test_tag_and_validation(self):
-        self.assertEqual(traffic.event_from_line(LINE, TAG)[1:], ('GET', 200, .016, 777, TAG))
+        self.assertEqual(traffic.event_from_line(LINE, TAG)[1:], ('GET', 200, .016, 777, TAG, None, None))
+        modern = json.dumps({**json.loads(LINE), 'rx': '210', 'tx': '1007'})
+        self.assertEqual(traffic.event_from_line(modern, TAG)[6:], (210, 1007))
         self.assertIsNone(traffic.event_from_line(LINE, 'akbench-other'))
         self.assertIsNone(traffic.event_from_line(LINE.replace('GET', 'GET\\u001b')))
 
@@ -51,6 +54,7 @@ class TrafficTests(unittest.TestCase):
         self.assertIn('--internal-ip', cmd)
         self.assertTrue(any(path in arg and '--follow=name --retry' in arg for arg in cmd))
         self.assertIn('location ^~ /__autokom_health/ { access_log off;', config)
+        self.assertIn('"rx":"$request_length","tx":"$bytes_sent"', config)
         for unsafe in ('$request_uri', '$remote_addr', '$http_authorization', '$http_cookie'):
             self.assertNotIn(unsafe, config)
         with self.assertRaises(ValueError):
@@ -74,6 +78,34 @@ class TrafficTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0].tag, TAG)
             self.assertEqual(main(['app', HOST, 'logs', '--lines', '42']), 0)
             self.assertEqual(run.call_args.args[0].lines, 42)
+
+    def test_dashboard_shows_per_worker_rates_and_missing_old_bytes(self):
+        a, b = [row['name'] for row in WORKERS[:2]]
+        counts = Counter({a: 8, b: 2})
+        data = Counter({(a, 'rx'): 800, (a, 'tx'): 8192, (a, 'rx', 'known'): 8,
+                        (a, 'tx', 'known'): 8, (b, 'tx'): 1000, (b, 'tx', 'known'): 2})
+        frame = traffic.dashboard_lines(HOST, WORKERS[:2], {a, b}, set(), counts, Counter({a: 1}),
+                                        data, Counter(), Counter(), 2, 2, 'Suivi prêt', width=119)
+        self.assertIn('80.0%', frame[4])
+        self.assertIn('400.0 o/s', frame[4])
+        self.assertIn('4.0 Kio/s', frame[4])
+        self.assertIn('20.0%', frame[5])
+        self.assertIn('—', frame[5])
+        self.assertIn('Reçu —', frame[7])
+        self.assertIn('Envoyé 9.0 Kio', frame[7])
+        self.assertTrue(all(len(line) <= 119 for line in frame))
+        compact = traffic.dashboard_lines(HOST, WORKERS[:2], {a}, {b}, counts, Counter(), data,
+                                          Counter(), Counter(), 2, 2, 'Suivi partiel', width=79)
+        self.assertIn('Flux interrompu', compact[5])
+        self.assertTrue(all(len(line) <= 79 for line in compact))
+
+    def test_table_frames_reuse_rows_without_clearing_terminal_history(self):
+        stream = io.StringIO()
+        table = traffic.TerminalDashboard(stream)
+        table.draw(['Header', 'value 1'])
+        table.draw(['Header', 'value 2'])
+        self.assertEqual(stream.getvalue(), '\x1b[2KHeader\n\x1b[2Kvalue 1\n'
+                         '\x1b[2F\x1b[2KHeader\n\x1b[2Kvalue 2\n')
 
     def test_full_logs_read_numbered_rotations_without_other_paths(self):
         with TemporaryDirectory() as folder:

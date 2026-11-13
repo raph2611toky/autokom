@@ -9,8 +9,10 @@ import os
 from queue import Empty, Full, Queue
 import re
 import shlex
+import shutil
 import signal
 import subprocess
+import sys
 from threading import Event, Thread
 import time
 
@@ -73,7 +75,11 @@ def event_from_line(line, tag=None):
             return None
         if tag and marker != tag:
             return None
-        return timestamp, row['method'], int(row['status']), float(row['seconds']), int(row['bytes']), marker
+        lengths = []
+        for field in ('rx', 'tx'):
+            size = row.get(field)
+            lengths.append(int(size) if isinstance(size, str) and re.fullmatch(r'[0-9]{1,16}', size) else None)
+        return timestamp, row['method'], int(row['status']), float(row['seconds']), int(row['bytes']), marker, *lengths
     except (KeyError, TypeError, ValueError, OverflowError):
         return None
 
@@ -140,7 +146,7 @@ def _stop(processes):
 
 
 def _print_event(worker, event):
-    timestamp, method, status, seconds, size, tag = event
+    timestamp, method, status, seconds, size, tag, _, _ = event
     print(f'{timestamp.isoformat()}  {worker}  {method}  {status}  '
           f'{seconds * 1000:.1f} ms  {size} o' + (f'  {tag}' if tag else ''))
 
@@ -157,6 +163,83 @@ def print_counts(counts, errors, workers, ready, elapsed, *, previous=None, inte
             rate = hits / max(elapsed, .001) if previous is None else (hits - previous[worker]) / max(interval, .001)
             print(f'  {worker}  {hits} req · {rate:.1f} req/s · '
                   f'{share} du total observé · {errors[worker]} HTTP 5xx', flush=True)
+
+
+def _volume(value, *, per_second=False):
+    if value is None:
+        return '—'
+    for unit in ('o', 'Kio', 'Mio', 'Gio', 'Tio', 'Pio', 'Eio'):
+        if value < 1024 or unit == 'Eio':
+            number = str(int(value)) if unit == 'o' and not per_second else f'{value:.1f}'
+            return f'{number} {unit}' + ('/s' if per_second else '')
+        value /= 1024
+
+
+def dashboard_lines(host, nodes, ready, failed, counts, errors, traffic, prev_counts, prev_traffic,
+                    elapsed, interval, phase, *, tag=None, width=120):
+    """A stable row per replica. HTTP bytes are distinct from NIC throughput."""
+    total = sum(counts.values())
+    rate = (total - sum(prev_counts.values())) / max(interval, .001)
+    title = f'AUTOKOM HA  ·  {host}'
+    lines = [title, f'{phase}  ·  {elapsed:.1f} s  ·  {total} req  ·  {rate:.1f} req/s']
+    # Keep the compact table usable over ordinary 80-column SSH sessions.
+    wide = width >= 119
+    if wide:
+        lines.append(f'{"Worker":<22} {"Zone":<14} {"Req":>8} {"Req/s":>7} {"Part":>7} '
+                     f'{"Reçu/s":>12} {"Envoyé/s":>12} {"5xx":>6}  Répartition')
+    else:
+        lines.append(f'{"Worker":<20} {"Req":>7} {"Req/s":>7} {"Part":>7} {"Reçu/s":>11} {"Envoyé/s":>11} {"5xx":>5}')
+    lines.append('─' * min(width, 119 if wide else 77))
+
+    def volume_cell(worker, side):
+        octets = traffic[worker, side] - prev_traffic[worker, side]
+        known = traffic[worker, side, 'known'] - prev_traffic[worker, side, 'known']
+        delta = counts[worker] - prev_counts[worker]
+        if delta and known != delta:
+            return '—'
+        if not delta and not traffic[worker, side, 'known']:
+            return '—'
+        return _volume(octets / max(interval, .001), per_second=True)
+
+    for node in nodes:
+        worker, zone = node['name'], node['zone']
+        prefix = f'{worker:<22} {zone:<14}' if wide else f'{worker:<20}'
+        if worker not in ready or worker in failed:
+            lines.append(prefix + ('  Flux interrompu' if worker in failed else '  Connexion…'))
+            continue
+        hits = counts[worker]
+        share = hits / total if total else 0
+        share_text = f'{100 * share:.1f}%' if total else '—'
+        qps = (hits - prev_counts[worker]) / max(interval, .001)
+        rx, tx = volume_cell(worker, 'rx'), volume_cell(worker, 'tx')
+        if wide:
+            bars = min(10, int(10 * share + .5))
+            bar = '█' * bars + '░' * (10 - bars)
+            lines.append(f'{prefix} {hits:8d} {qps:7.1f} {share_text:>7} {rx:>12} {tx:>12} {errors[worker]:6d}  {bar}')
+        else:
+            lines.append(f'{prefix} {hits:7d} {qps:7.1f} {share_text:>7} {rx:>11} {tx:>11} {errors[worker]:5d}')
+    lines.append('─' * min(width, 119 if wide else 77))
+    volumes = []
+    for side, label in (('rx', 'Reçu'), ('tx', 'Envoyé')):
+        values = sum(traffic[node['name'], side] for node in nodes)
+        known = sum(traffic[node['name'], side, 'known'] for node in nodes)
+        volumes.append(f'{label} {_volume(values if total and known == total else None)}')
+    lines.append('Cumul HTTP  ·  ' + '  ·  '.join(volumes) + f'  ·  {sum(errors.values())} HTTP 5xx')
+    lines.append(f'Tag {tag}  ·  Ctrl+C pour arrêter' if tag else 'Ctrl+C pour arrêter  ·  Relancer si le placement change')
+    return [line[:width] for line in lines]
+
+
+class TerminalDashboard:
+    def __init__(self, out):
+        self.out = out
+        self.rows = 0
+
+    def draw(self, lines):
+        # One write per frame. Only overwrite the previous table, not shell history.
+        prefix = f'\x1b[{self.rows}F' if self.rows else ''
+        self.out.write(prefix + ''.join('\x1b[2K' + line + '\n' for line in lines))
+        self.out.flush()
+        self.rows = len(lines)
 
 
 def run(args):
@@ -184,27 +267,43 @@ def run(args):
     names = [worker['name'] for worker in nodes]
     wanted = {worker.get('name') for worker in row.get('workers', []) if isinstance(worker, dict)}
     complete_placement = not follow or (set(names) == wanted and (row.get('ha') is not True or len(names) >= 2))
-    print(f'AUTOKOM HA · {host} · {row.get("status", "INCONNU")}', flush=True)
-    if follow and (row.get('status') != 'PUBLIC_HTTPS_ACTIVE' or
-                   type(report.get('updated')) is not int or not 0 <= time.time() - report['updated'] <= 330):
-        print('Attention · Le routage public GCP n’est pas confirmé dans un rapport récent.', flush=True)
-    print('Workers observés · ' + ', '.join(f'{w["name"]} ({w["zone"]})' for w in nodes), flush=True)
-    if follow:
+    public_confirmed = (row.get('status') == 'PUBLIC_HTTPS_ACTIVE' and
+                        type(report.get('updated')) is int and 0 <= time.time() - report['updated'] <= 330)
+    size = shutil.get_terminal_size((120, 30))
+    dashboard = (TerminalDashboard(sys.stdout) if follow and not args.requests and not args.plain
+                 and sys.stdout.isatty() and os.environ.get('TERM') not in ('dumb', '')
+                 and size.lines > len(nodes) + 8 and size.columns >= 76 else None)
+    if not dashboard:
+        print(f'AUTOKOM HA · {host} · {row.get("status", "INCONNU")}', flush=True)
+        if follow and not public_confirmed:
+            print('Attention · Le routage public GCP n’est pas confirmé dans un rapport récent.', flush=True)
+        print('Workers observés · ' + ', '.join(f'{w["name"]} ({w["zone"]})' for w in nodes), flush=True)
+    if follow and not dashboard:
         if not complete_placement:
             print('Suivi partiel · tous les réplicas prévus ne sont pas disponibles.', flush=True)
         print('Ctrl+C pour arrêter · redémarrer le suivi si le placement change.', flush=True)
     queue = Queue(maxsize=4096)
     stop = Event()
     processes, threads, ended, ready, failed, absent, missing = [], [], set(), set(), set(), set(), set()
-    counts, errors = Counter(), Counter()
-    previous = Counter()
+    counts, errors, traffic = Counter(), Counter(), Counter()
+    previous, previous_traffic = Counter(), Counter()
     history = []
     connected_at = None
     started = time.monotonic()
     deadline = started + (limit + 45 if follow else 180 if all_logs else 60)
     next_print = deadline
     last_print = started
+
+    def redraw(now, phase):
+        if not public_confirmed:
+            phase += ' · HA publique non confirmée'
+        dashboard.draw(dashboard_lines(host, nodes, ready, failed, counts, errors, traffic,
+                       previous, previous_traffic, now - (connected_at or started), now - last_print,
+                       phase, tag=args.tag, width=shutil.get_terminal_size((120, 30)).columns - 1))
+
     try:
+        if dashboard:
+            redraw(started, 'Connexion aux workers')
         for worker in nodes:
             proc = subprocess.Popen(ssh_command(worker, host, follow, limit, all_logs=all_logs), stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL, text=True, errors='replace',
@@ -216,9 +315,13 @@ def run(args):
         while len(ended) < len(names) and time.monotonic() < deadline:
             now = time.monotonic()
             if follow and now >= next_print:
-                print_counts(counts, errors, names, ready, now - connected_at,
-                             previous=previous, interval=now - last_print)
+                if dashboard:
+                    redraw(now, 'Suivi partiel' if failed or not complete_placement else 'Suivi en direct')
+                else:
+                    print_counts(counts, errors, names, ready, now - connected_at,
+                                 previous=previous, interval=now - last_print)
                 previous, last_print = counts.copy(), now
+                previous_traffic = traffic.copy()
                 next_print = now + 2
             try:
                 kind, worker, value = queue.get(timeout=0.2)
@@ -236,10 +339,15 @@ def run(args):
                 elif value not in (0, 124) or worker not in ready or (follow and time.monotonic() < deadline):
                     failed.add(worker)
                     reason = 'journal absent, vérifier la synchronisation' if worker in missing else 'flux interrompu ou SSH indisponible'
-                    print(f'{worker} · {reason}', flush=True)
+                    if not dashboard:
+                        print(f'{worker} · {reason}', flush=True)
             elif follow:
                 counts[worker] += 1
                 errors[worker] += int(500 <= value[2] < 600)
+                for side, amount in zip(('rx', 'tx'), value[6:8]):
+                    if amount is not None:
+                        traffic[worker, side] += amount
+                        traffic[worker, side, 'known'] += 1
                 if args.requests:
                     _print_event(worker, value)
             elif all_logs:
@@ -250,11 +358,15 @@ def run(args):
             if follow and ready and ready | ended == set(names) and connected_at is None:
                 connected_at = time.monotonic()
                 last_print, previous = connected_at, counts.copy()
+                previous_traffic = traffic.copy()
                 deadline = connected_at + limit
                 next_print = connected_at + 2
-                print(('Suivi prêt · démarrer le benchmark depuis l’autre terminal.' if not failed and complete_placement
-                       else 'Suivi partiel · ne pas interpréter les pourcentages comme ceux de tout le MIG.'),
-                      flush=True)
+                phase = 'Suivi prêt' if not failed and complete_placement else 'Suivi partiel'
+                if dashboard:
+                    redraw(connected_at, phase)
+                else:
+                    print(phase + (' · démarrer le benchmark depuis l’autre terminal.' if phase == 'Suivi prêt'
+                                   else ' · ne pas interpréter les pourcentages comme ceux de tout le MIG.'), flush=True)
     except KeyboardInterrupt:
         pass
     finally:
@@ -265,7 +377,14 @@ def run(args):
             if not thread.is_alive():
                 process.stdout.close()
     if follow:
-        print_counts(counts, errors, names, ready, time.monotonic() - (connected_at or started))
+        finished = time.monotonic()
+        if dashboard:
+            # Final rate is the session average; the table remains visible.
+            previous, previous_traffic = Counter(), Counter()
+            last_print = connected_at or started
+            redraw(finished, 'Bilan partiel' if failed or not complete_placement or ready != set(names) else 'Bilan final')
+        else:
+            print_counts(counts, errors, names, ready - failed, finished - (connected_at or started))
     elif all_logs:
         print(f'{sum(counts.values())} ligne(s) · fichiers courants et rotations présentes')
     else:

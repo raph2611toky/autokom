@@ -41,7 +41,11 @@ sudo autokom iac ha app portfoliolady.auto.ikom.mg logs --lines 300
 sudo autokom iac ha app portfoliolady.auto.ikom.mg logs --all
 ```
 
-`follow` affiche toutes les deux secondes le débit observé sur la fenêtre écoulée, le compteur cumulé, sa part du total et les HTTP 5xx par worker. Ajouter `--requests` pour afficher aussi chaque ligne. Les workers sont sélectionnés à l'ouverture dans le dernier rapport de placement et doivent exister dans le MIG. Relancer le suivi après une modification de placement.
+`follow` affiche un tableau fixe dans un terminal interactif. Toutes les deux secondes, les valeurs sont rafraîchies sur place : débit observé sur la fenêtre écoulée, compteur cumulé, part du trafic, octets HTTP reçus et envoyés par seconde, et HTTP 5xx par worker. Le total des volumes reçus et envoyés figure en bas du tableau. Dans un terminal large, une barre représente la part de chaque worker. À la fermeture avec Ctrl+C, le bilan reste affiché.
+
+Les volumes sont mesurés par Nginx sur chaque worker. Ils incluent les en-têtes HTTP, sans compter le trafic TLS ou réseau hors de cette application. Les journaux plus anciens restent lisibles, mais ne contiennent pas les deux mesures : les valeurs non mesurées apparaissent sous la forme `—`.
+
+`--plain` conserve la sortie défilante, notamment si la commande est redirigée. `--requests` affiche chaque requête dans ce mode. Les workers sont sélectionnés à l'ouverture dans le dernier rapport de placement et doivent exister dans le MIG. Relancer le suivi après une modification de placement.
 
 `logs` affiche l'historique HTTP retenu dans les workers du MIG actuel, y compris les anciens placements encore présents. `--lines` lit le fichier courant de chaque worker et trie les lignes par date. `--all` affiche aussi les rotations numérotées encore disponibles, y compris compressées, dans l'ordre de lecture de chaque worker. Les logs d'une VM supprimée ne sont pas conservés par cette commande. Il s'agit des **accès HTTP au proxy du worker**, pas des sorties du code applicatif, ni des journaux Jenkins.
 
@@ -70,4 +74,14 @@ Variante ApacheBench pour un test à concurrence fixe, sans débit imposé.
 
 ```bash
 ab -n 1000 -c 20 -k -s 3 -H 'X-Autokom-Bench: akbench-demo01' https://portfoliolady.auto.ikom.mg/
+```
+
+## Mise à niveau du tableau fixe
+
+Si le suivi initial (commit `7cb3169`) est déjà en place, extraire `AUTOKOM-HA-TABLEAU-LIVE.zip` à la racine du dépôt. Committer uniquement les cinq fichiers du ZIP, pousser sur `main`, puis exécuter `sudo autokom update` sur le contrôleur. La synchronisation déjà active déploie le format de journal étendu sur les workers. Aucune modification DNS ou Terraform n'est nécessaire.
+
+Pour un test rapide, démarrer `follow --tag akbench-smoke`, attendre « Suivi prêt » puis envoyer une requête depuis un autre terminal.
+
+```bash
+curl -fsS -H 'X-Autokom-Bench: akbench-smoke' https://portfoliolady.auto.ikom.mg/ -o /dev/null
 ```
