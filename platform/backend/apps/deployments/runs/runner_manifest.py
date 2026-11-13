@@ -72,6 +72,7 @@ def fetch_runner_manifest(run_id, *, include_secrets=False):
                   'dockerfile': cfg.dockerfile_path, 'build_command': cfg.build_command,
                   'start_command': cfg.start_command, 'output_directory': cfg.output_directory,
                   'port': cfg.internal_port, 'healthcheck': cfg.healthcheck_path},
+        'remediated_manifest_sha256': (run.sca_report or {}).get('manifest_sha256', ''),
         'remediated_lock_sha256': (run.sca_report or {}).get('lock_sha256', ''),
         'sast_reports': getattr(settings, 'AUTOKOM_SECURITY_REPORTS_ENABLED', False) is True,
         'mode': run.mode_snapshot, 'resources': run.resources_snapshot,

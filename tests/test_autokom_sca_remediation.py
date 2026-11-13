@@ -89,6 +89,46 @@ class ScaTests(unittest.TestCase):
     def test_no_publication_if_corrected_report_cannot_be_recorded(self):
         self.assertFalse(self.run_sca(CLEAN,send_error=OSError('offline'))[0])
 
+    def test_targeted_overrides_do_not_touch_direct_or_major_zero_minor(self):
+        rows = {
+            ('CVE-1','transitive','2.0.0','HIGH',('2.0.1','3.1.0')),
+            ('CVE-2','transitive','2.0.0','HIGH',('2.0.4',)),
+            ('CVE-3','direct','2.0.0','HIGH',('2.0.2',)),
+            ('CVE-4','unstable','0.4.0','HIGH',('0.5.0',)),
+            ('CVE-5','transitive','1.0.0','HIGH',('1.0.5',)),
+        }
+        self.assertEqual(sca.targeted_overrides({'dependencies':{'direct':'^2.0.0'}},rows),
+                         {'transitive@1.0.0':'1.0.5','transitive@2.0.0':'2.0.4'})
+        self.assertEqual(sca.targeted_overrides({'overrides':{'other':'2.0.0'}},rows),{})
+
+    def test_targeted_attempt_retains_both_files_only_when_trivy_passes(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            populate(path)
+            package, lock = path/'package.json',path/'package-lock.json'
+            package.write_text('{"name":"sample"}')
+            original = package.read_bytes(),lock.read_bytes()
+            def repair(source, dest, execute, **opts):
+                if not opts.get('targeted'):
+                    return False
+                (dest/'package.json').write_text(json.dumps({'name':'sample','overrides':opts['targeted']}))
+                (dest/'package-lock.json').write_text(lock.read_text().replace('"version":"1.0.0"','"version":"1.0.1"'))
+                return True
+            doc = {'build':{'method':'STATIC','profile':'vite'},'sast_reports':True}
+            for final in (BEFORE,CLEAN):
+                with patch.object(sca,'scan_tree',side_effect=[BEFORE,final]), \
+                     patch.object(sca,'repair_lock',side_effect=repair), patch.object(runner,'buildkit_preflight'), \
+                     patch.object(runner,'send_security_report') as send:
+                    if final == BEFORE:
+                        with self.assertRaises(SystemExit):
+                            runner.security_scan_dependencies(doc,path)
+                        self.assertEqual((package.read_bytes(),lock.read_bytes()),original)
+                    else:
+                        runner.security_scan_dependencies(doc,path)
+                        report = send.call_args.args[2]
+                        self.assertEqual(report['manifest_sha256'],hashlib.sha256(package.read_bytes()).hexdigest())
+                        self.assertEqual(report['overrides'],{'example-pkg@1.0.0':'1.0.1'})
+
     def test_malformed_json_fields_cannot_prove_scan_passed(self):
         for payload in ({}, {'SchemaVersion':2,'Results':{}}, {'SchemaVersion':2,'Results':[None]}):
             with self.assertRaises((ValueError,AttributeError)):

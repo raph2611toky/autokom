@@ -197,7 +197,7 @@ class StackPublicationHistoryAPIView(APIView):
                             'frontend_status': run.frontend_run.status if run.frontend_run else 'PENDING',
                             'error_code': run.error_code,
                             'security_warning': any(bool(r and ((r.sca_report or {}).get('count')
-                                or (r.sca_report or {}).get('secrets') or (r.sast_report or {}).get('count')
+                                or (r.sca_report or {}).get('secrets') or (r.sast_report or {}).get('count') or (r.sast_report or {}).get('scan_failed')
                                 or (r.sast_report or {}).get('ai', {}).get('status') == 'UNAVAILABLE'))
                                 for r in (run.backend_run,run.frontend_run))}
                 items.append(item)

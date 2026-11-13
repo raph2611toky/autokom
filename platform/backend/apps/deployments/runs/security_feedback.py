@@ -1,6 +1,6 @@
 """Read-only scanner summaries and explicitly requested GitHub/SMTP delivery."""
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from django.conf import settings
 from django.core.mail import send_mail
@@ -41,7 +41,12 @@ def normalize_report(value):
     normalized = {'status': status, 'analyzed': analyzed, 'classes': classes}
     if scope == 'SOURCE':
         normalized['scope'] = scope
-    return {'count': count, 'rules': rules, 'ai': normalized}
+    result = {'count': count, 'rules': rules, 'ai': normalized}
+    if 'scan_failed' in value:
+        if value['scan_failed'] is not True or count or status != 'DISABLED':
+            raise ValidationError('État du scanner SAST invalide.')
+        result['scan_failed'] = True
+    return result
 
 
 def normalize_sca(value):
@@ -74,7 +79,24 @@ def normalize_sca(value):
                     or any(not re.fullmatch(patterns['installed'], version) for version in applied)):
                 raise ValueError
             safe.append({**clean, 'severity':severity, 'fixed_versions':fixed, 'applied_versions':applied})
-        return {**counts, 'remediated':remediated, 'findings':safe, 'lock_sha256':digest}
+        overrides = value.get('overrides', {})
+        manifest_digest = value.get('manifest_sha256', '')
+        version = r'(?:0|[1-9][0-9]{0,8})(?:\.(?:0|[1-9][0-9]{0,8})){2}'
+        if (not isinstance(overrides,dict) or len(overrides)>64 or not isinstance(manifest_digest,str)
+                or (bool(overrides) != bool(manifest_digest))
+                or (overrides and (not remediated or not re.fullmatch(r'[a-f0-9]{64}',manifest_digest)))):
+            raise ValueError
+        if any(not re.fullmatch(r'(?:@[A-Za-z0-9_.-]+/)?[A-Za-z0-9][A-Za-z0-9_.-]{0,99}@'+version,k)
+               or not re.fullmatch(version,v) for k,v in overrides.items()):
+            raise ValueError
+        result = {**counts, 'remediated':remediated, 'findings':safe, 'lock_sha256':digest}
+        if 'npm' in value:
+            if type(value['npm']) is not bool or (overrides and not value['npm']):
+                raise ValueError
+            result['npm'] = value['npm']
+        if overrides:
+            result.update(overrides=overrides, manifest_sha256=manifest_digest)
+        return result
     except (KeyError, AttributeError, TypeError, ValueError):
         raise ValidationError('Format du rapport Trivy invalide.') from None
 
@@ -94,8 +116,53 @@ def reports(run):
 
 
 def actionable(sast, sca):
-    return bool((sast and (sast['count'] or sast['ai']['status'] == 'UNAVAILABLE'))
+    return bool((sast and (sast['count'] or sast.get('scan_failed') or sast['ai']['status'] == 'UNAVAILABLE'))
                 or (sca and (sca['count'] or sca['secrets'])))
+
+
+def correction_steps(sca, *, public=False):
+    if not sca or not sca.get('count') or not sca.get('npm', bool(sca.get('overrides'))):
+        return []
+    commands = []
+    if not public:
+        names = list(dict.fromkeys(row['package'] for row in sca['findings']
+                     if re.fullmatch(r'(?:@[A-Za-z0-9_.-]+/)?[A-Za-z0-9][A-Za-z0-9_.-]{0,99}',row['package'])))
+        commands.extend('npm explain ' + name for name in names[:8])
+        commands.extend(f'npm pkg set "overrides[{key}]={version}"' for key,version in sca.get('overrides', {}).items())
+    commands.append('npm install --package-lock-only --ignore-scripts' if not public and sca.get('overrides')
+                    else 'npm audit fix --package-lock-only --ignore-scripts')
+    commands.extend(['npm ci --ignore-scripts','npm run build','git diff -- package.json package-lock.json'])
+    return commands
+
+
+def report_link(run):
+    base = getattr(settings, 'FRONTEND_URL', '')
+    parsed = urlsplit(base)
+    if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
+            or parsed.path not in ('','/') or parsed.query or parsed.fragment or not getattr(run,'pk',None)):
+        return ''
+    return base.rstrip('/') + f'/projects/{run.environment.project_id}/deployments/{run.pk}'
+
+
+def public_issue_message(run, report, sca):
+    status = {'FAILED':'en échec', 'BLOCKED':'bloquée', 'SUCCEEDED':'réussie'}.get(run.status,'à vérifier')
+    lines = ['## Publication AUTOKOM', '', f'Résultat de cette tentative **{status}**.', '']
+    if report and report.get('scan_failed'):
+        lines.append('- SAST · contrôle non terminé. Consulter le journal AUTOKOM.')
+    elif report:
+        lines.append('- SAST · consulter le rapport AUTOKOM pour les règles, résultats et pistes de correction.')
+    if sca and sca['count']:
+        if sca.get('remediated') and run.status == 'SUCCEEDED':
+            lines.append('- Dépendances · correctif vérifié dans la version publiée. Reporter les changements dans GitHub.')
+        else:
+            lines.append('- Dépendances · aucune correction publiée confirmée pour cette tentative. Vérifier le rapport AUTOKOM avant de relancer.')
+    commands = correction_steps(sca, public=True)
+    if commands:
+        lines += ['', '## Vérifier et préparer le correctif', '', '```bash', *commands, '```',
+                  '', 'Vérifier le diff, pousser le correctif et relancer la publication DevSecOps.']
+    if link := report_link(run):
+        lines += ['', f'[Ouvrir le rapport de cette publication]({link}) · authentification requise.']
+    return '\n'.join(lines)
 
 
 def message(run, report, sca=None):
@@ -107,13 +174,15 @@ def message(run, report, sca=None):
         heading = 'Rapport de sécurité AUTOKOM'
     lines = [f'{heading} pour le commit {sha}.', '',
              'Les extraits de code et le journal restent dans AUTOKOM.']
-    if report:
+    if report and report.get('scan_failed'):
+        lines.append('Semgrep n’a pas produit de résultat. Consulter le journal et lancer sudo autokom runtime doctor sur la VM.')
+    elif report:
         lines += [f'Semgrep a signalé {report["count"]} résultat(s) à examiner.',
                   f'DeepSAST : {report["ai"]["analyzed"]} extrait(s) analysé(s) à titre consultatif.']
         if report['ai']['status'] == 'COMPLETE':
             lines.append('DeepSAST fournit un signal consultatif. Examiner les résultats Semgrep et valider les corrections.')
         if report['ai']['status'] == 'UNAVAILABLE':
-            lines.append('Inférence indisponible. Vérifier la configuration DeepSAST.')
+            lines.append('Inférence indisponible. Sur la VM AUTOKOM, exécuter sudo autokom devsecops check.')
         for rule, count in report['rules'].items():
             if rule in SUGGESTIONS:
                 lines.append(f'- {rule} ({count}) — {SUGGESTIONS[rule]}')
@@ -126,9 +195,17 @@ def message(run, report, sca=None):
                 lines.append('Le candidat a été corrigé, mais sa mise en ligne n’est pas confirmée.')
         for row in sca['findings']:
             fixed = ', '.join(row['fixed_versions']) or 'aucun correctif connu'
-            lines.append(f'- {row["id"]} | {row["package"]} {row["installed"]} | versions correctives signalées : {fixed}')
+            lines.append(f'- {row["id"]} | {row["severity"]} | {row["package"]} {row["installed"]} | versions correctives signalées : {fixed}')
             if row['applied_versions']:
                 lines.append('  Versions observées dans le lockfile corrigé : ' + ', '.join(row['applied_versions']))
+        commands = correction_steps(sca)
+        if commands:
+            lines += ['', '## Commandes à exécuter dans le dossier npm du projet', '',
+                      'Sur une branche de travail. Relire le diff et les tests avant de pousser.',
+                      '```bash', *commands, '```',
+                      'Si Trivy bloque encore, mettre à jour le paquet parent ou adapter le projet, puis relancer.']
+    if link := report_link(run):
+        lines += ['', f'[Ouvrir le rapport de cette publication]({link}) · authentification requise.']
     return '\n'.join(lines)
 
 
@@ -180,8 +257,7 @@ def deliver(run, actor, channel, target=0):
             raise DeliveryConflict()
     body = message(run, report, sca)
     if channel in ('ISSUE', 'PR') and not private_repository:
-        body = ('AUTOKOM a terminé les contrôles de sécurité. Des actions sont à examiner. '
-                'Le détail des résultats et les correctifs restent dans le rapport privé du projet AUTOKOM.')
+        body = public_issue_message(run, report, sca)
     try:
         number = 0
         if channel == 'EMAIL':
@@ -191,7 +267,8 @@ def deliver(run, actor, channel, target=0):
             resource = '/issues' if channel == 'ISSUE' else f'/issues/{target}/comments'
             data = {'body': body}
             if channel == 'ISSUE':
-                data['title'] = 'AUTOKOM · Résultats de sécurité à examiner'
+                label = 'SAST et dépendances' if report and sca and sca['count'] else 'Dépendances' if sca and (sca['count'] or sca['secrets']) else 'SAST'
+                data['title'] = f'AUTOKOM · {label} · Actions à examiner'
             reply = _request('POST', endpoint + resource, token=token, payload=data)
             number = reply.get('number' if channel == 'ISSUE' else 'id')
             if type(number) is not int or number < 1:

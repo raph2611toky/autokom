@@ -5,7 +5,7 @@ export function githubRepositoryUrl(name) {
 
 export function securityWarning(run) {
   if (run?.sca_report?.remediated && run.status === 'SUCCEEDED') return 'Correctifs appliqués · à reporter dans GitHub'
-  if (run?.security_warning || run?.sca_report?.count || run?.sca_report?.secrets || run?.sast_report?.count || run?.sast_report?.ai?.status === 'UNAVAILABLE') {
+  if (run?.security_warning || run?.sca_report?.count || run?.sca_report?.secrets || run?.sast_report?.count || run?.sast_report?.scan_failed || run?.sast_report?.ai?.status === 'UNAVAILABLE') {
     return 'Résultats de sécurité à examiner'
   }
   return ''

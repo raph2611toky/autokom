@@ -55,11 +55,55 @@ def findings(document):
     return blockers, secrets, rows
 
 
-def summary(before, after=None, lock=None):
+def stable_version(value):
+    match = re.fullmatch(r'(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})', value)
+    return tuple(map(int, match.groups())) if match else None
+
+
+def targeted_overrides(manifest, rows):
+    """Use only Trivy fixes for installed transitive versions, not free-form commands."""
+    protected = set()
+    for key in ('dependencies','devDependencies','optionalDependencies','peerDependencies'):
+        protected.update(manifest.get(key) or {})
+    existing = manifest.get('overrides') or {}
+    # Preserve every developer override, including nested rules, unmodified.
+    if existing:
+        return {}
+    groups = {}
+    for _, name, old, _, versions in rows:
+        current = stable_version(old)
+        groups.setdefault(name, []).append((current, versions))
+    result = {}
+    for name, entries in sorted(groups.items()):
+        if name in protected or not re.fullmatch(r'(?:@[A-Za-z0-9_.-]+/)?[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', name) or any(current is None for current, _ in entries):
+            continue
+        # Major zero is unstable. Only patch within the same minor there.
+        family = lambda v: v[:2] if v[0] == 0 else v[:1]
+        families = {family(current) for current, _ in entries}
+        for current_family in sorted(families):
+            compatible = [(old, versions) for old,versions in entries if family(old) == current_family]
+            minima = []
+            for old, versions in compatible:
+                options = [v for raw in versions if (v := stable_version(raw)) and family(v) == current_family and v > old]
+                if not options:
+                    break
+                minima.append(min(options))
+            if len(minima) == len(compatible):
+                # Match only the affected installed versions. Never force a
+                # different major already present elsewhere in the tree.
+                target = '.'.join(map(str, max(minima)))
+                for old in sorted({v for v,_ in compatible}):
+                    result[name+'@'+'.'.join(map(str,old))] = target
+    return result if len(result) <= 64 else {}
+
+
+def summary(before, after=None, lock=None, *, applied_overrides=None):
     count, secrets, rows = before
     remaining, final_secrets, _ = after or before
     # Only a globally clean rescan can prove that the original findings are absent.
     fixed = after is not None and remaining == final_secrets == 0
+    if not fixed:
+        remaining = count  # Failed candidates are discarded, not published.
     details = [dict(id=aid, package=pkg, installed=old, severity=severity, fixed_versions=list(versions))
                for aid,pkg,old,severity,versions in sorted(rows, key=lambda x: (x[3] != 'CRITICAL', x))[:32]]
     if fixed:
@@ -68,7 +112,10 @@ def summary(before, after=None, lock=None):
             detail['applied_versions'] = sorted({info['version'] for location, info in entries.items()
                 if location.rsplit('node_modules/',1)[-1] == detail['package']
                 and isinstance(info.get('version'), str) and VERSION.fullmatch(info['version'])})[:6]
-    return dict(lock_sha256=hashlib.sha256(lock.read_bytes()).hexdigest() if fixed else '', count=count, secrets=max(secrets, final_secrets), remaining=remaining, remediated=fixed,
+    manifest = lock.with_name('package.json') if fixed and applied_overrides else None
+    return dict(overrides=applied_overrides if manifest else {},
+                manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest else '',
+                lock_sha256=hashlib.sha256(lock.read_bytes()).hexdigest() if fixed else '', count=count, secrets=max(secrets, final_secrets), remaining=remaining, remediated=fixed,
                 findings=details)
 
 
@@ -103,14 +150,14 @@ def validate_npm(path):
     def overrides(values):
         if not isinstance(values, dict):
             return False
-        return all((registry_spec(spec)) or overrides(spec)
+        return all(registry_spec(spec) or overrides(spec)
                    for spec in values.values())
     if not overrides(manifest.get('overrides') or {}):
         raise RemediationInputError('NPM_OVERRIDE_UNSUPPORTED')
     return manifest
 
 
-def repair_lock(source, destination, execute, *, refresh=False):
+def repair_lock(source, destination, execute, *, refresh=False, targeted=None):
     manifest = validate_npm(source)
     with tempfile.TemporaryDirectory(prefix='autokom-npm-security-') as directory:
         root = Path(directory)
@@ -118,15 +165,20 @@ def repair_lock(source, destination, execute, *, refresh=False):
         context.mkdir()
         for name in ('package.json','package-lock.json'):
             (context/name).write_bytes((source/name).read_bytes())
+        if targeted:
+            manifest = {**manifest, 'overrides': targeted}
+            (context/'package.json').write_text(json.dumps(manifest,indent=2)+'\n', encoding='utf-8')
         # No customer scripts, npmrc, credentials or build args are passed.
-        npm = 'npm update' if refresh else 'npm audit fix'
-        accept_findings = '' if refresh else ' || test "$?" -eq 1'
+        npm = 'npm install' if targeted else 'npm update' if refresh else 'npm audit fix'
+        accept_findings = '' if refresh or targeted else ' || test "$?" -eq 1'
+        # Only fixed npm error codes may leave the temporary build.
+        diagnose = " || { rc=$?; grep -Eo 'npm (ERR!|error) code [A-Z][A-Z0-9_]+' /tmp/autokom-audit.log | head -3; exit \"$rc\"; }" if refresh or targeted else accept_findings
         (context/'Dockerfile').write_text(
             'FROM node:22-alpine AS npmfix\nWORKDIR /work\n'
             'COPY package.json package-lock.json ./\n'
             f'RUN set -eu; {npm} --package-lock-only --ignore-scripts --no-fund '
             '--registry=https://registry.npmjs.org/ --userconfig=/dev/null --globalconfig=/dev/null '
-            f'--fetch-retries=1 --fetch-timeout=45000 > /tmp/autokom-audit.log 2>&1{accept_findings}\n'
+            f'--fetch-retries=1 --fetch-timeout=45000 > /tmp/autokom-audit.log 2>&1{diagnose}\n'
             'FROM scratch\nCOPY --from=npmfix /work/package-lock.json /package-lock.json\n', encoding='utf-8')
         execute(['buildctl','build','--frontend','dockerfile.v0','--local','context='+str(context),
                  '--local','dockerfile='+str(context),'--no-cache',
@@ -139,6 +191,8 @@ def repair_lock(source, destination, execute, *, refresh=False):
         if fixed.read_bytes() == candidate.read_bytes():
             return False
         candidate.write_bytes(fixed.read_bytes())
+        if targeted:
+            (destination/'package.json').write_bytes((context/'package.json').read_bytes())
         if validate_npm(destination) != manifest:
             raise ValueError('Manifeste npm modifié.')
         return True

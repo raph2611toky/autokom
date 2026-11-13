@@ -8,7 +8,7 @@ from unittest.mock import patch
 from django.test import SimpleTestCase, override_settings
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
-from apps.deployments.runs.security_feedback import deliver, message, normalize_report
+from apps.deployments.runs.security_feedback import deliver, message, normalize_report, correction_steps, public_issue_message, actionable
 from apps.deployments.runs.security_views import verify_report_signature
 from apps.projects.project.services import reserve_domain
 
@@ -35,11 +35,29 @@ class SecurityFeedbackTests(SimpleTestCase):
         with self.assertRaises(ValidationError):
             normalize_report(value)
 
+    @override_settings(FRONTEND_URL='https://auto.ikom.mg')
+    def test_public_issue_has_actionable_steps_but_no_target_details(self):
+        run = SimpleNamespace(status='FAILED',pk='run',environment=SimpleNamespace(project_id='project'))
+        sca = {'count':1, 'npm':True,'overrides':{'dep@1.0.0':'1.0.1'},'findings':[{'package':'dep'}]}
+        self.assertIn('npm pkg set "overrides[dep@1.0.0]=1.0.1"',correction_steps(sca))
+        body = public_issue_message(run,REPORT,sca)
+        self.assertIn('https://auto.ikom.mg/projects/project/deployments/run',body)
+        self.assertIn('npm audit fix',body)
+        self.assertNotIn('dep@1.0.0',body)
+        self.assertNotIn('approved.rule',body)
+        self.assertTrue(actionable(REPORT,None))
+        self.assertFalse(correction_steps({'npm':False,'count':1}))
+
     def test_reject_bad_counts_and_bad_rule(self):
         for value in ({**REPORT, 'count': 0}, {**REPORT, 'rules': {'abc\nxyz': 1}},
                       {**REPORT, 'ai': {'status': 'COMPLETE', 'analyzed': 0}}):
             with self.assertRaises(ValidationError):
                 normalize_report(value)
+
+    def test_report_sast_technical_failure_without_trivy(self):
+        value = normalize_report({'count':0,'rules':{},'ai':{'status':'DISABLED','analyzed':0},'scan_failed':True})
+        self.assertTrue(actionable(value,None))
+        self.assertIn('sudo autokom runtime doctor',message(SimpleNamespace(commit_sha='a'*40),value))
 
     @override_settings(AUTOKOM_SECURITY_FEEDBACK_ENABLED=False)
     def test_no_side_effect_by_default(self):

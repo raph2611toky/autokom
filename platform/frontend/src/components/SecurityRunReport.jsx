@@ -15,6 +15,7 @@ export default function SecurityRunReport({ run, projectId, environmentId, repos
   const [channel, setChannel] = useState('ISSUE')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
+  const [copyNotice, setCopyNotice] = useState('')
   const report = typeof run.sast_report?.count === 'number' ? run.sast_report : null
   const sca = typeof run.sca_report?.count === 'number' ? run.sca_report : null
   if (!report && !sca) return null
@@ -40,6 +41,14 @@ export default function SecurityRunReport({ run, projectId, environmentId, repos
       <h3>Dépendances et secrets · Trivy</h3>
       <p>{sca.count} alerte(s) initiale(s) · {sca.remaining} vulnérabilité(s) restante(s) · {sca.secrets} secret(s)</p>
       {sca.remediated && <p>{run.status === 'SUCCEEDED' ? 'Le build publié utilise le lockfile corrigé et revérifié. Le dépôt GitHub n’a pas été modifié.' : 'Le lockfile candidat a passé la nouvelle analyse Trivy. La publication n’est pas encore confirmée.'}</p>}
+      {run.correction_commands?.length > 0 && <details><summary>Commandes pour corriger dans le dépôt</summary>
+        <p>Dans le dossier npm du projet, sur une branche de travail. Relire le diff avant de pousser et relancer Trivy.</p>
+        <pre style={{overflowX:'auto'}}><code>{run.correction_commands.join('\n')}</code></pre>
+        <button type="button" className="button-outline" onClick={async () => {
+          try { await navigator.clipboard.writeText(run.correction_commands.join('\n')); setCopyNotice('Commandes copiées.') }
+          catch { setCopyNotice('Copiez les commandes directement dans le bloc.') }
+        }}>Copier les commandes</button>{copyNotice && <p role="status">{copyNotice}</p>}
+      </details>}
       {sca.findings?.length > 0 && <details><summary>Voir les alertes et les versions correctives ({sca.findings.length})</summary>
         <ul>{sca.findings.map((item, i) => <li key={i}><strong>{item.package} {item.installed}</strong> · {item.id} · {item.severity}
           <p>{item.applied_versions?.length ? `Versions présentes dans le lockfile corrigé · ${item.applied_versions.join(', ')}. ` : ''}
@@ -47,8 +56,10 @@ export default function SecurityRunReport({ run, projectId, environmentId, repos
       </details>}
     </div>}
     {report && <div><h3>Rapport SAST</h3>
-      <p>{report.count} résultat(s) Semgrep · DeepSAST · {labels[report.ai?.status] || 'État inconnu'}</p>
+      {report.scan_failed ? <p>Semgrep n’a pas produit de résultat. Vérifier le journal technique et lancer <code>sudo autokom runtime doctor</code> sur la VM.</p>
+        : <p>{report.count} résultat(s) Semgrep · DeepSAST · {labels[report.ai?.status] || 'État inconnu'}</p>}
       {report.ai?.status === 'COMPLETE' && <p><strong>{report.ai.analyzed}</strong> extrait(s) analysé(s) par le modèle local · {report.ai.scope === 'SOURCE' ? 'Échantillon du code source' : 'Emplacements signalés par Semgrep'}</p>}
+      {report.ai?.status === 'UNAVAILABLE' && <p>Sur la VM AUTOKOM, vérifier le modèle avec <code>sudo autokom devsecops check</code>.</p>}
       <p>DeepSAST reste consultatif. Semgrep conserve la décision sur le code.</p>
       {Object.entries(report.rules || {}).length > 0 && <details><summary>Règles Semgrep et pistes de correction</summary>
         <ul>{Object.entries(report.rules).map(([rule, count]) => <li key={rule}>{rule} · {count}<p>{run.remediation_suggestions?.[rule] || 'Vérifier le résultat avant toute correction.'}</p></li>)}</ul>

@@ -313,13 +313,15 @@ def send_security_report(doc, kind, report):
 
 
 def security_scan_dependencies(doc, path):
-    from autokom_sca_remediation import NPM_PROFILES, RemediationInputError, repair_lock, scan_tree, summary
+    from autokom_sca_remediation import NPM_PROFILES, RemediationInputError, repair_lock, scan_tree, summary, targeted_overrides, validate_npm
     before = scan_tree(path, execute)
-    count, secrets, _ = before
+    count, secrets, rows = before
+    applied_overrides = {}
     after = None
     cfg = doc['build']
     profile = cfg.get('profile') or ('vite' if cfg.get('method') == 'STATIC' else '')
-    if count and not secrets and cfg.get('method') in ('STATIC','AUTO') and profile in NPM_PROFILES:
+    is_npm = cfg.get('method') in ('STATIC','AUTO') and profile in NPM_PROFILES
+    if count and not secrets and is_npm:
         lock = path/'package-lock.json'
         with tempfile.TemporaryDirectory(prefix='autokom-lock-') as folder:
             staged = Path(folder)
@@ -329,19 +331,24 @@ def security_scan_dependencies(doc, path):
                     if src.is_symlink() or not src.is_file() or src.stat().st_size > 8*1024**2:
                         raise ValueError('Manifeste npm non pris en charge.')
                     shutil.copyfile(src, staged/name)
-                original = lock.read_bytes()
-                for refresh in (False, True):
-                    attempt = 'npm update' if refresh else 'npm audit fix'
-                    (staged/lock.name).write_bytes(original)
+                package = path/'package.json'
+                original = {p.name:p.read_bytes() for p in (package,lock)}
+                overrides = targeted_overrides(validate_npm(staged), rows)
+                for attempt, options in [('npm audit fix', {}), ('npm update', {'refresh':True})] + (
+                        [('correctifs ciblés Trivy', {'targeted':overrides})] if overrides else []):
+                    for name,data in original.items():
+                        (staged/name).write_bytes(data)
                     accepted = False
                     try:
                         buildkit_preflight()
                         print(f'AUTOKOM_LOG: Tentative de correction compatible · {attempt}.', flush=True)
-                        if repair_lock(staged, staged, execute, refresh=refresh):
-                            lock.write_bytes((staged/lock.name).read_bytes())
+                        if repair_lock(staged, staged, execute, **options):
+                            for p in (package,lock):
+                                p.write_bytes((staged/p.name).read_bytes())
                             after = scan_tree(path, execute)
                             accepted = not any(after[:2])
                             if accepted:
+                                applied_overrides = options.get('targeted', {})
                                 break
                             print(f'AUTOKOM_LOG: Nouveau scan Trivy · {after[0]} alerte(s) bloquante(s).', flush=True)
                         else:
@@ -353,10 +360,12 @@ def security_scan_dependencies(doc, path):
                         print(f'AUTOKOM_LOG: Correction {attempt} non confirmée · build isolé ou rescan indisponible.', flush=True)
                     finally:
                         if not accepted:
-                            lock.write_bytes(original)
+                            for p in (package,lock):
+                                p.write_bytes(original[p.name])
             except (OSError, ValueError, TypeError, AttributeError):
                 print('AUTOKOM_LOG: Correction npm compatible indisponible pour cette version.', flush=True)
-    report = summary(before, after, path/'package-lock.json')
+    report = summary(before, after, path/'package-lock.json', applied_overrides=applied_overrides)
+    report['npm'] = is_npm
     if doc.get('sast_reports') is True:
         try:
             send_security_report(doc, 'sca', report)
@@ -421,6 +430,12 @@ def split_semgrep(doc):
             json.dump({'report':report, 'code':code}, stream)
     except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
         stage('sast', 'FAILED')
+        if doc.get('sast_reports') is True:
+            try:
+                send_security_report(doc,'sast',{'count':0,'rules':{},'ai':{'status':'DISABLED','analyzed':0},
+                                                  'scan_failed':True})
+            except (OSError, ValueError, KeyError):
+                print('AUTOKOM_LOG: Rapport d’échec SAST indisponible.', flush=True)
         fail('Le contrôle Semgrep n’a pas produit de rapport valide.')
     stage('sast', 'FAILED' if code else 'SUCCESS')
     if code:
@@ -608,6 +623,12 @@ def build(doc):
         if (lock.is_symlink() or not lock.is_file() or lock.stat().st_size > MAX_LOCK or
                 hashlib.sha256(lock.read_bytes()).hexdigest() != lock_digest):
             fail('Lockfile différent de celui validé par Trivy. Compilation refusée.')
+    manifest_digest = doc.get('remediated_manifest_sha256')
+    if manifest_digest:
+        package = path/'package.json'
+        if (package.is_symlink() or not package.is_file() or package.stat().st_size > 65536 or
+                hashlib.sha256(package.read_bytes()).hexdigest() != manifest_digest):
+            fail('Manifeste npm différent de celui validé par Trivy. Compilation refusée.')
     profile = cfg.get('profile') or ('vite' if cfg['method'] == 'STATIC' else '')
     if not isinstance(profile, str):
         fail('Recette frontend invalide.')
