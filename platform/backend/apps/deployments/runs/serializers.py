@@ -1,3 +1,4 @@
+from django.conf import settings
 from rest_framework import serializers
 import re
 from apps.deployments.runs.models import DeploymentRun, PipelineStageRun, DeploymentLogEntry
@@ -10,6 +11,10 @@ class DeploymentStageSerializer(serializers.ModelSerializer):
 
 class DeploymentRunSerializer(serializers.ModelSerializer):
     error_message = serializers.SerializerMethodField()
+    security_feedback_enabled = serializers.SerializerMethodField()
+
+    def get_security_feedback_enabled(self, instance):
+        return settings.AUTOKOM_SECURITY_FEEDBACK_ENABLED
 
     def get_error_message(self, instance):
         if not instance.error_message:
@@ -36,7 +41,7 @@ class DeploymentRunSerializer(serializers.ModelSerializer):
         model = DeploymentRun
         fields = ('id','environment','configuration','trigger_type','mode_snapshot','resources_snapshot',
                   'branch','commit_sha','status','created_at','started_at',
-                  'finished_at','cancel_requested','error_message','jenkins_reference','stages')
+                  'finished_at','cancel_requested','error_message','jenkins_reference','stages','sast_report','security_feedback_enabled')
         read_only_fields = fields
 
 class DeploymentLogSerializer(serializers.ModelSerializer):

@@ -123,12 +123,25 @@ export async function listRemoteProjectRecords() {
   return all
 }
 
-export async function getRemoteProjectDetail(id) {
+export async function getRemoteProjectDetail(id, { environmentId, runId } = {}) {
   const detail = await projectsApi.detail(id)
   const project = detail?.project
   if (!project) throw new Error('Projet absent de la réponse Django.')
   const environments = detail.environments || []
-  const env = environments.find(item => item.slug === 'production') || environments[0]
+  let env = environmentId ? environments.find(item => item.id === environmentId)
+    : environments.find(item => item.slug === 'production') || environments[0]
+  if (runId && env) {
+    const ordered = [env, ...environments.filter(item => item.id !== env.id)]
+    for (const candidate of ordered) {
+      try {
+        await deploymentsApi.detail(project.id, candidate.id, runId)
+        env = candidate
+        break
+      } catch (error) {
+        if (error?.status !== 404 || candidate === ordered.at(-1)) throw error
+      }
+    }
+  }
   if (!env) throw new Error('Environnement du projet introuvable.')
   const [configsResponse, runsResponse, domainsResponse, variablesResponse] = await Promise.all([
     projectsApi.configurations(project.id, env.id),
@@ -145,6 +158,7 @@ export async function getRemoteProjectDetail(id) {
  */
 export async function saveRemoteProject(form, { onCreated = () => {} } = {}) {
   const configurationValues = toBackendConfiguration(form)
+  const requestedKind = String(form.environment || 'production').toUpperCase()
   let projectId = form.backendProjectId || ''
   let envId = form.backendEnvironmentId || ''
   // Les offres payantes ne sont jamais accordees par le navigateur : Django valide
@@ -158,18 +172,17 @@ export async function saveRemoteProject(form, { onCreated = () => {} } = {}) {
       installation_id: Number(form.githubInstallationId),
       repository_id: Number(form.githubRepositoryId),
       name: form.projectName.trim(),
-      ...(form.domainMode === 'custom' && form.domain.trim() ? { domain: form.domain.trim() } : {}),
+      ...(requestedKind !== 'STAGING' && form.domainMode === 'custom' && form.domain.trim() ? { domain: form.domain.trim() } : {}),
     })
     projectId = created?.project?.id
     envId = created?.environment_id
     if (!projectId || !envId) throw new Error('Réponse de création de projet incomplète.')
     onCreated({ backendProjectId: projectId, backendEnvironmentId: envId })
   }
-  const requestedKind = String(form.environment || 'production').toUpperCase()
   if (!['PRODUCTION', 'STAGING', 'DEVELOPMENT'].includes(requestedKind)) throw new Error('Environnement invalide.')
   const environments = (await projectsApi.environments(projectId))?.environments || []
   let selected = environments.find(env => env.kind === requestedKind)
-  if (!selected) {
+  if (!selected || requestedKind === 'STAGING') {
     if (requestedKind === 'PRODUCTION') throw new Error('Environnement de production introuvable.')
     const name = requestedKind === 'STAGING' ? 'Préproduction' : 'Développement'
     const response = await projectsApi.createEnvironment(projectId, { name, kind: requestedKind })
@@ -225,7 +238,7 @@ export function remoteProjectToForm(detail) {
     repository: project.repository_url, githubRepositoryId: project.repository_external_id,
     branch: cfg.branch || project.default_branch || 'main', workdir: cfg.root_directory || './',
     pipelineMode: (cfg.mode || 'DEVOPS').toLowerCase(),
-    environment: env.slug,
+    environment: (env.kind || env.slug).toLowerCase(),
     autoDeploy: Boolean(cfg.auto_deploy),
     frontendEnv: (detail.variables || []).filter(item => /^(?:VITE_|REACT_APP_|VUE_APP_|NEXT_PUBLIC_)/.test(item.key) && !item.secret_id).map(item => ({key:item.key, value:item.value})),
     frontendEnvTouched: false,

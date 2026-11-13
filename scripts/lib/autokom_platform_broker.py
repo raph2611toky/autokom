@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from autokom_nginx_bind_policy import https_listens, tls_detected, addresses as https_bind_addresses, BindPolicyError
 
+import hashlib
 import fcntl
 import http.client
 import secrets
@@ -50,6 +51,18 @@ UUID = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12
 HOSTNAME = re.compile(r'^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
 KEY = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,127}$')
 MAX_REQUEST = 512 * 1024
+PREPROD = os.getenv('AUTOKOM_BROKER_PROFILE') == 'preprod'
+SERVICE_USER = 'autokom-preprod' if PREPROD else 'autokom'
+# Only the staging unit opts in. Keep production's defaults intact.
+if PREPROD:
+    SOCKET = Path('/run/autokom-preprod/platform-control.sock')
+    STATE = Path('/var/lib/autokom-preprod/client-runtime')
+    IMAGES = Path('/var/lib/autokom-preprod/build-artifacts')
+    RUNTIME_CONFIG = Path('/etc/autokom-preprod/runtime.env')
+    CLOUDFLARE_CONFIG = Path('/etc/autokom-preprod/cloudflare-dns.env')
+NGINX_LOCK = Path('/var/lib/autokom/client-runtime/.deploy.lock')
+DNS_COMMENT = 'AUTOKOM preprod managed A record' if PREPROD else 'AUTOKOM managed A record'
+
 
 class BrokerError(Exception):
     pass
@@ -99,7 +112,7 @@ def jenkins_config():
     if not parts.hostname or parts.username or parts.password or parts.query or parts.fragment or parts.path not in ('','/'):
         raise BrokerError('Jenkins non configuré.')
     job = configuration.get('AUTOKOM_JENKINS_JOB','autokom-client-deploy')
-    if not re.fullmatch(r'[\w.-]{1,100}',job):
+    if (PREPROD and job != 'autokom-preprod-client-deploy') or not re.fullmatch(r'[\w.-]{1,100}',job):
         raise BrokerError('Job Jenkins invalide.')
     user, token = configuration.get('AUTOKOM_JENKINS_USER',''), configuration.get('AUTOKOM_JENKINS_API_TOKEN','')
     if not user or not token:
@@ -181,6 +194,10 @@ def jenkins_action(action, params):
         status,_,body=jenkins_http('GET',path)
         if status!=200:raise BrokerError('État Jenkins indisponible.')
         data=json.loads(body)
+        if PREPROD and kind=='Q':
+            task = data.get('task') or {}
+            if task.get('name') != 'autokom-preprod-client-deploy':
+                raise BrokerError('Élément Jenkins hors préproduction.')
         if kind=='Q':
             if data.get('cancelled'):return {'status':'CANCELLED','external_id':external}
             executable=data.get('executable') or {}
@@ -200,6 +217,8 @@ def jenkins_action(action, params):
         offset=start+len(chunk) if len(body)>len(chunk) else max(start,int(headers.get('X-Text-Size',start)))
         return {'text':chunk.decode('utf-8','replace'),'offset':offset}
     if action == 'jenkins.cancel':
+        if PREPROD and kind == 'Q':
+            jenkins_action('jenkins.state', params)
         status,_,_=jenkins_http('POST',f'/queue/cancelItem?id={num}' if kind=='Q' else f'{job}/{num}/stop',{})
         if status not in (200,201,202,302):raise BrokerError('Annulation Jenkins refusée.')
         return {'cancel_requested':True}
@@ -274,7 +293,8 @@ def _save_state(environment,doc):
 def _docker_deploy(params):
     """Serialize all Docker reservations to prevent local TCP port collisions."""
     STATE.mkdir(parents=True,exist_ok=True,mode=0o700)
-    fd=os.open(STATE/'.deploy.lock',os.O_WRONLY|os.O_CREAT,0o600)
+    fd=os.open(NGINX_LOCK if PREPROD else STATE/'.deploy.lock',
+               os.O_WRONLY|os.O_CREAT|getattr(os,'O_NOFOLLOW',0),0o600)
     try:
         fcntl.flock(fd,fcntl.LOCK_EX)
         return _docker_deploy_inner(params)
@@ -302,7 +322,9 @@ def _docker_deploy_inner(params):
         if current.get('ingress_mode') == ingress.MODE and not ingress.probe_relay(current['name'],current['port']):
             raise BrokerError('AUTOKOM_INGRESS_NOT_READY: Relais local interrompu.')
         return {'port':current['port'],'container':current['name'],'idempotent':True}
-    name='autokom-'+rid.replace('-','')[:20]
+    def scoped_id(value):
+        return hashlib.sha256(('autokom-preprod:' + value).encode()).hexdigest()[:20] if PREPROD else value.replace('-', '')[:20]
+    name='autokom-'+scoped_id(rid)
     already=subprocess.run(['docker','container','inspect',name],capture_output=True,timeout=12)
     if already.returncode==0:
         raise BrokerError('Conteneur de ce run déjà présent hors transaction : réconciliation manuelle requise.')
@@ -313,7 +335,7 @@ def _docker_deploy_inner(params):
     if shutil.disk_usage(IMAGES).free < max(256*1024**2, artifact.stat().st_size*2):
         raise BrokerError('AUTOKOM_DISK_LOW: Stockage insuffisant pour importer l’image.')
     # Fixed trusted tag: only BuildKit-produced images in AUTOKOM's bounded directory.
-    tag='autokom-local:'+rid
+    tag=('autokom-preprod-local:' if PREPROD else 'autokom-local:')+rid
     # Open no-follow and keep the same inode throughout Docker import (prevent TOCTOU).
     fd = os.open(artifact, os.O_RDONLY | getattr(os,'O_NOFOLLOW',0))
     try:
@@ -330,11 +352,11 @@ def _docker_deploy_inner(params):
         stack_project = valid_id(stack_project)
         if stack_role not in ('frontend', 'backend'):
             raise BrokerError('AUTOKOM_STACK_ROLE_INVALID')
-        network = 'autokom-stack-' + stack_project.replace('-', '')[:20]
+        network = 'autokom-stack-' + scoped_id(stack_project)
     else:
         if stack_role is not None or params.get('stack_backend_environment_id') is not None:
             raise BrokerError('AUTOKOM_STACK_PROJECT_MISSING')
-        network = 'autokom-' + environment.replace('-', '')[:20]
+        network = 'autokom-' + scoped_id(environment)
     gateway_port = None
     backend_alias = None
     backend_hostname = None
@@ -533,6 +555,8 @@ def _commit(params):
             if previous.get('ingress_mode') == ingress.MODE:
                 ingress.remove(old_name, execute=run, available=PROXY, enabled=ENABLED)
         previous_path.unlink(missing_ok=True)
+    if PREPROD:
+        return {'committed': True}
     # Publish the already-committed image asynchronously. This is a private
     # artifact mirroring queue, never an HA activation or a client DNS cutover.
     # A registry outage must not roll back a validated local release.
@@ -739,6 +763,13 @@ def _cloudflare_settings():
     return {'zone':zone,'token':token,'zone_name':zone_name,'suffix':suffix,'address':address}
 
 
+def _managed_client_host(host, suffix):
+    if not host.endswith('.' + suffix):
+        return False
+    labels = host[:-(len(suffix) + 1)].split('.')
+    return len(labels) == 1 or (len(labels) == 2 and labels[0] in ('pre', 'backend'))
+
+
 def _managed_hostname_available(host):
     """Read-only check of the authoritative DNS zone and local vhost ownership.
 
@@ -748,9 +779,9 @@ def _managed_hostname_available(host):
     host = valid_hostname(host)
     config = _cloudflare_settings()
     suffix = config['suffix']
-    if not host.endswith('.' + suffix) or host.count('.') != suffix.count('.') + 1:
+    if not _managed_client_host(host, suffix):
         raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH')
-    if host in ('backend.' + suffix,):
+    if host in ('backend.' + suffix, 'pre.' + suffix):
         return {'available': False, 'reason': 'reserved'}
     owner = STATE / ('domain-owner-' + host + '.txt')
     if owner.exists() or owner.is_symlink():
@@ -790,7 +821,7 @@ def _managed_hostname_reusable(host, environment_id):
     env = valid_id(environment_id)
     cfg = _cloudflare_settings()
     suffix = cfg['suffix']
-    if not host.endswith('.' + suffix) or host.count('.') != suffix.count('.') + 1:
+    if not _managed_client_host(host, suffix):
         raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH')
     owner = STATE / ('domain-owner-' + host + '.txt')
     conf = PROXY / ('autokom-customer-' + host + '.conf')
@@ -829,7 +860,7 @@ def _managed_hostname_reusable(host, environment_id):
     if (record.get('type') != 'A' or record.get('content') != cfg['address'] or
             record.get('proxied') is not False):
         return {'available': False, 'reason': 'dns_target_mismatch'}
-    if record.get('comment') != 'AUTOKOM managed A record' and not owner.is_file():
+    if record.get('comment') != DNS_COMMENT and not owner.is_file():
         return {'available': False, 'reason': 'dns_unowned'}
     return {'available': True, 'reason': 'owned_by_project'}
 
@@ -837,7 +868,9 @@ def _managed_hostname_reusable(host, environment_id):
 def _cloudflare_record(host):
     settings = _cloudflare_settings()
     suffix,zone,token = settings['suffix'],settings['zone'],settings['token']
-    if not host.endswith('.'+suffix):
+    if host == 'pre.' + suffix:
+        raise BrokerError('AUTOKOM_CONTROL_HOST_RESERVED: Domaine réservé au plan de contrôle.')
+    if not host.endswith('.'+suffix) or (PREPROD and not _managed_client_host(host, suffix)):
         raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH: Domaine extérieur à la zone gérée.')
     ingress = settings['address']
     base='https://api.cloudflare.com/client/v4/zones/'+zone+'/dns_records'
@@ -862,16 +895,19 @@ def _cloudflare_record(host):
         return document
     # Check both A and CNAME. Cloudflare rejects CNAME/A coexistence; do not
     # overwrite records created outside AUTOKOM or hide an existing conflict.
-    for record_type in ('CNAME','A'):
+    for record_type in ('CNAME', 'AAAA', 'A') if PREPROD else ('CNAME', 'A'):
         req=Request(base+'?'+urlencode({'type':record_type,'name':host,'per_page':100}),headers=headers)
         data=cloudflare(req)
         results=[item for item in (data.get('result') or []) if isinstance(item,dict) and item.get('name','').rstrip('.').lower()==host]
         if results:
-            if record_type=='CNAME' or len(results)!=1 or results[0].get('content')!=ingress or results[0].get('proxied') is not False:
+            if (record_type != 'A' or len(results)!=1 or results[0].get('content')!=ingress
+                    or results[0].get('proxied') is not False
+                    or (PREPROD and results[0].get('comment') != DNS_COMMENT)
+                    or (not PREPROD and results[0].get('comment') == 'AUTOKOM preprod managed A record')):
                 raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Enregistrement DNS existant différent.')
             return {'created':False}
     payload=json.dumps({'type':'A','name':host,'content':ingress,'ttl':120,'proxied':False,
-                        'comment':'AUTOKOM managed A record'}).encode()
+                        'comment':DNS_COMMENT}).encode()
     req=Request(base,data=payload,headers=headers,method='POST')
     cloudflare(req)
     return {'created':True}
@@ -912,7 +948,7 @@ def _cloudflare_remove_owned_record(host, *, legacy_owned_vhost=False, dry_run=F
             or record.get('proxied') is not False
             or not isinstance(identifier, str) or not re.fullmatch(r'[a-f0-9]{32}', identifier)):
         raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Enregistrement DNS non conforme.')
-    if record.get('comment') != 'AUTOKOM managed A record' and not legacy_owned_vhost:
+    if record.get('comment') != DNS_COMMENT and not legacy_owned_vhost:
         raise BrokerError('AUTOKOM_DOMAIN_DNS_UNOWNED: Suppression DNS manuelle requise pour cet ancien enregistrement.')
     if dry_run:
         return {'deletable': True}
@@ -1138,7 +1174,8 @@ def _issue_customer_certificate(host, *, managed):
                 raise BrokerError('AUTOKOM_ACME_DNS01_PLUGIN_MISSING: '
                                   'Exécuter sudo autokom recover --apply pour installer '
                                   'le plugin Certbot officiel avant de publier.')
-            credentials = ensure_certbot_credentials(settings['token'])
+            credentials = (ensure_certbot_credentials(settings['token'], folder=Path('/etc/autokom-preprod/acme'))
+                           if PREPROD else ensure_certbot_credentials(settings['token']))
             challenge = certbot_dns01_args(host, credentials)
         except DNS01Error as exc:
             raise BrokerError('AUTOKOM_ACME_DNS01_SETUP_FAILED: '
@@ -1536,6 +1573,24 @@ def _activate_owned_domain(params):
 
 
 def handle(action,params):
+    if PREPROD and action.startswith('domain.'):
+        if not isinstance(params, dict):
+            raise BrokerError('Paramètres non valides.')
+        names = ([params['hostname']] if 'hostname' in params else []) + (params.get('managed_hosts') or [])
+        suffix = _runtime_dns_env().get('AUTOKOM_MANAGED_DOMAIN_SUFFIX', '')
+        if suffix != 'auto.ikom.mg':
+            raise BrokerError('AUTOKOM_PREPROD_CONFIG_INVALID: Suffixe inattendu.')
+        if any(not _managed_client_host(valid_hostname(host), suffix)
+               or host in {'pre.' + suffix, 'backend.' + suffix} for host in names):
+            raise BrokerError('AUTOKOM_PREPROD_DOMAIN_DENIED: Domaine hors périmètre.')
+        approved = {name.strip() for name in _runtime_dns_env().get('AUTOKOM_PREPROD_ALLOWED_HOSTS', '').split(',')}
+        if any(host not in approved for host in names):
+            raise BrokerError('AUTOKOM_PREPROD_HOST_NOT_APPROVED: Domaine non attribué à cette instance.')
+        if action in {'domain.verify', 'domain.activate'} and params.get('managed') is not True:
+            raise BrokerError('AUTOKOM_PREPROD_DOMAIN_DENIED: Domaine personnalisé désactivé.')
+        if action == 'domain.dns.create':
+            return _runtime_lock_call(lambda p: _cloudflare_record(p['hostname']), params)
+
     if not isinstance(params,dict):raise BrokerError('Paramètres invalides.')
     if action=='ping':
         try:jenkins_config();configured=True
@@ -1560,6 +1615,9 @@ def handle(action,params):
     if action=='runtime.commit_pair':return _runtime_lock_call(_commit_pair,params)
     if action=='runtime.deprovision':return _runtime_lock_call(_deprovision_environment,params)
     if action=='ha.application.status':
+        if PREPROD:
+            return {'application': {'status':'UNAVAILABLE','healthy_replicas':0,
+                     'http_lb_ready':False,'public_https_ready':False,'requested_replicas':1}}
         env=valid_id(params.get('environment_id'))
         path=Path('/var/lib/autokom/ha/delivery-status.json')
         default={'status':'NOT_DEPLOYED','healthy_replicas':0,'http_lb_ready':False,
@@ -1636,7 +1694,7 @@ class Handler(socketserver.StreamRequestHandler):
         try:
             creds=self.request.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12)
             _,uid,_=struct.unpack('3i',creds)
-            if uid not in (0,pwd.getpwnam('autokom').pw_uid):
+            if uid not in (0,pwd.getpwnam(SERVICE_USER).pw_uid):
                 raise BrokerError('Identité du client Unix refusée.')
             line=self.rfile.readline(MAX_REQUEST+1)
             if len(line)>MAX_REQUEST or not line.endswith(b'\n'):
@@ -1683,14 +1741,15 @@ def _prepare_socket_directory():
     details = directory.lstat()
     if not stat.S_ISDIR(details.st_mode) or details.st_uid != 0:
         raise BrokerError('Propriétaire du répertoire Unix non conforme.')
-    gid = pwd.getpwnam('autokom').pw_gid
+    gid = pwd.getpwnam(SERVICE_USER).pw_gid
     os.chown(directory, 0, gid)
     os.chmod(directory, 0o750)
 
 
 def _runtime_lock_call(action, params):
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd=os.open(STATE/'.deploy.lock',os.O_WRONLY|os.O_CREAT,0o600)
+    fd=os.open(NGINX_LOCK if PREPROD else STATE/'.deploy.lock',
+               os.O_WRONLY|os.O_CREAT|getattr(os,'O_NOFOLLOW',0),0o600)
     try:
         fcntl.flock(fd,fcntl.LOCK_EX)
         return action(params)
@@ -1739,7 +1798,7 @@ def main():
     IMAGES.mkdir(parents=True,exist_ok=True,mode=0o750)
     threading.Thread(target=_ingress_watchdog,name='autokom-ingress-watchdog',daemon=True).start()
     with Server(str(SOCKET),Handler) as server:
-        os.chown(SOCKET,0,pwd.getpwnam('autokom').pw_gid)
+        os.chown(SOCKET,0,pwd.getpwnam(SERVICE_USER).pw_gid)
         os.chmod(SOCKET,0o660)
         server.serve_forever(poll_interval=0.4)
 

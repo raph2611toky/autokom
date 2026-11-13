@@ -5,6 +5,7 @@ import { deploymentsApi } from '../services/deploymentsApi.js'
 import { cleanCustomerLog, phaseOrder, phaseTitles, publicationLabel } from '../services/deploymentPresentation.js'
 import { isPublishing, sortRecentRuns } from '../services/deploymentHistory.js'
 import { technicalTimeline, formatTechnicalFileLine } from '../services/deploymentLogTimeline.js'
+import SecurityRunReport from '../components/SecurityRunReport.jsx'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
 import { stackApi } from '../services/stackApi.js'
 import { publicationPath, publicationKind, publicationServices } from '../services/stackHistory.js'
@@ -47,7 +48,7 @@ function RunDetails({ navigate, projectId, runId }) {
   useEffect(() => {
     let alive = true
     cursor.current = 0; liveStatus.current = ''; setRun(null); setMessages([]); setError(''); setLoading(true)
-    getRemoteProjectDetail(projectId).then(async info => {
+    getRemoteProjectDetail(projectId, { runId }).then(async info => {
       if (!alive) return
       setProjectInfo(info)
       const [result, logPage] = await Promise.all([
@@ -131,6 +132,7 @@ function RunDetails({ navigate, projectId, runId }) {
       })}</ol> : <p className="ak-deployment-hint">Les étapes apparaîtront dès le début de la préparation.</p>}
       {run.error_message && <p className="ak-deployment-error" role="alert">{cleanCustomerLog(run.error_message) || 'Une erreur a interrompu la publication.'}</p>}
     </section>
+    <SecurityRunReport key={run.id} run={run} projectId={projectId} environmentId={projectInfo.environment.id}/>
     <section className="ak-workspace-sheet ak-run-detail-sheet" aria-labelledby="run-logs-title">
       <div className="ak-workspace-sheet-heading ak-log-heading">
         <div><h2 id="run-logs-title">Journal de publication</h2><p className="ak-section-subtitle">Suivez les événements de chaque étape, sans afficher d’identifiants secrets.</p></div>

@@ -6,3 +6,5 @@
 export const FRONTEND_ONLY = import.meta.env?.VITE_AUTOKOM_FRONTEND_ONLY !== 'false'
 export const API_AVAILABLE = !FRONTEND_ONLY && import.meta.env?.VITE_AUTOKOM_API_ENABLED !== 'false'
 export const GITHUB_AVAILABLE = API_AVAILABLE && import.meta.env?.VITE_AUTOKOM_GITHUB_ENABLED === 'true'
+
+export const PLATFORM_PREPROD = import.meta.env?.VITE_AUTOKOM_PLATFORM_PREPROD === 'true'

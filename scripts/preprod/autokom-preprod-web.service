@@ -1,0 +1,23 @@
+[Unit]
+Description=AUTOKOM préproduction Gunicorn
+After=mysql.service
+Requires=mysql.service
+
+[Service]
+User=autokom-preprod
+Group=autokom-preprod
+WorkingDirectory=/opt/autokom-preprod/source/platform/backend
+EnvironmentFile=/etc/autokom-preprod/backend.env
+Environment=DJANGO_SETTINGS_MODULE=config.preprod
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/autokom-preprod/venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:8272 --workers 2 --timeout 75
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/autokom-preprod/media
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,86 @@
+// AUTOKOM trusted single-host pipeline. Never load Jenkinsfile from a customer repo.
+// Runs ONLY on isolated agent with rootless BuildKit, NO Docker socket, NO host root.
+pipeline {
+    agent { label 'autokom-isolated' }
+    // Build workspaces and image artifacts are isolated by Jenkins executor and run UUID.
+    // Both services of the same stack may build concurrently; final promotion
+    // remains gated by AUTOKOM's two-candidate commit.
+    options { timestamps(); skipDefaultCheckout(true); timeout(time: 45, unit: 'MINUTES') }
+    parameters { string(name: 'AUTOKOM_RUN_ID', defaultValue: '', description: 'UUID d’une exécution AUTOKOM') }
+    environment {
+        AUTOKOM_RUNNER_PROFILE = 'preprod'
+        AUTOKOM_API_BASE = 'https://pre.auto.ikom.mg'
+        AUTOKOM_ARTIFACT_DIR = '/var/lib/autokom-preprod/build-artifacts'
+        AUTOKOM_SAST_REPORTS = '1'
+        AUTOKOM_DEEPSAST_PYTHON = '/opt/autokom-preprod/deepsast-venv/bin/python'
+        AUTOKOM_DEEPSAST_MODEL = '/opt/autokom-preprod/model'
+        AUTOKOM_SEMGREP_RULES = '/opt/autokom-preprod/source/scripts/runtime/autokom-client-semgrep-rules.yml'
+    }
+    stages {
+        stage('GitHub source') {
+            steps {
+                script {
+                    echo 'AUTOKOM_STAGE:source:RUNNING'
+                    withCredentials([string(credentialsId:'autokom-preprod-runner-key', variable:'AUTOKOM_RUNNER_SHARED_KEY')]) {
+                        // Le manifeste est verifie par le helper Python. Le retour
+                        // est une seule ligne : owner/repo + espace + sha40.
+                        def metadataLine = sh(script:'set +x; python3 /opt/autokom-preprod/source/scripts/runtime/autokom_agent_local.py metadata-line', returnStdout:true).trim()
+                        if (!(metadataLine ==~ /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+ [0-9a-f]{40}$/)) {
+                            error('Depot ou commit non autorise')
+                        }
+                        def metadataParts = metadataLine.split(' ', 2)
+                        def repositoryName = metadataParts[0]
+                        def commitSha = metadataParts[1]
+                        // A public repository can be cloned without a static token.
+                        // Private snapshots are served by the authenticated AUTOKOM backend.
+                        def repositoryUrl = 'https://github.com/' + repositoryName + '.git'
+                        // Wipe the previous tenant before probing the remote, including .git/config.
+                        deleteDir()
+                        // Anonymous check: never let a cached credential misclassify a private repo.
+                        def publicRepo = (sh(script: 'set +x; GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false GIT_CONFIG_GLOBAL=/dev/null git -c credential.helper= ls-remote --exit-code ' + repositoryUrl + ' HEAD >/dev/null 2>&1', returnStatus: true) == 0)
+                        if (publicRepo) {
+                            checkout([$class:'GitSCM',branches:[[name:commitSha]],
+                               doGenerateSubmoduleConfigurations:false,
+                               extensions:[[$class:'CloneOption',shallow:true,depth:1,noTags:true]],
+                               userRemoteConfigs:[[url:repositoryUrl]]])
+                        } else {
+                            // Django fetches the exact, authorized GitHub App snapshot.
+                            // Never install a permanent cross-tenant Jenkins Git credential.
+                            sh 'set +x; python3 /opt/autokom-preprod/source/scripts/runtime/autokom_agent_local.py private-source'
+                        }
+                    }
+                    echo 'AUTOKOM_STAGE:source:SUCCESS'
+                }
+            }
+        }
+        stage('SAST Semgrep') {
+            steps {
+                echo 'AUTOKOM_STAGE:sast:RUNNING'
+                withCredentials([string(credentialsId:'autokom-preprod-runner-key',variable:'AUTOKOM_RUNNER_SHARED_KEY')]) {
+                    sh 'set +x; python3 /opt/autokom-preprod/source/scripts/runtime/autokom_agent_local.py sast'
+                }
+            }
+        }
+        stage('SCA Trivy') {
+            steps {
+                echo 'AUTOKOM_STAGE:sca:RUNNING'
+                withCredentials([string(credentialsId:'autokom-preprod-runner-key',variable:'AUTOKOM_RUNNER_SHARED_KEY')]) {
+                    sh 'set +x; python3 /opt/autokom-preprod/source/scripts/runtime/autokom_agent_local.py sca'
+                }
+            }
+        }
+        stage('BuildKit rootless · export local') {
+            steps {
+                echo 'AUTOKOM_STAGE:build:RUNNING'
+                withCredentials([string(credentialsId:'autokom-preprod-runner-key',variable:'AUTOKOM_RUNNER_SHARED_KEY')]) {
+                    sh 'set +x; python3 /opt/autokom-preprod/source/scripts/runtime/autokom_agent_local.py build'
+                }
+            }
+        }
+    }
+    post {
+        failure { echo 'AUTOKOM_LOG: Build refusé par le runner isolé.' }
+        aborted { echo 'AUTOKOM_LOG: Build annulé.' }
+        success { echo 'AUTOKOM_LOG: Image locale créée; activation Docker via broker AUTOKOM.' }
+    }
+}

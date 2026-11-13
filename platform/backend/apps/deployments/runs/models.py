@@ -36,6 +36,7 @@ class DeploymentRun(models.Model):
     cancel_requested = models.BooleanField(default=False)
     next_poll_at = models.DateTimeField(null=True, blank=True)
     console_offset = models.PositiveBigIntegerField(default=0)
+    sast_report = models.JSONField(default=dict, blank=True)
     console_pending = models.CharField(max_length=2000, blank=True)
     idempotency_key = models.CharField(max_length=150, unique=True)
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.QUEUED)
@@ -153,3 +154,16 @@ class StackDeployment(models.Model):
     class Meta:
         db_table = 'deployments_stackdeployment'
         indexes = [models.Index(fields=['stack', 'created_at'], name='stack_created_idx')]
+
+
+class SecurityFeedbackAction(models.Model):
+    run = models.ForeignKey(DeploymentRun, on_delete=models.CASCADE, related_name='security_feedback')
+    channel = models.CharField(max_length=8)
+    target = models.PositiveIntegerField(default=0)
+    result_number = models.PositiveBigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=('run', 'channel', 'target'), name='unique_autokom_security_delivery')]

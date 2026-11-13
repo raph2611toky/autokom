@@ -724,6 +724,7 @@ Une phase Jenkins interrompue reste à terminer, même si le paquet est install�
     up = subcommand('update', help='Mise à jour privée via code GitHub (fast-forward uniquement)',
                     epilog='Exemple : sudo autokom update')
     up.add_argument('--check', action='store_true', help='Vérifier localement sans accéder à GitHub')
+    up.add_argument('--preprod', action='store_true', help='Mettre à jour uniquement le checkout master préproduction')
     return p
 
 
@@ -873,7 +874,8 @@ def main(argv=None):
         if os.geteuid() != 0:
             raise CLIError('Utiliser sudo autokom update')
         try:
-            return private_update(ROOT, check=a.check)
+            return private_update(Path("/opt/autokom-preprod/source") if a.preprod else ROOT,
+                                  check=a.check, preprod=a.preprod)
         except UpdateError as exc:
             raise CLIError(str(exc)) from exc
     if a.cmd=='grafana':

@@ -1,3 +1,4 @@
+import { PLATFORM_PREPROD } from '../config/runtime.js'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, GitBranch, FolderGit2, Globe, Info, LoaderCircle, FileUp, Plus, Trash2, Save, CloudUpload, CheckCircle2, AlertTriangle, Layers3, X } from 'lucide-react'
 import { getRemoteProjectDetail, errorText } from '../services/projectWorkflow.js'
@@ -163,7 +164,8 @@ export default function StackDeploy({navigate,projectId}) {
         setFrontend(asForm(existing?.frontend || (primaryKind==='frontend' ? singleService : null),branch,'frontend'))
         setBackend(asForm(existing?.backend || (primaryKind==='backend' ? singleService : null),branch,'backend'))
         setAuto(existing ? Boolean(existing.auto_deploy) : Boolean(detail.configurations?.find(item => !item.is_draft)?.auto_deploy))
-        setHighAvailability(Boolean(existing?.high_availability_requested) && Boolean(accountResponse?.subscription?.ha_available))
+        if (PLATFORM_PREPROD) setHighAvailability(false)
+        else setHighAvailability(Boolean(existing?.high_availability_requested) && Boolean(accountResponse?.subscription?.ha_available))
         if (detail.project.github_installation_id && detail.project.repository_external_id) {
           try {
             const result = await gitApi.branches(detail.project.github_installation_id,detail.project.repository_external_id)
@@ -275,7 +277,7 @@ export default function StackDeploy({navigate,projectId}) {
         </div>
         <p className="ak-stack-subtle"><Info size={15}/> Les ressources sont réparties entre les deux conteneurs. La validation des quotas appartient au backend AUTOKOM ; aucune seconde offre n’est ajoutée automatiquement.</p>
       </section>
-      <section className="ak-stack-component ak-stack-options"><label><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)}/> Déployer automatiquement après un push sur l'une des deux branches</label><label><input type="checkbox" checked={highAvailability} disabled={!accountPlan?.ha_available} onChange={e=>setHighAvailability(e.target.checked)}/> Demander la haute disponibilité pour le frontend et le backend</label><p className="ak-stack-subtle">La redondance doit être autorisée pour chacun des deux environnements et exécutée sur deux workers GCP. Aucune activation locale fictive. </p><p className="ak-stack-subtle">Le nouveau mode conserve la dernière version saine des deux services jusqu'à la validation du nouveau couple.</p></section>
+      <section className="ak-stack-component ak-stack-options"><label><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)}/> Déployer automatiquement après un push sur l'une des deux branches</label><label><input type="checkbox" checked={highAvailability} disabled={!accountPlan?.ha_available || PLATFORM_PREPROD} onChange={e=>setHighAvailability(e.target.checked)}/> Demander la haute disponibilité pour le frontend et le backend</label><p className="ak-stack-subtle">La redondance doit être autorisée pour chacun des deux environnements et exécutée sur deux workers GCP. Aucune activation locale fictive. </p><p className="ak-stack-subtle">Le nouveau mode conserve la dernière version saine des deux services jusqu'à la validation du nouveau couple.</p></section>
       <div className="ak-stack-footer"><button type="button" className="button-primary" disabled={!ready} onClick={()=>setStep(1)}>Continuer <ArrowRight size={16}/></button></div>
     </>}
     {step===1 && <section className="ak-stack-component"><h2>Vérification avant publication</h2>

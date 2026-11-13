@@ -1,6 +1,6 @@
 import { BadgePercent, FolderKanban, Globe2, LogOut, Rocket, UserCircle2 } from 'lucide-react'
 import ThemeToggle from './ThemeToggle.jsx'
-import { API_AVAILABLE } from '../config/runtime.js'
+import { API_AVAILABLE, PLATFORM_PREPROD } from '../config/runtime.js'
 import { useAuth } from '../context/AuthContext.jsx'
 
 const TABS = [
@@ -25,6 +25,7 @@ export default function Header({ route, navigate, theme, onToggleTheme }) {
         <button type="button" className="brand-wrap ak-brand-button" onClick={() => navigate('/')} aria-label="Retour à l'accueil AUTOKOM">
           <img className="brand-logo" src="/autokom-logo.png" alt="" />
           <span className="brand-name">AUTOKOM</span>
+          {PLATFORM_PREPROD && <small className="ak-project-state">Préproduction</small>}
         </button>
         <nav className="top-tabs" aria-label="Navigation principale">
           {TABS.map(({ path, label, icon: Icon }) => {

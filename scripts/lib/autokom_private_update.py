@@ -364,14 +364,22 @@ def _sync_ha_workers_after_update(root, old, new, *,
         )
 
 
-def update(root: Path, *, check=False):
+def update(root: Path, *, check=False, preprod=False):
     root = Path(root).resolve(strict=True)
     branch = _repository(root)
+    if preprod:
+        if root != Path("/opt/autokom-preprod/source") or branch != "master":
+            raise UpdateError("Préproduction : checkout master obligatoire dans /opt/autokom-preprod/source.")
+        target = "master"
+    else:
+        if branch == "master" or root == Path("/opt/autokom-preprod/source"):
+            raise UpdateError("Préproduction : utiliser update --preprod.")
+        target = UPDATE_BRANCH
     _clean(root)
     missing = [name for name in REQUIRED_CORE if not (root / name).is_file()]
     print(
         f"AUTOKOM · Dépôt {OWNER_REPO[0]}/{OWNER_REPO[1]} · "
-        f"locale {branch} · source origin/{UPDATE_BRANCH}", flush=True,
+        f"locale {branch} · source origin/{target}", flush=True,
     )
     if missing:
         print("Fichiers Core actuellement absents :", flush=True)
@@ -391,7 +399,7 @@ def update(root: Path, *, check=False):
         token = _authorize(client_id)
         print("Autorisation reçue. Vérification du dépôt distant…", flush=True)
     try:
-        _fetch_with_memory_token(root, UPDATE_BRANCH, token)
+        _fetch_with_memory_token(root, target, token)
     finally:
         del token
     old = _git(root, "rev-parse", "HEAD")
@@ -403,13 +411,16 @@ def update(root: Path, *, check=False):
         return 0
     print(f"Mise à jour contrôlée : {old[:10]} → {new[:10]}", flush=True)
     _print_git_changes(root, old, new)
-    _git(root, "merge", "--ff-only", new, timeout=120)
+    _git(root, "merge", "--ff-only", new, timeout=120, env={**os.environ, "GIT_LFS_SKIP_SMUDGE": "1"})
     remaining = [name for name in REQUIRED_CORE if not (root / name).is_file()]
     if remaining:
         raise UpdateError("Mise à jour appliquée mais composants manquants : " + ", ".join(remaining))
     print("AUTOKOM Core restauré / mis à jour. Aucun service redémarré.")
-    print("Backend : utiliser autokom app deploy séparément après vérification.")
-    _sync_ha_workers_after_update(root, old, new)
+    if preprod:
+        print("Préproduction : utiliser scripts/preprod/manage.sh deploy après vérification.")
+    else:
+        print("Backend : utiliser autokom app deploy séparément après vérification.")
+        _sync_ha_workers_after_update(root, old, new)
     return 0
 
 
@@ -422,9 +433,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Mise à jour AUTOKOM : compte gh nominatif ou GitHub Device Flow")
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--check", action="store_true", help="Diagnostic local seulement")
+    parser.add_argument("--preprod", action="store_true")
     args = parser.parse_args(argv)
     try:
-        return update(args.repo, check=args.check)
+        return update(args.repo, check=args.check, preprod=args.preprod)
     except (UpdateError, ValueError, OSError) as exc:
         print(f"ERREUR : {exc}", file=sys.stderr)
         return 1

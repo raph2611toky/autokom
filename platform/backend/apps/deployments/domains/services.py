@@ -25,6 +25,10 @@ def _managed(name):
 def claim_domain(user,project_id,environment_id,hostname,domain_type):
     project,env=get_environment(user,project_id,environment_id,write=True)
     host=validate_hostname(hostname)
+    if (getattr(settings, 'AUTOKOM_PLATFORM_PREPROD', False) or env.kind == 'STAGING') and domain_type == Domain.Type.CUSTOM:
+        raise ValidationError({'hostname': 'Seuls les domaines gérés sont disponibles.'})
+    if env.kind == 'STAGING' and domain_type == Domain.Type.SUBDOMAIN:
+        raise ValidationError({'hostname': 'Le domaine de préproduction est réservé automatiquement.'})
     if domain_type not in (Domain.Type.SUBDOMAIN,Domain.Type.CUSTOM):
         raise ValidationError({'domain_type':'SUBDOMAIN ou CUSTOM attendu.'})
     if (domain_type==Domain.Type.SUBDOMAIN)!=_managed(host):
@@ -33,7 +37,7 @@ def claim_domain(user,project_id,environment_id,hostname,domain_type):
         suffix = settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX.lower().strip('.')
         if host.count('.') != suffix.count('.') + 1:
             raise ValidationError({'hostname': 'Saisissez un seul préfixe avant auto.ikom.mg.'})
-    if host in ('backend.auto.ik0m.tech','auto.ik0m.tech','backend.auto.ikom.mg','auto.ikom.mg','ikom.mg','www.ikom.mg'):
+    if host == 'pre.' + settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX or host in ('backend.auto.ik0m.tech','auto.ik0m.tech','backend.auto.ikom.mg','auto.ikom.mg','ikom.mg','www.ikom.mg'):
         raise ValidationError({'hostname':'Nom de domaine réservé au service IKOM.'})
     with transaction.atomic():
         # Serialize all managed-host reservations for this project, across
@@ -328,7 +332,7 @@ def _validate_managed_rename_host(hostname):
     suffix = settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX.lower().strip('.')
     if (not _managed(host) or host.count('.') != suffix.count('.') + 1):
         raise ValidationError({'hostname': 'Seul le préfixe avant auto.ikom.mg peut être modifié.'})
-    if host in ('backend.auto.ikom.mg', 'auto.ikom.mg'):
+    if host in ('backend.auto.ikom.mg', 'auto.ikom.mg', 'pre.' + suffix):
         raise ValidationError({'hostname': 'Nom réservé au service IKOM.'})
     return host
 

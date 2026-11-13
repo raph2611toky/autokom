@@ -1,0 +1,22 @@
+[Unit]
+Description=AUTOKOM préproduction worker
+After=autokom-preprod-broker.service autokom-preprod-web.service
+Requires=autokom-preprod-broker.service autokom-preprod-web.service
+
+[Service]
+User=autokom-preprod
+Group=autokom-preprod
+WorkingDirectory=/opt/autokom-preprod/source/platform/backend
+EnvironmentFile=/etc/autokom-preprod/backend.env
+Environment=DJANGO_SETTINGS_MODULE=config.preprod
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/autokom-preprod/venv/bin/python manage.py autokom_deployment_worker --interval 5
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

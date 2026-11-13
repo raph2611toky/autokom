@@ -2,6 +2,7 @@
 import logging
 import re
 import time
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from django.db.models import Max, Q
@@ -427,7 +428,7 @@ def _release_docker_and_proxy(run, *, stack=None, stack_role=None):
         # Declarative cloud migration: STANDARD is one GCP worker by default;
         # HA is explicitly requested and requires its active paid entitlement.
         # Neither choice changes the validated local release transaction.
-        'cloud_delivery_requested':True,
+        'cloud_delivery_requested':not getattr(settings, 'AUTOKOM_PLATFORM_PREPROD', False),
         'ha_requested':bool(run.configuration.high_availability_requested),
     },timeout=280)
     add_log(run, 'AUTOKOM_TECH:release:Docker · conteneur et contrôle HTTP interne validés.', level='TECH')
@@ -478,7 +479,8 @@ def register_release(run):
         if previous:
             previous.status = Release.Status.SUPERSEDED
             previous.save(update_fields=['status'])
-        image_ref = f'autokom-local:{run.id}'
+        prefix = 'autokom-preprod-local' if getattr(settings, 'AUTOKOM_PLATFORM_PREPROD', False) else 'autokom-local'
+        image_ref = f'{prefix}:{run.id}'
         release = Release.objects.create(environment=run.environment, source_deployment=run,
               previous_release=previous, version=str(run.id), image_reference=image_ref,
               status=Release.Status.ACTIVE, published_at=timezone.now())

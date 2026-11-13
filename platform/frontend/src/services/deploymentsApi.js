@@ -26,5 +26,7 @@ export const deploymentsApi = Object.freeze({
     if (!['technical','simple'].includes(mode)) throw new TypeError('Mode de journal invalide.')
     return api.get(`${prefix(p, e)}deployments/${validId(runId)}/logs/?after=${after}&mode=${mode}`)
   },
+  securityFeedback: (p, e, runId, channel, target = 0) =>
+    api.post(`${prefix(p, e)}deployments/${validId(runId)}/security-feedback/`, { channel, target }),
   cancel: (p, e, runId) => api.post(`${prefix(p, e)}deployments/${validId(runId)}/cancel/`, {}),
 })

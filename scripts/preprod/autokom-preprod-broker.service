@@ -1,0 +1,23 @@
+[Unit]
+Description=AUTOKOM préproduction broker
+After=network-online.target docker.service nginx.service
+Wants=network-online.target
+
+[Service]
+User=root
+Group=autokom-preprod
+RuntimeDirectory=autokom-preprod
+RuntimeDirectoryMode=0750
+Environment=AUTOKOM_BROKER_PROFILE=preprod
+ExecStart=/usr/bin/python3 /opt/autokom-preprod/source/scripts/lib/autokom_platform_broker.py
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

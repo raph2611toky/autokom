@@ -3,18 +3,29 @@ from django.utils.text import slugify
 from rest_framework.exceptions import ValidationError, NotFound
 from apps.projects.environments.models import Environment, EnvironmentVariable
 from apps.projects.secrets.models import SecretReference
-from apps.projects.project.services import free_entitlement
+from apps.projects.project.services import free_entitlement, reserve_domain
+from apps.projects.project.models import Project
 from apps.projects.configurations.models import DeploymentConfig
 from apps.projects.common import get_environment
 
 
 @transaction.atomic
 def create_environment(project, user, attrs):
-    slug = slugify(attrs['name'])[:100]
+    Project.objects.select_for_update().get(pk=project.pk)
+    is_staging = attrs['kind'] == Environment.Kind.STAGING
+    if is_staging:
+        existing = project.environments.filter(kind=Environment.Kind.STAGING, is_active=True).first()
+        if existing:
+            if not existing.domains.filter(domain_type='SUBDOMAIN').exists():
+                reserve_domain(project, existing)
+            return existing
+    slug = 'staging' if is_staging else slugify(attrs['name'])[:100]
     if not slug or Environment.objects.filter(project=project, slug=slug).exists():
         raise ValidationError({'name': 'Nom d’environnement invalide ou déjà utilisé.'})
     env = Environment.objects.create(project=project, name=attrs['name'], slug=slug, kind=attrs['kind'])
     free_entitlement(env)
+    if is_staging:
+        reserve_domain(project, env)
     DeploymentConfig.objects.create(environment=env, created_by=user, version=1, branch=project.default_branch)
     return env
 

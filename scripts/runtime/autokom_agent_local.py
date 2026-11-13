@@ -309,7 +309,37 @@ def scan(doc,kind):
             if not Path(rules).is_file() or not os.access(rules,os.R_OK):
                 fail('DevSecOps indisponible : règles Semgrep approuvées illisibles.')
             print('AUTOKOM_TECH:DevSecOps : analyse SAST Semgrep en cours.',flush=True)
-            execute(['semgrep','scan','--metrics','off','--config',rules,'--error',str(path)])
+            if os.getenv('AUTOKOM_SAST_REPORTS') != '1':
+                execute(['semgrep','scan','--metrics','off','--config',rules,'--error',str(path)])
+            else:
+                from autokom_sast_report import collect
+                safe_env = {name: os.environ[name] for name in ('PATH', 'LANG', 'LC_ALL') if name in os.environ}
+                try:
+                    report, exit_code = collect(path, rules, safe_env,
+                        os.getenv('AUTOKOM_DEEPSAST_PYTHON'), os.getenv('AUTOKOM_DEEPSAST_MODEL'))
+                except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
+                    fail('Le contrôle Semgrep n’a pas produit de rapport valide.')
+                try:
+                    base = os.environ['AUTOKOM_API_BASE'].rstrip('/')
+                    rid = doc['run_id']
+                    payload = json.dumps(report, separators=(',', ':')).encode()
+                    epoch = str(int(time.time()))
+                    digest = hashlib.sha256(payload).hexdigest()
+                    key = os.environ['AUTOKOM_RUNNER_SHARED_KEY'].encode()
+                    proof = hmac.new(key, f'autokom-sast:v1:{epoch}:{rid}:{digest}'.encode(),
+                                     hashlib.sha256).hexdigest()
+                    req = Request(base + f'/api/internal/runner/deployments/{rid}/sast/',
+                                  data=payload, headers={'Content-Type': 'application/json',
+                                  'X-Autokom-Runner-Time': epoch, 'X-Autokom-Runner-Signature': proof},
+                                  method='POST')
+                    with build_opener(NoRedirect()).open(req, timeout=10) as response:
+                        if response.status not in (200, 201):
+                            raise ValueError('Rapport refusé.')
+                    print('AUTOKOM_LOG: Résumé SAST enregistré. DeepSAST reste consultatif.', flush=True)
+                except (OSError, ValueError):
+                    print('AUTOKOM_LOG: Rapport SAST indisponible. Le verdict Semgrep est conservé.', flush=True)
+                if exit_code:
+                    fail('Semgrep a détecté des résultats bloquants. Consulter le résumé SAST.')
         else:
             print('AUTOKOM_TECH:DevSecOps : analyse SCA et secrets Trivy en cours.',flush=True)
             execute(['trivy','fs','--scanners','vuln,secret','--severity','HIGH,CRITICAL',
@@ -493,6 +523,7 @@ def build(doc):
                 fail(str(exc))
     stage('build','RUNNING')
     buildkit_preflight()
+    image_prefix = 'autokom-preprod-local' if os.getenv('AUTOKOM_RUNNER_PROFILE') == 'preprod' else 'autokom-local'
     with tempfile.NamedTemporaryFile(dir=artifact_dir,prefix='.building-',suffix='.tar',delete=False) as tmp:
         temp=Path(tmp.name)
     try:
@@ -526,12 +557,12 @@ def build(doc):
                          '--local','dockerfile='+str(trusted_dockerfile),
                          '--opt','filename=Dockerfile',
                          *(vite_build_args if profile == 'vite' else frontend_args),
-                         '--output','type=docker,name=autokom-local:'+rid+',dest='+str(temp)],timeout=1800)
+                         '--output','type=docker,name='+image_prefix+':'+rid+',dest='+str(temp)],timeout=1800)
         else:
             execute(['buildctl','build','--frontend','dockerfile.v0',
                      '--local','context='+str(path),'--local','dockerfile='+str(file.parent),
                      '--opt','filename='+file.name,
-                     '--output','type=docker,name=autokom-local:'+rid+',dest='+str(temp)],timeout=1800)
+                     '--output','type=docker,name='+image_prefix+':'+rid+',dest='+str(temp)],timeout=1800)
         if not 1024<=temp.stat().st_size<=8*1024**3:fail('Artefact Docker vide ou trop volumineux.')
         os.chmod(temp,0o640)
         os.rename(temp,dest)

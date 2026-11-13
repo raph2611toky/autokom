@@ -33,6 +33,8 @@ def get_final_config(env):
 def effective_replicas(env, plan, cfg=None):
     if cfg is None or not getattr(cfg, 'high_availability_requested', False):
         return 1
+    if getattr(settings, 'AUTOKOM_PLATFORM_PREPROD', False):
+        raise DeploymentConflict('Le MIG de production ne peut pas être utilisé par cette instance de préproduction.')
     option = HighAvailabilityOption.objects.filter(environment=env).first()
     if (option is None or option.status != HighAvailabilityOption.Status.ACTIVE or
             (option.expires_at and option.expires_at <= timezone.now())):
@@ -58,6 +60,8 @@ def plan_deployment(env, *, verify_remote=False, user=None):
     issues = check_configuration(cfg)
     if issues:
         raise ValidationError(issues)
+    if getattr(settings, 'AUTOKOM_PLATFORM_PREPROD', False) and cfg.high_availability_requested:
+        raise DeploymentConflict('Haute disponibilité non raccordée sur cette instance de préproduction.')
     plan = check_entitlement(cfg)
     replicas = effective_replicas(env, plan, cfg)
     # Reject stale/unreadable secrets BEFORE queuing a build or contacting Jenkins.
@@ -271,6 +275,8 @@ def queue_verified_push(event):
 
 
 def request_ha(env, replicas):
+    if getattr(settings, 'AUTOKOM_PLATFORM_PREPROD', False):
+        raise DeploymentConflict('Le MIG de production ne peut pas être utilisé par cette instance de préproduction.')
     if replicas < 2 or replicas > 20:
         raise ValidationError({'replicas': 'Entre 2 et 20 réplicas.'})
     with transaction.atomic():

@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from django.utils.text import slugify
@@ -39,17 +40,28 @@ def free_entitlement(environment):
 
 
 def reserve_domain(project, environment, selected=''):
-    hostname = validate_hostname(selected) if selected else validate_hostname(default_hostname(project.slug))
-    from django.conf import settings
+    is_staging = getattr(environment, 'kind', None) == Environment.Kind.STAGING
+    if is_staging and not selected:
+        base = Domain.objects.filter(environment__project=project, environment__slug='production',
+                                     domain_type=Domain.Type.SUBDOMAIN, is_disabled=False).order_by('-is_primary', 'created_at').first()
+        if base is None:
+            raise ValidationError({'domain': 'Réservez d’abord le domaine géré de production.'})
+        hostname = validate_hostname('pre.' + base.hostname)
+    else:
+        hostname = validate_hostname(selected) if selected else validate_hostname(default_hostname(project.slug))
+    if hostname in {'pre.' + settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX,
+                    'backend.' + settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX}:
+        raise ValidationError({'domain': 'Domaine réservé à AUTOKOM.'})
+    if selected and (is_staging or getattr(settings, 'AUTOKOM_PLATFORM_PREPROD', False)):
+        raise ValidationError({'domain': 'Seuls les domaines gérés sont disponibles pour cet environnement.'})
     reserved_suffixes = (settings.AUTOKOM_BASE_DOMAIN, settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX)
     if selected and any(hostname == suffix or hostname.endswith('.' + suffix) for suffix in reserved_suffixes):
         raise ValidationError({'domain': 'Choisir le sous-domaine automatique, pas un domaine AUTOKOM personnalisé.'})
     if Domain.objects.filter(hostname=hostname).exists():
-        if selected:
+        if selected or is_staging:
             raise ValidationError({'domain': 'Ce nom de domaine est déjà réservé.'})
         # Two organizations may legitimately use the same project name.
         # Allocate a deterministic, collision-resistant managed subdomain.
-        from django.conf import settings
         suffix = settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX.strip('.').lower()
         label = (project.slug[:45].strip('-') or 'site')
         hostname = validate_hostname(f'{label}-{str(project.pk).replace("-", "")[:12]}.{suffix}')
