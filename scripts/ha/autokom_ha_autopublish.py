@@ -92,10 +92,20 @@ def process_one(path: Path, *, token: str, queue: Path = QUEUE,
     if not _active_run(env, rid, root):
         # Keep unmatched queue entry for diagnostic; remove only if no release exists.
         raise QueueError('Not current; no image published (old/rolled back run)')
+    state = json.loads((root / env / 'current.json').read_text(encoding='utf-8'))
+    if state.get('run_id') != rid or state.get('environment_id') != env:
+        raise QueueError('Active release changed during promotion')
+    restored = state.get('restored_image') is True
+    if restored:
+        from autokom_ha_registry import run_docker
+        image_id = state.get('image_digest', '')
+        if not re.fullmatch(r'sha256:[a-f0-9]{64}', image_id) or run_docker(
+                ['image','inspect','autokom-local:'+rid,'--format','{{.Id}}'], timeout=15).strip() != image_id:
+            raise QueueError('Restored image digest mismatch')
     image = image_tag(PROJECT, REGION, REPO, rid)
     digest = registry_manifest_digest(image, token)
     if digest is None:
-        digest_ref = publish(rid, PROJECT, REGION, REPO, from_archive=True,
+        digest_ref = publish(rid, PROJECT, REGION, REPO, from_archive=not restored,
                              identity='', token=token)
     else:
         digest_ref = image.split(':', 1)[0] + '@' + digest
@@ -138,7 +148,7 @@ def discover_local_releases(root: Path = ROOT, queue: Path = QUEUE,
         except (ValueError, OSError, QueueError, AttributeError):
             continue
         candidate = artifacts / (rid + '.tar')
-        if candidate.is_symlink() or not candidate.is_file():
+        if doc.get('restored_image') is not True and (candidate.is_symlink() or not candidate.is_file()):
             # Existing images can have been pruned. Do not try to rebuild them
             # or expose a GitHub dependency in this registry-only process.
             continue

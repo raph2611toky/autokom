@@ -12,6 +12,23 @@ class DeploymentStageSerializer(serializers.ModelSerializer):
 class DeploymentRunSerializer(serializers.ModelSerializer):
     error_message = serializers.SerializerMethodField()
     security_feedback_enabled = serializers.SerializerMethodField()
+    release_status = serializers.SerializerMethodField()
+    security_actions = serializers.SerializerMethodField()
+    remediation_suggestions = serializers.SerializerMethodField()
+
+    def get_release_status(self, run):
+        release = next(iter(run.releases.all()), None)
+        return release.status if release else ''
+
+    def get_security_actions(self, run):
+        return {item.channel: {'status':'SENT' if item.completed_at else 'UNCONFIRMED',
+                               'number':item.result_number if item.channel == 'ISSUE' and item.completed_at else None}
+                for item in run.security_feedback.all() if item.channel in ('ISSUE','EMAIL')}
+
+    def get_remediation_suggestions(self, run):
+        from apps.deployments.runs.security_feedback import SUGGESTIONS
+        return {key:SUGGESTIONS[key] for key in (run.sast_report.get('rules') or {}) if key in SUGGESTIONS}
+
 
     def get_security_feedback_enabled(self, instance):
         return settings.AUTOKOM_SECURITY_FEEDBACK_ENABLED
@@ -41,7 +58,7 @@ class DeploymentRunSerializer(serializers.ModelSerializer):
         model = DeploymentRun
         fields = ('id','environment','configuration','trigger_type','mode_snapshot','resources_snapshot',
                   'branch','commit_sha','status','created_at','started_at',
-                  'finished_at','cancel_requested','error_message','jenkins_reference','stages','sast_report','security_feedback_enabled')
+                  'finished_at','cancel_requested','error_message','jenkins_reference','stages','sast_report','sca_report','security_feedback_enabled','security_actions','remediation_suggestions','release_status','rollback_source')
         read_only_fields = fields
 
 class DeploymentLogSerializer(serializers.ModelSerializer):

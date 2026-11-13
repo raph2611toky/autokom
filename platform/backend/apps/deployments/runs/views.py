@@ -86,7 +86,7 @@ class DeploymentListAPIView(APIView):
             _, env = get_environment(request.user, project_id, environment_id)
             page = int_param(request, 'page', default=1, maximum=100000)
             size = int_param(request, 'page_size', default=20, maximum=50)
-            qs = DeploymentRun.objects.filter(environment=env).order_by('-created_at')
+            qs = DeploymentRun.objects.filter(environment=env).prefetch_related('stages','releases','security_feedback').order_by('-created_at')
             return api_success({'count': qs.count(), 'page': page,
                 'runs': DeploymentRunSerializer(qs[(page-1)*size:page*size], many=True).data},
                 'Historique des déploiements.')
@@ -105,6 +105,22 @@ class DeploymentDetailAPIView(APIView):
             return api_success({'deployment': DeploymentRunSerializer(run).data}, 'État de déploiement.')
         except Exception as exc:
             return handle_error(exc, 'deployment_detail')
+
+
+class DeploymentRestoreAPIView(APIView):
+    permission_classes = [IsClientUser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'deploy'
+
+    def post(self, request, project_id, environment_id, run_id):
+        try:
+            from apps.deployments.runs.restore import queue_restore
+            source = accessible_run(request.user, project_id, environment_id, run_id, write=True)
+            run, created = queue_restore(source.environment, source, request.user, request.headers.get('Idempotency-Key'))
+            return api_success({'deployment': DeploymentRunSerializer(run).data, 'enqueued': created},
+                               'Restauration mise en file.', 202)
+        except Exception as exc:
+            return handle_error(exc, 'deployment_restore')
 
 
 class DeploymentLogsAPIView(APIView):

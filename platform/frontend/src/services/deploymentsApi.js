@@ -28,5 +28,6 @@ export const deploymentsApi = Object.freeze({
   },
   securityFeedback: (p, e, runId, channel, target = 0) =>
     api.post(`${prefix(p, e)}deployments/${validId(runId)}/security-feedback/`, { channel, target }),
+  restore: (p, e, runId, key) => api.post(`${prefix(p, e)}deployments/${validId(runId)}/restore/`, {}, { headers: { 'Idempotency-Key': key } }),
   cancel: (p, e, runId) => api.post(`${prefix(p, e)}deployments/${validId(runId)}/cancel/`, {}),
 })

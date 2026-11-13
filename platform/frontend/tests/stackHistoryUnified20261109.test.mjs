@@ -22,7 +22,7 @@ test('les deux services réussis apparaissent comme une publication groupée ave
     const feed = await stackApi.history(project,1,10)
     assert.equal(feed.count,6)
     assert.equal(feed.runs[0].kind,'stack')
-    assert.equal(publicationServices(feed.runs[0]),'Backend : En ligne · Frontend : En ligne')
+    assert.equal(publicationServices(feed.runs[0]),'Backend : Réussi · Frontend : Réussi')
     assert.equal(publicationServices(feed.runs[1]),'')
     assert.equal(publicationKind(feed.runs[0]),'Frontend + Backend')
     assert.equal(publicationPath(project,feed.runs[0]),`/projects/${project}/stack/deployments/${grouped}`)

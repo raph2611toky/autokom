@@ -9,6 +9,7 @@ export const stackApi = Object.freeze({
   domainSettings: projectId => api.get(`/projects/${uuid(projectId)}/stack/domains/preflight/`),
   preflightDomains: projectId => api.post(`/projects/${uuid(projectId)}/stack/domains/preflight/`, {}),
   launch: (projectId, idempotencyKey) => api.post(`/projects/${uuid(projectId)}/stack/launch/`, { idempotency_key:idempotencyKey }),
+  restore: (p, runId, key) => api.post(`/projects/${uuid(p)}/stack/deployments/${uuid(runId)}/restore/`, {}, {headers:{'Idempotency-Key':key}}),
   publication: (projectId, runId) => api.get(`/projects/${uuid(projectId)}/stack/deployments/${uuid(runId)}/`),
   history: (projectId, page = 1, pageSize = 20) => {
     if (!Number.isSafeInteger(page) || page < 1 || page > 100000) throw new TypeError('Page invalide.')

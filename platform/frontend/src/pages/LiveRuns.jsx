@@ -5,6 +5,8 @@ import { deploymentsApi } from '../services/deploymentsApi.js'
 import { cleanCustomerLog, phaseOrder, phaseTitles, publicationLabel } from '../services/deploymentPresentation.js'
 import { isPublishing, sortRecentRuns } from '../services/deploymentHistory.js'
 import { technicalTimeline, formatTechnicalFileLine } from '../services/deploymentLogTimeline.js'
+import RestorePublication from '../components/RestorePublication.jsx'
+import { githubRepositoryUrl, securityWarning } from '../services/securityPresentation.js'
 import SecurityRunReport from '../components/SecurityRunReport.jsx'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
 import { stackApi } from '../services/stackApi.js'
@@ -21,6 +23,7 @@ function statusPill(value) {
   return <span className={`ak-publication-pill state-${tone}`} role="status">{name}</span>
 }
 function displayTrigger(value) {
+  if (value === 'ROLLBACK') return 'Restauration d’une version'
   return value === 'GIT_PUSH' ? 'Mise à jour automatique' : value === 'MANUAL' ? 'Déploiement manuel' : 'Nouvelle publication'
 }
 function mergeLogEntries(current, incoming) {
@@ -115,24 +118,31 @@ function RunDetails({ navigate, projectId, runId }) {
   const logLines = technicalTimeline(messages)
     .filter(item => stageFilter === 'all' || item.stage_key === stageFilter)
   const selectMode = next => { if (next !== logMode) { followLogTail.current = true; setStageFilter('all'); setLogMode(next) } }
+  const repositoryUrl = githubRepositoryUrl(projectInfo.project.repository_name)
   return <>
     <div className="ak-back-line"><button type="button" className="button-quiet" onClick={() => navigate(`/projects/${projectId}`)}><ArrowLeft size={16}/> {projectInfo.project.name}</button></div>
     <section className="page-hero ak-workspace-hero"><div><p className="ak-page-kicker">Détails de publication</p><h1>Publication {String(run.id).slice(0,8)}</h1><p>{dateTime(run.created_at)} · {displayTrigger(run.trigger_type)}</p></div><div className="ak-project-hero-actions">{statusPill(run.status)}<button className="button-outline" type="button" onClick={refresh}><RefreshCw size={16}/> Actualiser</button></div></section>
     {error && <p className="feedback error" role="alert">{error}</p>}
     <ProjectPublicSite site={projectInfo.project.public_site} onManage={() => navigate(`/sites/${projectId}`)}/>
+    <div className="ak-project-detail-actions">
+      {repositoryUrl && <a className="button-outline" href={repositoryUrl} target="_blank" rel="noopener noreferrer"><GitBranch size={16}/> Voir le dépôt GitHub</a>}
+      {run.release_status === 'ACTIVE' && <span className="ak-publication-pill state-success">Version actuellement en ligne</span>}
+      {run.rollback_source && <button type="button" className="button-outline" onClick={() => navigate(`/projects/${projectId}/deployments/${run.rollback_source}`)}>Voir la publication restaurée</button>}
+      {!projectInfo.project.has_service_stack && <RestorePublication projectId={projectId} environmentId={projectInfo.environment.id} run={run} navigate={navigate} busy={projectInfo.runs?.some(item => isPublishing(item.status))}/>}
+    </div>
     <section className="ak-workspace-sheet ak-run-detail-sheet" aria-labelledby="run-stages-title">
       <div className="ak-workspace-sheet-heading"><div><h2 id="run-stages-title">Progression</h2><p className="ak-section-subtitle">Suivez les étapes de mise en ligne de votre application.</p></div>{isPublishing(run.status) && <span className="ak-run-updating"><LoaderCircle size={15} className="ak-spin"/> Actualisation automatique</span>}</div>
       {sortedStages.length ? <ol className="ak-run-detail-timeline">{sortedStages.map(stage => {
         const [label,tone] = publicationLabel(stage.status)
         return <li key={stage.stage_key} className={`ak-run-detail-stage state-${tone}`}>
           <span className="ak-run-detail-marker" aria-hidden="true">{tone === 'success' ? <CheckCircle2 size={21}/> : tone === 'running' ? <LoaderCircle className="ak-spin" size={21}/> : <Clock3 size={19}/>}</span>
-          <span className="ak-run-detail-stage-main"><strong>{phaseTitles[stage.stage_key] || 'Vérification'}</strong>{stage.started_at && <small>Début : {dateTime(stage.started_at)}</small>}{stage.stage_key === 'dast' && stage.summary && <small>{stage.summary}</small>}</span>
+          <span className="ak-run-detail-stage-main"><strong>{(run.trigger_type === 'ROLLBACK' ? stage.name : phaseTitles[stage.stage_key]) || stage.name || 'Vérification'}</strong>{stage.started_at && <small>Début : {dateTime(stage.started_at)}</small>}{stage.stage_key === 'dast' && stage.summary && <small>{stage.summary}</small>}</span>
           <span className="ak-run-detail-state">{label}</span>
         </li>
       })}</ol> : <p className="ak-deployment-hint">Les étapes apparaîtront dès le début de la préparation.</p>}
       {run.error_message && <p className="ak-deployment-error" role="alert">{cleanCustomerLog(run.error_message) || 'Une erreur a interrompu la publication.'}</p>}
     </section>
-    <SecurityRunReport key={run.id} run={run} projectId={projectId} environmentId={projectInfo.environment.id}/>
+    <SecurityRunReport key={run.id} run={run} projectId={projectId} environmentId={projectInfo.environment.id} repository={projectInfo.project.repository_name}/>
     <section className="ak-workspace-sheet ak-run-detail-sheet" aria-labelledby="run-logs-title">
       <div className="ak-workspace-sheet-heading ak-log-heading">
         <div><h2 id="run-logs-title">Journal de publication</h2><p className="ak-section-subtitle">Suivez les événements de chaque étape, sans afficher d’identifiants secrets.</p></div>
@@ -216,8 +226,13 @@ function RunHistory({ navigate, projectId }) {
     <section className="page-hero ak-workspace-hero"><div><h1>Historique des publications</h1><p>{info?.project?.name || 'Votre projet'} · {count} publication(s)</p></div></section>
     {error && <p className="feedback error" role="alert">{error}</p>}
     {info?.project && <ProjectPublicSite site={info.project.public_site} onManage={() => navigate(`/sites/${projectId}`)}/>}
+    {info?.project?.public_site?.current_stack_run_id && <p className="ak-deployment-hint">Version groupée actuellement en ligne · {String(info.project.public_site.current_stack_run_id).slice(0,8)} <button type="button" className="button-outline" onClick={() => navigate(publicationPath(projectId,{id:info.project.public_site.current_stack_run_id,kind:'stack'}))}>Voir la version</button></p>}
+    {info?.project?.public_site?.current_run_id && !info.project.has_service_stack && <p className="ak-deployment-hint">Version actuellement en ligne · {String(info.project.public_site.current_run_id).slice(0,8)} <button type="button" className="button-outline" onClick={() => navigate(`/projects/${projectId}/deployments/${info.project.public_site.current_run_id}`)}>Voir la version</button></p>}
     <section className="ak-workspace-sheet"><div className="ak-workspace-sheet-heading"><h2>Toutes les publications</h2><span className="ak-project-state">Page {page} / {pages}</span></div>
-      {loading ? <div className="ak-workspace-empty" role="status"><LoaderCircle className="ak-spin"/> Chargement…</div> : runs.length ? <div className="ak-deployment-list">{runs.map(run => <article className="ak-deployment-card" key={run.id}><div className="ak-deployment-summary"><div className="ak-deployment-symbol"><Workflow size={19}/></div><div className="ak-deployment-summary-text"><strong>{dateTime(run.created_at)}</strong><small>{publicationKind(run)} · {displayTrigger(run.trigger_type)} · Réf. {String(run.id).slice(0,8)}</small>{publicationServices(run) && <small className="ak-stack-run-services">{publicationServices(run)}</small>}</div>{statusPill(run.status)}<button className="button-outline" type="button" onClick={() => navigate(publicationPath(projectId,run))}>Détails <ArrowRight size={16}/></button></div></article>)}</div> : <p className="ak-deployment-hint">Aucune publication enregistrée.</p>}
+      {loading ? <div className="ak-workspace-empty" role="status"><LoaderCircle className="ak-spin"/> Chargement…</div> : runs.length ? <div className="ak-deployment-list">{runs.map(run => <article className="ak-deployment-card" key={run.id}><div className="ak-deployment-summary"><div className="ak-deployment-symbol"><Workflow size={19}/></div><div className="ak-deployment-summary-text"><strong>{dateTime(run.created_at)}</strong><small>{publicationKind(run)} · {displayTrigger(run.trigger_type)} · Réf. {String(run.id).slice(0,8)}</small>{publicationServices(run) && <small className="ak-stack-run-services">{publicationServices(run)}</small>}</div>{run.release_status === 'ACTIVE' ? <span className="ak-publication-pill state-success">Version en ligne</span> : statusPill(run.status)}
+      {securityWarning(run) && <span className="ak-publication-pill state-waiting">{securityWarning(run)}</span>}
+      {(run.kind === 'stack' || (!info?.project?.has_service_stack && info?.environment?.id)) && <RestorePublication projectId={projectId} environmentId={info?.environment?.id} run={run} navigate={navigate} busy={runs.some(item=>isPublishing(item.status))}/>}
+      <button className="button-outline" type="button" onClick={() => navigate(publicationPath(projectId,run))}>Détails <ArrowRight size={16}/></button></div></article>)}</div> : <p className="ak-deployment-hint">Aucune publication enregistrée.</p>}
       {count > PAGE_SIZE && <nav className="ak-run-pager" aria-label="Pages des publications"><button type="button" className="button-outline" disabled={page<=1 || loading} onClick={() => setPage(x=>Math.max(1,x-1))}>Précédente</button><span>{page} / {pages}</span><button type="button" className="button-outline" disabled={page>=pages || loading} onClick={() => setPage(x=>Math.min(pages,x+1))}>Suivante <ArrowRight size={14}/></button></nav>}
     </section>
   </>

@@ -322,30 +322,54 @@ def _docker_deploy_inner(params):
         if current.get('ingress_mode') == ingress.MODE and not ingress.probe_relay(current['name'],current['port']):
             raise BrokerError('AUTOKOM_INGRESS_NOT_READY: Relais local interrompu.')
         return {'port':current['port'],'container':current['name'],'idempotent':True}
+    restore = params.get('restore')
+    if restore is not None:
+        if not isinstance(restore, dict):
+            raise BrokerError('AUTOKOM_RESTORE_SCOPE_INVALID')
+        if (not current or current.get('stack_project_id') != params.get('stack_project_id') or
+                current.get('stack_role') != params.get('stack_role') or current.get('run_id') != valid_id(restore.get('expected_current')) or
+                (STATE/environment/'previous.json').exists()):
+            raise BrokerError('AUTOKOM_RESTORE_ACTIVE_CHANGED: Version active modifiée ou transaction non finalisée.')
     def scoped_id(value):
         return hashlib.sha256(('autokom-preprod:' + value).encode()).hexdigest()[:20] if PREPROD else value.replace('-', '')[:20]
     name='autokom-'+scoped_id(rid)
     already=subprocess.run(['docker','container','inspect',name],capture_output=True,timeout=12)
     if already.returncode==0:
         raise BrokerError('Conteneur de ce run déjà présent hors transaction : réconciliation manuelle requise.')
-    artifact=IMAGES/(rid+'.tar')
-    if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size>8*1024**3 or artifact.stat().st_size<1024:
-        raise BrokerError('Archive locale Jenkins introuvable ou non autorisée.')
-    # Also refuse builds without enough free space for image import.
-    if shutil.disk_usage(IMAGES).free < max(256*1024**2, artifact.stat().st_size*2):
-        raise BrokerError('AUTOKOM_DISK_LOW: Stockage insuffisant pour importer l’image.')
-    # Fixed trusted tag: only BuildKit-produced images in AUTOKOM's bounded directory.
-    tag=('autokom-preprod-local:' if PREPROD else 'autokom-local:')+rid
-    # Open no-follow and keep the same inode throughout Docker import (prevent TOCTOU).
-    fd = os.open(artifact, os.O_RDONLY | getattr(os,'O_NOFOLLOW',0))
-    try:
-        st=os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size>8*1024**3 or st.st_size<1024:
-            raise BrokerError('Archive Docker invalide.')
-        run(['docker','load','--input',f'/proc/self/fd/{fd}'],timeout=240,pass_fds=(fd,))
-    finally:
-        os.close(fd)
-    run(['docker','image','inspect',tag,'--format','{{.Id}}'])
+    prefix = 'autokom-preprod-local:' if PREPROD else 'autokom-local:'
+    tag = prefix+rid
+    original_rid = valid_id(restore.get('source_run')) if restore is not None else rid
+    source_tag = prefix+original_rid
+    artifact = IMAGES/(original_rid+'.tar')
+    digest = restore.get('image_digest') if restore else None
+    if digest and not re.fullmatch(r'sha256:[a-f0-9]{64}', digest):
+        raise BrokerError('AUTOKOM_RESTORE_IMAGE_INVALID')
+    # Prefer the immutable image ID recorded at publication. For legacy releases
+    # without an ID, only the original AUTOKOM artifact is accepted.
+    image = ''
+    if digest:
+        try:
+            image = run(['docker','image','inspect',digest,'--format','{{.Id}}'], timeout=12).strip()
+        except BrokerError:
+            pass
+    if not image:
+        if artifact.is_symlink() or not artifact.is_file() or not 1024 <= artifact.stat().st_size <= 8*1024**3:
+            raise BrokerError('AUTOKOM_RESTORE_IMAGE_MISSING' if restore else 'Archive locale Jenkins introuvable ou non autorisée.')
+        if shutil.disk_usage(IMAGES).free < max(256*1024**2, artifact.stat().st_size*2):
+            raise BrokerError('AUTOKOM_DISK_LOW: Stockage insuffisant pour importer l’image.')
+        fd = os.open(artifact, os.O_RDONLY | getattr(os,'O_NOFOLLOW',0))
+        try:
+            st=os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or not 1024 <= st.st_size <= 8*1024**3:
+                raise BrokerError('Archive Docker invalide.')
+            run(['docker','load','--input',f'/proc/self/fd/{fd}'],timeout=240,pass_fds=(fd,))
+        finally:
+            os.close(fd)
+        image = run(['docker','image','inspect',source_tag,'--format','{{.Id}}']).strip()
+    if not re.fullmatch(r'sha256:[a-f0-9]{64}', image) or (digest and image != digest):
+        raise BrokerError('AUTOKOM_RESTORE_IMAGE_INVALID')
+    if restore:
+        run(['docker','tag',image,tag],timeout=20)
     stack_project = params.get('stack_project_id')
     stack_role = params.get('stack_role')
     if stack_project is not None:
@@ -399,7 +423,7 @@ def _docker_deploy_inner(params):
           '--read-only','--tmpfs',f'/tmp:rw,noexec,nosuid,size={min(storage,256)}m',
           '--log-driver','json-file','--log-opt','max-size=10m','--log-opt','max-file=3',
           '--user','10001:10001',
-           '--env-file',str(envfile),'--restart','unless-stopped',tag]
+           '--env-file',str(envfile),'--restart','unless-stopped',image]
     relay = None
     failure_reason = None
     try:
@@ -433,6 +457,7 @@ def _docker_deploy_inner(params):
         previous=_load_state(environment)
         doc={'environment_id':environment,'run_id':rid,'internal_port':port,'port':external_port,
              'name':name,'network':network,'healthcheck':health,**relay,
+             'image_digest':image, 'restored_image':bool(restore),
              # Only non-sensitive metadata is mirrored to the private GCP controller.
              # Existing local sites remain functional without the cloud controller.
              'cloud_delivery_requested':params.get('cloud_delivery_requested') is True,
@@ -556,7 +581,7 @@ def _commit(params):
                 ingress.remove(old_name, execute=run, available=PROXY, enabled=ENABLED)
         previous_path.unlink(missing_ok=True)
     if PREPROD:
-        return {'committed': True}
+        return {'committed': True, 'image_digest': state.get('image_digest', '')}
     # Publish the already-committed image asynchronously. This is a private
     # artifact mirroring queue, never an HA activation or a client DNS cutover.
     # A registry outage must not roll back a validated local release.
@@ -610,7 +635,8 @@ def _commit_pair(params):
             # Never perform an automatic rollback after one commit: the old
             # container may have been deleted. Leave an explicit reconciliation.
             raise BrokerError('AUTOKOM_STACK_COMMIT_RECONCILE_REQUIRED') from exc
-    return {'committed': True, 'services': len(results)}
+    return {'committed': True, 'services': len(results),
+            'image_digests': {rid: result.get('image_digest', '') for (_,rid),result in zip(checked,results)}}
 
 
 def _dig(record,hostname):
@@ -1609,7 +1635,14 @@ def handle(action,params):
         return {'authenticated':True}
     if action.startswith('jenkins.'):
         return jenkins_action(action,params)
-    if action=='runtime.deploy':return _docker_deploy(params)
+    if action=='runtime.deploy':
+        if 'restore' in params:
+            raise BrokerError('AUTOKOM_RESTORE_SCOPE_INVALID')
+        return _docker_deploy(params)
+    if action=='runtime.restore':
+        if not isinstance(params.get('restore'), dict):
+            raise BrokerError('AUTOKOM_RESTORE_SCOPE_INVALID')
+        return _docker_deploy(params)
     if action=='runtime.rollback':return _runtime_lock_call(_rollback,params)
     if action=='runtime.commit':return _runtime_lock_call(_commit,params)
     if action=='runtime.commit_pair':return _runtime_lock_call(_commit_pair,params)

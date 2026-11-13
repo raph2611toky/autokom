@@ -79,7 +79,7 @@ def reconcile_branch_heads(*, offset=0, limit=5, repository=None):
             logger.warning('GitHub branch reconciliation: source access unavailable for project %s (%s)',
                            env.project_id, type(exc).__name__)
             continue
-        latest = DeploymentRun.objects.filter(environment=env).order_by('-created_at').first()
+        latest = DeploymentRun.objects.filter(environment=env).exclude(trigger_type='ROLLBACK').order_by('-created_at').first()
         if not needs_branch_deployment(sha, latest.commit_sha if latest else ''):
             continue
         try:
@@ -96,7 +96,7 @@ def reconcile_branch_heads(*, offset=0, limit=5, repository=None):
                 continue
             if DeploymentRun.objects.filter(idempotency_key=idem).exists():
                 continue
-            last_now = DeploymentRun.objects.filter(environment=locked).order_by('-created_at').first()
+            last_now = DeploymentRun.objects.filter(environment=locked).exclude(trigger_type='ROLLBACK').order_by('-created_at').first()
             if last_now and last_now.commit_sha.lower() == sha.lower():
                 continue
             try:

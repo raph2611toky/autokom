@@ -1,3 +1,4 @@
+import { githubRepositoryUrl, securityWarning } from '../services/securityPresentation.js'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, ChevronDown, Clock3, FolderKanban, GitBranch, LoaderCircle, Plus, Rocket, Search, Settings2, Workflow } from 'lucide-react'
 import { projectsApi } from '../services/projectsApi.js'
@@ -122,10 +123,12 @@ export default function LiveProjects({ navigate, projectId = null }) {
     const active = latest.find(run => isPublishing(run.status))
     const [statusText, statusTone] = publicationLabel(latest[0]?.status)
     const ready = canPublish(detail)
+    const repositoryUrl = githubRepositoryUrl(project.repository_name)
     return <>
       <div className="ak-back-line"><button type="button" className="button-quiet" onClick={() => navigate('/projects')}><ArrowLeft size={17}/> Mes projets</button></div>
       <section className="page-hero ak-workspace-hero"><div><h1>{project.name}</h1><p>{project.repository_name} · {cfg?.branch || project.default_branch}</p></div>
         <div className="ak-project-hero-actions">
+          {repositoryUrl && <a href={repositoryUrl} className="button-outline" target="_blank" rel="noopener noreferrer"><GitBranch size={16}/> Voir le dépôt GitHub</a>}
           <span className={`ak-publication-pill state-${latest.length ? statusTone : 'muted'}`} role="status">{latest.length ? statusText : 'Non publié'}</span>
           <button type="button" className="ak-project-settings-icon" onClick={() => navigate(`/projects/${project.id}/settings`)} title="Paramètres du projet" aria-label="Paramètres du projet"><Settings2 size={18}/></button>
           {active ? <button type="button" className="button-primary" onClick={() => navigate(publicationPath(project.id, active))}><Clock3 size={17}/> Suivre la publication</button> : <button type="button" className="button-primary" disabled={busy || (!ready && !stackEnabled)} onClick={publishNow}>{busy ? <LoaderCircle size={17} className="ak-spin"/> : <Rocket size={17}/>} {busy ? 'Préparation…' : 'Déployer maintenant'}</button>}
@@ -133,6 +136,8 @@ export default function LiveProjects({ navigate, projectId = null }) {
       </section>
       {launchError && <p className="feedback error" role="alert">{launchError}</p>}
       <ProjectPublicSite site={project.public_site} onManage={() => navigate(`/sites/${project.id}`)}/>
+      {project.public_site?.current_stack_run_id && <p className="ak-deployment-hint">Version groupée actuellement en ligne · {String(project.public_site.current_stack_run_id).slice(0,8)} <button type="button" className="button-outline" onClick={() => navigate(publicationPath(project.id,{id:project.public_site.current_stack_run_id,kind:'stack'}))}>Voir la version</button></p>}
+      {project.public_site?.current_run_id && !project.has_service_stack && <p className="ak-deployment-hint">Version actuellement en ligne · {String(project.public_site.current_run_id).slice(0,8)} <button type="button" className="button-outline" onClick={() => navigate(`/projects/${project.id}/deployments/${project.public_site.current_run_id}`)}>Voir la version</button></p>}
       {!cfg && <p className="ak-deployment-error">Configurez votre projet avant sa première publication.</p>}
       <section className="ak-workspace-sheet ak-project-runs-first" aria-labelledby="recent-deployments">
         <div className="ak-workspace-sheet-heading"><div><h2 id="recent-deployments">Publications récentes</h2><p className="ak-section-subtitle">Les dix dernières activités de votre application.</p></div><span className="ak-project-state">{detail.runCount ?? runs.length} au total</span></div>
@@ -142,8 +147,8 @@ export default function LiveProjects({ navigate, projectId = null }) {
           return <article className="ak-deployment-card" key={run.id}>
             <div className="ak-deployment-summary">
               <div className="ak-deployment-symbol"><Workflow size={19}/></div>
-              <div className="ak-deployment-summary-text"><strong>Publication du {formatDate(run.created_at)}</strong><small>{publicationKind(run)} · {run.trigger_type === 'GIT_PUSH' ? 'Mise à jour automatique' : 'Lancement manuel'} · Réf. {String(run.id).slice(0,8)}</small>{publicationServices(run) && <small className="ak-stack-run-services">{publicationServices(run)}</small>}</div>
-              <span className={`ak-publication-pill state-${tone}`}>{label}</span>
+              <div className="ak-deployment-summary-text"><strong>Publication du {formatDate(run.created_at)}</strong><small>{publicationKind(run)} · {run.trigger_type === 'ROLLBACK' ? 'Restauration' : run.trigger_type === 'GIT_PUSH' ? 'Mise à jour automatique' : 'Lancement manuel'} · Réf. {String(run.id).slice(0,8)}</small>{securityWarning(run) && <small className="ak-publication-pill state-waiting">{securityWarning(run)}</small>}{publicationServices(run) && <small className="ak-stack-run-services">{publicationServices(run)}</small>}</div>
+              <span className={`ak-publication-pill state-${tone}`}>{run.release_status === 'ACTIVE' ? 'Version en ligne' : label}</span>
               <button type="button" className="button-outline" onClick={() => navigate(publicationPath(project.id, run))}>Voir les détails <ArrowRight size={15}/></button>
             </div>
           </article>

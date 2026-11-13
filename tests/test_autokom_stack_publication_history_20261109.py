@@ -44,7 +44,7 @@ class Query:
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
-        self.project = SimpleNamespace(id='project')
+        self.project = SimpleNamespace(id='project',repository_name='owner/project')
         self.production = SimpleNamespace(project=self.project, slug='production')
         self.now = datetime(2026,11,9,12,tzinfo=timezone.utc)
         self.requests = SimpleNamespace(user='authorized', query_params={'page':'1','page_size':'20'})
@@ -52,7 +52,7 @@ class ApiTests(unittest.TestCase):
                           created_at=self.now-timedelta(minutes=10),status='SUCCEEDED',branch='main')]
         self.child = SimpleNamespace(id='front',pk='front',environment=self.production,is_child=True,
                           created_at=self.now+timedelta(minutes=4),status='RUNNING')
-        backend = SimpleNamespace(id='backend-run', environment_id='backend-env', status='PREPARED',trigger_type='MANUAL')
+        backend = SimpleNamespace(id='backend-run', environment_id='backend-env', status='PREPARED',trigger_type='MANUAL',sca_report={},sast_report={})
         self.group = SimpleNamespace(id='group',pk='group',created_at=self.now,
             stack=SimpleNamespace(project=self.project,frontend_environment_id='frontend-env'),
             backend_run=backend,backend_run_id=backend.id,frontend_run=None,frontend_run_id=None,
@@ -60,6 +60,8 @@ class ApiTests(unittest.TestCase):
         self.scoped_projects = []
         self.context = {
             'get_project': self.get_project,
+            'active_group_runs': lambda project: set(),
+            'group_release_status': lambda run, active: '',
             'int_param': lambda request,name,default,maximum: int(request.query_params.get(name,default)),
             'Environment': SimpleNamespace(objects=Query([self.production])),
             'DeploymentRun': SimpleNamespace(objects=Query([*self.legacy,self.child])),
@@ -99,7 +101,7 @@ class ApiTests(unittest.TestCase):
         self.group.finished_at = self.now + timedelta(minutes=10)
         self.group.backend_run.status = 'SUCCEEDED'
         self.group.frontend_run = SimpleNamespace(
-            id='frontend-run',environment_id='frontend-env',status='SUCCEEDED')
+            id='frontend-run',environment_id='frontend-env',status='SUCCEEDED',sca_report={},sast_report={})
         feed = self.run_method('StackPublicationHistoryAPIView')
         self.assertEqual(feed['count'], 6)
         self.assertEqual(feed['runs'][0]['kind'], 'stack')

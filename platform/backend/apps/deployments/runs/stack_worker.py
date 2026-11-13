@@ -109,7 +109,7 @@ def _activate_group(group):
         logger.warning('Refus HTTPS groupé pour %s (%s)', group.pk, type(exc).__name__)
         return _fail_group(group, code='AUTOKOM_STACK_HTTPS_FAILED')
     try:
-        request_control('runtime.commit_pair', {'services': [
+        committed = request_control('runtime.commit_pair', {'services': [
             {'run_id': str(group.backend_run_id), 'environment_id': str(group.stack.backend_environment_id)},
             {'run_id': str(group.frontend_run_id), 'environment_id': str(group.stack.frontend_environment_id)},
         ]}, timeout=90)
@@ -123,7 +123,7 @@ def _activate_group(group):
         return True
     try:
         for run in (group.backend_run, group.frontend_run):
-            register_release(run)
+            register_release(run, image_digest=committed.get('image_digests', {}).get(str(run.pk), ''))
             for key in ('release','health'):
                 PipelineStageRun.objects.filter(deployment=run,stage_key=key).update(
                     status='SUCCESS', finished_at=timezone.now())
@@ -162,7 +162,7 @@ def reconcile_stack_deployments(limit=4):
     changed = False
     for group in (StackDeployment.objects.select_related('stack__frontend_environment',
                   'stack__backend_environment', 'backend_run', 'frontend_run', 'frontend_configuration')
-                  .filter(status__in=OPEN).order_by('created_at')[:limit]):
+                  .filter(status__in=OPEN).exclude(backend_run__trigger_type='ROLLBACK').order_by('created_at')[:limit]):
         back = group.backend_run.status
         front = group.frontend_run.status if group.frontend_run else None
         if back in TERMINAL or front in TERMINAL:
@@ -207,7 +207,7 @@ def reconcile_stack_pushes(limit=3):
                 user = stack.project.created_by
                 front_sha = _select_branch_commit(user,front_cfg)
                 back_sha = _select_branch_commit(user,back_cfg)
-                recent = stack.deployments.order_by('-created_at').first()
+                recent = stack.deployments.exclude(backend_run__trigger_type='ROLLBACK').order_by('-created_at').first()
                 if recent and recent.frontend_sha == front_sha and recent.backend_run.commit_sha == back_sha:
                     event.status = GitWebhookEvent.Status.HANDLED
                     event.error_message = 'LATEST_COMMITS_ALREADY_ATTEMPTED'
@@ -253,7 +253,7 @@ def reconcile_stack_heads(*, offset=0, limit=2):
             user = stack.project.created_by
             front_sha = _select_branch_commit(user,front)
             back_sha = _select_branch_commit(user,back)
-            latest = stack.deployments.order_by('-created_at').first()
+            latest = stack.deployments.exclude(backend_run__trigger_type='ROLLBACK').order_by('-created_at').first()
             if latest and (latest.frontend_sha,latest.backend_run.commit_sha) == (front_sha,back_sha):
                 continue
             launch_stack(user,stack,idempotency_key='head:'+front_sha[:20]+':'+back_sha[:20],

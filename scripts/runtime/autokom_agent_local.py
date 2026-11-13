@@ -292,6 +292,76 @@ def source(doc):
     return path
 
 
+def send_security_report(doc, kind, report):
+    base = os.environ['AUTOKOM_API_BASE'].rstrip('/')
+    rid = doc['run_id']
+    payload = json.dumps(report, separators=(',', ':')).encode()
+    epoch = str(int(time.time()))
+    digest = hashlib.sha256(payload).hexdigest()
+    key = os.environ['AUTOKOM_RUNNER_SHARED_KEY'].encode()
+    proof = hmac.new(key, f'autokom-{kind}:v1:{epoch}:{rid}:{digest}'.encode(),
+                     hashlib.sha256).hexdigest()
+    req = Request(base + f'/api/internal/runner/deployments/{rid}/{kind}/',
+                  data=payload, headers={'Content-Type': 'application/json',
+                  'X-Autokom-Runner-Time': epoch, 'X-Autokom-Runner-Signature': proof},
+                  method='POST')
+    with build_opener(NoRedirect()).open(req, timeout=10) as response:
+        if response.status not in (200, 201):
+            raise ValueError('Rapport refusé.')
+
+
+def security_scan_dependencies(doc, path):
+    from autokom_sca_remediation import NPM_PROFILES, repair_lock, scan_tree, summary
+    before = scan_tree(path, execute)
+    count, secrets, _ = before
+    after = None
+    cfg = doc['build']
+    profile = cfg.get('profile') or ('vite' if cfg.get('method') == 'STATIC' else '')
+    if count and not secrets and cfg.get('method') in ('STATIC','AUTO') and profile in NPM_PROFILES:
+        lock = path/'package-lock.json'
+        with tempfile.TemporaryDirectory(prefix='autokom-lock-') as folder:
+            staged = Path(folder)
+            try:
+                for name in ('package.json','package-lock.json'):
+                    src = path/name
+                    if src.is_symlink() or not src.is_file() or src.stat().st_size > 8*1024**2:
+                        raise ValueError('Manifeste npm non pris en charge.')
+                    shutil.copyfile(src, staged/name)
+                original = lock.read_bytes()
+                for refresh in (False, True):
+                    (staged/lock.name).write_bytes(original)
+                    accepted = False
+                    try:
+                        if repair_lock(staged, staged, execute, refresh=refresh):
+                            lock.write_bytes((staged/lock.name).read_bytes())
+                            after = scan_tree(path, execute)
+                            accepted = not any(after[:2])
+                            if accepted:
+                                break
+                    except (OSError, ValueError, TypeError, AttributeError, SystemExit):
+                        print('AUTOKOM_LOG: Une tentative de correction npm compatible n’a pas abouti.', flush=True)
+                    finally:
+                        if not accepted:
+                            lock.write_bytes(original)
+            except (OSError, ValueError, TypeError, AttributeError):
+                print('AUTOKOM_LOG: Correction npm compatible indisponible pour cette version.', flush=True)
+    report = summary(before, after, path/'package-lock.json')
+    if doc.get('sast_reports') is True:
+        try:
+            send_security_report(doc, 'sca', report)
+        except (OSError, ValueError, KeyError):
+            if report['remediated']:
+                fail('Correction npm non publiée : rapport de sécurité non enregistré.')
+            print('AUTOKOM_LOG: Rapport de dépendances indisponible.', flush=True)
+    elif report['remediated']:
+        fail('Correction npm non publiée : collecte des rapports désactivée.')
+    if report['remediated']:
+        print('AUTOKOM_LOG: %d alerte(s) Trivy corrigée(s) dans le build. Reporter le correctif dans GitHub.' % count, flush=True)
+    elif count or secrets:
+        fail('Trivy bloque : %d vulnérabilité(s) restante(s), %d secret(s). Consulter le rapport de sécurité.' %
+             (report['remaining'], report['secrets']))
+
+
 def scan(doc,kind):
     mode=doc.get('mode')
     if mode=='DEVOPS':
@@ -334,21 +404,7 @@ def scan(doc,kind):
                     print('AUTOKOM_LOG: DeepSAST · aucun extrait compatible ou modèle non installé.', flush=True)
                     stage('deepsast', 'SKIPPED')
                 try:
-                    base = os.environ['AUTOKOM_API_BASE'].rstrip('/')
-                    rid = doc['run_id']
-                    payload = json.dumps(report, separators=(',', ':')).encode()
-                    epoch = str(int(time.time()))
-                    digest = hashlib.sha256(payload).hexdigest()
-                    key = os.environ['AUTOKOM_RUNNER_SHARED_KEY'].encode()
-                    proof = hmac.new(key, f'autokom-sast:v1:{epoch}:{rid}:{digest}'.encode(),
-                                     hashlib.sha256).hexdigest()
-                    req = Request(base + f'/api/internal/runner/deployments/{rid}/sast/',
-                                  data=payload, headers={'Content-Type': 'application/json',
-                                  'X-Autokom-Runner-Time': epoch, 'X-Autokom-Runner-Signature': proof},
-                                  method='POST')
-                    with build_opener(NoRedirect()).open(req, timeout=10) as response:
-                        if response.status not in (200, 201):
-                            raise ValueError('Rapport refusé.')
+                    send_security_report(doc, 'sast', report)
                     print('AUTOKOM_LOG: Résumé SAST enregistré. DeepSAST reste consultatif.', flush=True)
                 except (OSError, ValueError):
                     print('AUTOKOM_LOG: Rapport SAST indisponible. Le verdict Semgrep est conservé.', flush=True)
@@ -356,8 +412,10 @@ def scan(doc,kind):
                     fail('Semgrep a détecté des résultats bloquants. Consulter le résumé SAST.')
         else:
             print('AUTOKOM_TECH:DevSecOps : analyse SCA et secrets Trivy en cours.',flush=True)
-            execute(['trivy','fs','--scanners','vuln,secret','--severity','HIGH,CRITICAL',
-                     '--exit-code','1','--no-progress',str(path)])
+            try:
+                security_scan_dependencies(doc, path)
+            except (OSError, ValueError, TypeError, AttributeError):
+                fail('Le contrôle Trivy n’a pas produit de rapport valide.')
     except SystemExit:
         stage(kind,'FAILED')
         raise
@@ -439,6 +497,13 @@ def protect_static_html_context(destination):
 def build(doc):
     path=source(doc)
     cfg=doc['build']
+    lock_digest = doc.get('remediated_lock_sha256')
+    if lock_digest:
+        from autokom_sca_remediation import MAX_LOCK
+        lock = path/'package-lock.json'
+        if (lock.is_symlink() or not lock.is_file() or lock.stat().st_size > MAX_LOCK or
+                hashlib.sha256(lock.read_bytes()).hexdigest() != lock_digest):
+            fail('Lockfile différent de celui validé par Trivy. Compilation refusée.')
     profile = cfg.get('profile') or ('vite' if cfg['method'] == 'STATIC' else '')
     if not isinstance(profile, str):
         fail('Recette frontend invalide.')

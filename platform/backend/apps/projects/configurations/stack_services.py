@@ -350,6 +350,9 @@ def configure_stack(user, project_id, attrs):
             backend_env = existing.backend_environment
             stack = existing
         else:
+            if DeploymentRun.objects.filter(environment__project=project, trigger_type='ROLLBACK',
+                                            status__in=['QUEUED','RUNNING','PREPARED','BLOCKED']).exists():
+                raise DeploymentConflict('Restauration en cours ou à réconcilier.')
             frontend_env = Environment.objects.filter(project=project, slug='production').first()
             if frontend_env is None:
                 raise ValidationError('Environnement de production introuvable.')

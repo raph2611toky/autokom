@@ -36,13 +36,16 @@ class DevSecOpsContract(TestCase):
 
     def test_devsecops_trivy_scans_vulnerabilities_and_secrets(self):
         stages=[];calls=[]
+        def execute(args, **kwargs):
+            calls.append(args)
+            Path(args[args.index('--output')+1]).write_text('{"SchemaVersion":2,"Results":[]}')
         with patch.object(agent,'stage',side_effect=lambda *args:stages.append(args)),\
              patch.object(agent,'source',return_value=Path('/tmp/project')),\
              patch.object(agent.shutil,'which',return_value='/usr/bin/trivy'),\
-             patch.object(agent,'execute',side_effect=lambda args:calls.append(args)):
-            agent.scan({'mode':'DEVSECOPS'},'sca')
+             patch.object(agent,'execute',side_effect=execute):
+            agent.scan({'mode':'DEVSECOPS','build':{}},'sca')
         self.assertEqual(stages,[('sca','RUNNING'),('sca','SUCCESS')])
-        self.assertIn('vuln,secret',calls[0]);self.assertIn('--exit-code',calls[0]);self.assertIn('HIGH,CRITICAL',calls[0])
+        self.assertIn('vuln,secret',calls[0]);self.assertIn('--exit-code',calls[0]);self.assertIn('--include-dev-deps',calls[0]); self.assertIn('json',calls[0])
 
     def test_scanner_absent_fails_not_skipped_or_succeeded(self):
         stages=[]

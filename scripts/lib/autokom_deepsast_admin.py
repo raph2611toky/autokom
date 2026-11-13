@@ -134,7 +134,7 @@ def install():
         os.close(fd)
 
 
-def enable_production():
+def enable_production(*, auto_notify=False):
     from autokom_env_manager import read_env, write_env, backup
     env_path = Path('/etc/autokom/secrets/backend.env')
     info = env_path.lstat()
@@ -142,6 +142,8 @@ def enable_production():
         raise RuntimeError('Configuration backend de production non fiable.')
     env = read_env(env_path)
     updates = dict(AUTOKOM_SECURITY_REPORTS_ENABLED='true', AUTOKOM_SECURITY_FEEDBACK_ENABLED='true')
+    if auto_notify:
+        updates['AUTOKOM_SECURITY_AUTO_NOTIFY'] = 'true'
     if all(env.get(k) == v for k, v in updates.items()):
         return
     backup(env_path)
@@ -173,14 +175,17 @@ def main(argv):
     parser = argparse.ArgumentParser(prog='autokom devsecops')
     parser.add_argument('action', choices=('check','apply'))
     parser.add_argument('--deploy', action='store_true', help='Migrer et publier Django/React et recharger le broker et le worker')
+    parser.add_argument('--auto-notify', action='store_true', help='Activer les notifications de sécurité automatiques en production')
     args = parser.parse_args(argv)
+    if args.auto_notify and (args.action != 'apply' or not args.deploy):
+        parser.error('--auto-notify exige apply --deploy')
     if os.geteuid() != 0:
         raise RuntimeError('Utiliser sudo autokom devsecops.')
     if args.action == 'apply':
         if not (PROD / 'scripts/runtime/autokom_deep_sast.py').is_file():
             raise RuntimeError('Mettre d’abord main à jour avec sudo autokom update.')
         install()
-        enable_production()
+        enable_production(auto_notify=args.auto_notify)
         if args.deploy:
             deploy_production()
             print('DeepSAST vérifié, Django et React publiés. Tester un nouveau run DevSecOps.')

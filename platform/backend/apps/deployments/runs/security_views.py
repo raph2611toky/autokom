@@ -14,20 +14,20 @@ from rest_framework.views import APIView
 
 from apps.accounts.user.permissions import IsClientUser
 from apps.deployments.runs.models import DeploymentRun
-from apps.deployments.runs.security_feedback import deliver, normalize_report
+from apps.deployments.runs.security_feedback import deliver, normalize_report, normalize_sca
 from apps.deployments.runs.views import accessible_run
 from helpers.errors import handle_error
 from helpers.responses import api_success
 
 
-def verify_report_signature(run_id, epoch, signature, payload):
+def verify_report_signature(run_id, epoch, signature, payload, kind='sast'):
     key = settings.AUTOKOM_RUNNER_SHARED_KEY
     if (len(key) < 32 or not re.fullmatch(r'[0-9]{1,12}', epoch or '')
             or abs(time.time() - int(epoch)) > 60
             or not re.fullmatch(r'[a-f0-9]{64}', signature or '')):
         raise PermissionDenied('Signature de rapport non valide.')
     digest = hashlib.sha256(payload).hexdigest()
-    proof = hmac.new(key.encode(), f'autokom-sast:v1:{epoch}:{run_id}:{digest}'.encode(),
+    proof = hmac.new(key.encode(), f'autokom-{kind}:v1:{epoch}:{run_id}:{digest}'.encode(),
                      hashlib.sha256).hexdigest()
     if not hmac.compare_digest(proof, signature):
         raise PermissionDenied('Signature de rapport non valide.')
@@ -41,10 +41,12 @@ class RunnerSASTReportAPIView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'runner_manifest'
 
+    kind = 'sast'
+
     def post(self, request, run_id):
         try:
             if not settings.AUTOKOM_SECURITY_REPORTS_ENABLED:
-                raise PermissionDenied('Collecte SAST indisponible.')
+                raise PermissionDenied('Collecte des rapports de sécurité indisponible.')
             size = request.META.get('CONTENT_LENGTH') or ''
             if not re.fullmatch(r'[0-9]{1,5}', size) or not 1 <= int(size) <= 16384:
                 raise PermissionDenied('Taille du résumé refusée.')
@@ -52,22 +54,27 @@ class RunnerSASTReportAPIView(APIView):
             if len(payload) != int(size):
                 raise PermissionDenied('Taille du résumé refusée.')
             verify_report_signature(run_id, request.headers.get('X-Autokom-Runner-Time'),
-                                    request.headers.get('X-Autokom-Runner-Signature'), payload)
+                                    request.headers.get('X-Autokom-Runner-Signature'), payload, self.kind)
             try:
-                report = normalize_report(json.loads(payload))
+                report = (normalize_report if self.kind == 'sast' else normalize_sca)(json.loads(payload))
             except (ValueError, RecursionError):
-                raise PermissionDenied('Résumé SAST illisible.') from None
+                raise PermissionDenied('Résumé de sécurité illisible.') from None
+            field = self.kind + '_report'
             with transaction.atomic():
                 run = DeploymentRun.objects.select_for_update().filter(
                     pk=run_id, status='RUNNING', mode_snapshot='DEVSECOPS', cancel_requested=False).first()
-                if run is None or (run.sast_report and run.sast_report != report):
+                if run is None or (getattr(run, field) and getattr(run, field) != report):
                     raise PermissionDenied('Rapport non autorisé pour ce run.')
-                if not run.sast_report:
-                    run.sast_report = report
-                    run.save(update_fields=['sast_report'])
-            return api_success({}, 'Résumé SAST enregistré.', 201)
+                if not getattr(run, field):
+                    setattr(run, field, report)
+                    run.save(update_fields=[field])
+            return api_success({}, 'Résumé de sécurité enregistré.', 201)
         except Exception as exc:
             return handle_error(exc, 'runner_sast_report')
+
+
+class RunnerSCAReportAPIView(RunnerSASTReportAPIView):
+    kind = 'sca'
 
 
 class SecurityFeedbackAPIView(APIView):

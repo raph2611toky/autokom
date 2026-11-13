@@ -724,6 +724,7 @@ Une phase Jenkins interrompue reste à terminer, même si le paquet est install�
     deep = subcommand('devsecops', help='Préparer et vérifier DeepSAST')
     deep.add_argument('action', choices=('check','apply'))
     deep.add_argument('--deploy', action='store_true', help='Publier Django et React avec ces changements')
+    deep.add_argument('--auto-notify', action='store_true', help='Activer les notifications de sécurité automatiques')
     up = subcommand('update', help='Mise à jour privée via code GitHub (fast-forward uniquement)',
                     epilog='Exemple : sudo autokom update')
     up.add_argument('--check', action='store_true', help='Vérifier localement sans accéder à GitHub')
@@ -877,7 +878,7 @@ def main(argv=None):
     if a.cmd == 'devsecops':
         from autokom_deepsast_admin import main as deep_main
         try:
-            return deep_main([a.action] + (['--deploy'] if a.deploy else []))
+            return deep_main([a.action] + (['--deploy'] if a.deploy else []) + (['--auto-notify'] if a.auto_notify else []))
         except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
             raise CLIError(str(exc) if type(exc) is RuntimeError else 'Installation DeepSAST non confirmée.') from None
     if a.cmd == 'update' and a.channel == 'preprod':

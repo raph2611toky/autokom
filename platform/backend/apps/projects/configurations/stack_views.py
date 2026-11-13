@@ -92,6 +92,38 @@ class StackLaunchAPIView(APIView):
             return handle_error(exc, 'stack_launch')
 
 
+def group_release_status(group, active_ids):
+    if group.status != 'SUCCEEDED' or not group.frontend_run_id:
+        return ''
+    members = {group.backend_run_id, group.frontend_run_id}
+    return 'ACTIVE' if members <= active_ids else 'SUPERSEDED' if members.isdisjoint(active_ids) else ''
+
+
+def active_group_runs(project):
+    from apps.deployments.sites.models import HostedApplication
+    return set(HostedApplication.objects.filter(environment__project=project, observed_state='RUNNING',
+        current_release__status='ACTIVE').values_list('current_release__source_deployment_id', flat=True))
+
+
+class StackRestoreAPIView(APIView):
+    permission_classes = [IsClientUser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'deploy'
+
+    def post(self, request, project_id, stack_run_id):
+        try:
+            from apps.deployments.runs.restore import queue_stack_restore
+            project = get_project(request.user, project_id, write=True)
+            source = StackDeployment.objects.filter(stack__project=project, pk=stack_run_id).first()
+            if source is None:
+                raise NotFound('Publication groupée introuvable.')
+            run, created = queue_stack_restore(source, request.user, request.headers.get('Idempotency-Key'))
+            return api_success({'deployment':{'id':str(run.pk)}, 'enqueued':created},
+                               'Restauration groupée mise en file.', 202)
+        except Exception as exc:
+            return handle_error(exc, 'stack_restore')
+
+
 class StackDeploymentDetailAPIView(APIView):
     parser_classes = [JSONParser]
     permission_classes = [IsClientUser]
@@ -105,6 +137,9 @@ class StackDeploymentDetailAPIView(APIView):
                 raise NotFound('Publication groupée introuvable.')
             return api_success({'deployment': {
                 'id': str(run.id), 'status': run.status, 'error_code': run.error_code,
+                'repository_name': project.repository_name,
+                'release_status': group_release_status(run, active_group_runs(project)),
+                'trigger_type': run.backend_run.trigger_type,
                 'created_at': run.created_at, 'finished_at': run.finished_at,
                 'backend': {'run_id': str(run.backend_run_id), 'environment_id': str(run.backend_run.environment_id),
                             'status': run.backend_run.status},
@@ -133,7 +168,7 @@ class StackPublicationHistoryAPIView(APIView):
             primary = Environment.objects.filter(project=project, slug='production').first()
             legacy = (DeploymentRun.objects.filter(environment=primary)
                       .filter(backend_stack_execution__isnull=True, frontend_stack_execution__isnull=True)
-                      .prefetch_related('stages')
+                      .prefetch_related('stages','releases','security_feedback')
                       .order_by('-created_at', '-id')) if primary else DeploymentRun.objects.none()
             groups = (StackDeployment.objects.filter(stack__project=project)
                       .select_related('backend_run', 'frontend_run')
@@ -148,6 +183,7 @@ class StackPublicationHistoryAPIView(APIView):
                           [(run.created_at, str(run.id), 'stack', run) for run in groups[:upper]])
             candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
             items = []
+            active_ids = active_group_runs(project)
             for _, _, kind, run in candidates[(page - 1) * size:upper]:
                 if kind == 'single':
                     item = dict(DeploymentRunSerializer(run).data)
@@ -156,9 +192,14 @@ class StackPublicationHistoryAPIView(APIView):
                     item = {'id': str(run.id), 'kind': 'stack', 'status': run.status,
                             'created_at': run.created_at, 'finished_at': run.finished_at,
                             'trigger_type': run.backend_run.trigger_type,
+                            'release_status': group_release_status(run, active_ids),
                             'backend_status': run.backend_run.status,
                             'frontend_status': run.frontend_run.status if run.frontend_run else 'PENDING',
-                            'error_code': run.error_code}
+                            'error_code': run.error_code,
+                            'security_warning': any(bool(r and ((r.sca_report or {}).get('count')
+                                or (r.sca_report or {}).get('secrets') or (r.sast_report or {}).get('count')
+                                or (r.sast_report or {}).get('ai', {}).get('status') == 'UNAVAILABLE'))
+                                for r in (run.backend_run,run.frontend_run))}
                 items.append(item)
             return api_success({'count': count, 'page': page, 'runs': items},
                                'Historique consolidé des publications.')

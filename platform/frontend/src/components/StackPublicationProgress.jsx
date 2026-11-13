@@ -5,6 +5,8 @@ import { deploymentsApi } from '../services/deploymentsApi.js'
 import { errorText } from '../services/projectWorkflow.js'
 import { cleanCustomerLog, phaseOrder, phaseTitles, publicationLabel } from '../services/deploymentPresentation.js'
 import { technicalTimeline, formatTechnicalFileLine } from '../services/deploymentLogTimeline.js'
+import RestorePublication from './RestorePublication.jsx'
+import { githubRepositoryUrl } from '../services/securityPresentation.js'
 import SecurityRunReport from './SecurityRunReport.jsx'
 import '../styles/stack-publication.css'
 
@@ -141,7 +143,7 @@ export default function StackPublicationProgress({ projectId, runId, navigate })
   // Only persisted stages show an execution status.
   const storedStages = [...(current?.stages || [])].sort((a,b) => (a.position || 0)-(b.position || 0))
   const stageMap = new Map(storedStages.map(stage=>[stage.stage_key,stage]))
-  const showPhase = key => !SECURITY_PHASES.has(key) || current?.mode_snapshot === 'DEVSECOPS' || stageMap.has(key)
+  const showPhase = key => group?.trigger_type === 'ROLLBACK' ? stageMap.has(key) : !SECURITY_PHASES.has(key) || current?.mode_snapshot === 'DEVSECOPS' || stageMap.has(key)
   const stages = [
     ...phaseOrder.map((key,index)=>stageMap.get(key) || {stage_key:key,position:index+1,status:'PENDING',notStarted:true}).filter(stage=>showPhase(stage.stage_key)),
     ...storedStages.filter(stage=>!phaseOrder.includes(stage.stage_key)),
@@ -163,6 +165,11 @@ export default function StackPublicationProgress({ projectId, runId, navigate })
       {loading && <p role="status"><LoaderCircle className="ak-spin" size={16}/> Chargement des étapes de publication…</p>}
       {error && <div className="feedback error ak-stack-dismissible" role="alert"><span>{error}</span><button className="ak-stack-dismiss" type="button" onClick={()=>setError('')} aria-label="Fermer l’erreur"><X size={16}/></button></div>}
       {group?.error_code && <p role="alert" className="ak-deployment-error">Publication interrompue : {group.error_code}. Les dernières versions saines sont conservées si la restauration a abouti.</p>}
+    </div>
+    <div className="ak-project-detail-actions">
+      {githubRepositoryUrl(group?.repository_name) && <a className="button-outline" href={githubRepositoryUrl(group.repository_name)} target="_blank" rel="noopener noreferrer">Voir le dépôt GitHub</a>}
+      {group?.release_status === 'ACTIVE' && <span className="ak-publication-pill state-success">Version actuellement en ligne</span>}
+      {group && <RestorePublication projectId={projectId} run={{...group,kind:'stack'}} navigate={navigate}/>}
     </div>
     <div className="ak-stack-service-tabs" role="tablist" aria-label="Service à consulter">
       {SIDES.map(side => <button key={side} role="tab" id={`ak-stack-tab-${side}`} aria-controls={`ak-stack-panel-${side}`} aria-selected={tab===side}
@@ -188,7 +195,7 @@ export default function StackPublicationProgress({ projectId, runId, navigate })
           <p className="ak-deployment-hint">Compilation indépendante du backend. L’activation du conteneur frontend attend que le backend privé soit prêt.</p>}
         {current?.error_message && <p role="alert" className="ak-deployment-error">{cleanCustomerLog(current.error_message) || 'Cette exécution a échoué. Consultez le journal.'}</p>}
       </section>
-      {current && child?.environment_id && <SecurityRunReport key={current.id} run={current} projectId={projectId} environmentId={child.environment_id}/>}
+      {current && child?.environment_id && <SecurityRunReport key={current.id} run={current} projectId={projectId} environmentId={child.environment_id} repository={group?.repository_name}/>}
       <section className="ak-workspace-sheet ak-run-detail-sheet">
         <div className="ak-workspace-sheet-heading ak-log-heading"><div><h2>Journal · {tab==='backend'?'Backend':'Frontend'}</h2><p className="ak-section-subtitle">Journal filtré par projet et sans secrets.</p></div>
           <div className="ak-log-mode-toggle" role="group" aria-label="Mode du journal">

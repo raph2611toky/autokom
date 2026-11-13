@@ -1,5 +1,5 @@
 from django.urls import path
-from apps.deployments.runs.views import (DeploymentPreviewAPIView, DeploymentEnqueueAPIView,
+from apps.deployments.runs.views import (DeploymentPreviewAPIView, DeploymentEnqueueAPIView, DeploymentRestoreAPIView,
     DeploymentListAPIView, DeploymentDetailAPIView, DeploymentLogsAPIView, DeploymentLogDownloadAPIView, DeploymentCancelAPIView,
     HighAvailabilityStatusAPIView, HighAvailabilityRequestAPIView, RuntimeLogsAPIView, DeploymentUsageAPIView)
 
@@ -11,6 +11,7 @@ urlpatterns = [
     path('<uuid:project_id>/environments/<uuid:environment_id>/deployments/<uuid:run_id>/', DeploymentDetailAPIView.as_view(), name='deployment-detail'),
     path('<uuid:project_id>/environments/<uuid:environment_id>/deployments/<uuid:run_id>/logs/', DeploymentLogsAPIView.as_view(), name='deployment-logs'),
     path('<uuid:project_id>/environments/<uuid:environment_id>/deployments/<uuid:run_id>/logs/download/', DeploymentLogDownloadAPIView.as_view(), name='deployment-log-download'),
+    path('<uuid:project_id>/environments/<uuid:environment_id>/deployments/<uuid:run_id>/restore/', DeploymentRestoreAPIView.as_view(), name='deployment-restore'),
     path('<uuid:project_id>/environments/<uuid:environment_id>/deployments/<uuid:run_id>/cancel/', DeploymentCancelAPIView.as_view(), name='deployment-cancel'),
     path('<uuid:project_id>/environments/<uuid:environment_id>/usage/', DeploymentUsageAPIView.as_view(), name='resource-usage'),
     path('<uuid:project_id>/environments/<uuid:environment_id>/runtime-logs/', RuntimeLogsAPIView.as_view(), name='runtime-logs'),

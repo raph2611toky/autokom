@@ -2,6 +2,7 @@
 import logging
 import re
 import time
+from datetime import timedelta
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
@@ -116,7 +117,7 @@ def ingest_console(run_id, text, offset, *, final=False):
 def dispatch_one(client):
     with transaction.atomic():
         run = (DeploymentRun.objects.select_for_update(skip_locked=True)
-               .filter(status=DeploymentRun.Status.QUEUED).order_by('created_at').first())
+               .filter(status=DeploymentRun.Status.QUEUED).exclude(trigger_type='ROLLBACK').order_by('created_at').first())
         if not run:
             return False
         if run.cancel_requested:
@@ -177,7 +178,6 @@ def dispatch_one(client):
 
 def poll_one(client, run_id):
     """Poll Jenkins, persist console markers, then reconcile Docker/DB safely."""
-    from datetime import timedelta
     now = timezone.now()
     with transaction.atomic():
         run = (DeploymentRun.objects.select_for_update(skip_locked=True)
@@ -306,7 +306,7 @@ def poll_one(client, run_id):
                 # The broker may still roll back at this point. Do NOT publish
                 # the release as ACTIVE in MySQL before this commit succeeds.
                 if not stack_execution:
-                    request_control('runtime.commit', {
+                    committed = request_control('runtime.commit', {
                         'run_id': str(run.pk),
                         'environment_id': str(run.environment_id),
                     }, timeout=25)
@@ -366,7 +366,7 @@ def poll_one(client, run_id):
                     # After runtime.commit, the broker can have deleted the old
                     # container. Never attempt a blind rollback on DB failure.
                     if not stack_execution:
-                        register_release(run)
+                        register_release(run, image_digest=committed.get('image_digest', ''))
                 except Exception as exc:
                     logger.error('Réconciliation release MySQL requise pour %s (%s)',
                                  run.pk, type(exc).__name__)
@@ -391,7 +391,7 @@ def poll_one(client, run_id):
         return False
 
 
-def _release_docker_and_proxy(run, *, stack=None, stack_role=None):
+def _release_docker_and_proxy(run, *, stack=None, stack_role=None, restore=None):
     """Runs only in background worker; every host operation goes through the socket."""
     from apps.deployments.runs.autokom_socket import request_control
     from apps.deployments.runs.runner_manifest import fetch_runner_manifest
@@ -418,7 +418,8 @@ def _release_docker_and_proxy(run, *, stack=None, stack_role=None):
             from apps.projects.configurations.stack_services import stack_domain_hostname
             stack_options['stack_backend_hostname'] = stack_domain_hostname(
                 stack.stack.backend_environment, backend_cfg)
-    result=request_control('runtime.deploy',{
+    result=request_control('runtime.restore' if restore else 'runtime.deploy',{
+        **({'restore': restore} if restore else {}),
         **stack_options,
         'run_id':str(run.pk),'environment_id':str(run.environment_id),
         'cpu_millicores':int(resource['cpu_millicores']),
@@ -487,7 +488,7 @@ def _release_docker_and_proxy(run, *, stack=None, stack_role=None):
     add_log(run,'AUTOKOM_LOG: Image Docker locale, endpoint privé et TLS contrôlés.')
 
 
-def register_release(run):
+def register_release(run, *, image_digest=''):
     from apps.deployments.releases.models import Release
     from apps.deployments.sites.models import HostedApplication
     from django.conf import settings
@@ -502,16 +503,35 @@ def register_release(run):
         image_ref = f'{prefix}:{run.id}'
         release = Release.objects.create(environment=run.environment, source_deployment=run,
               previous_release=previous, version=str(run.id), image_reference=image_ref,
+              image_digest=image_digest if re.fullmatch(r'sha256:[a-f0-9]{64}', image_digest or '') else '',
               status=Release.Status.ACTIVE, published_at=timezone.now())
         HostedApplication.objects.update_or_create(environment=run.environment, defaults={
             'current_release': release, 'observed_state': HostedApplication.Status.RUNNING,
             'health_status': 'HEALTHY', 'last_health_checked_at': timezone.now()})
 
+def reconcile_security_feedback():
+    if not settings.AUTOKOM_SECURITY_AUTO_NOTIFY or not settings.AUTOKOM_SECURITY_FEEDBACK_ENABLED:
+        return
+    from apps.deployments.runs.security_feedback import notify_terminal
+    ids = (DeploymentRun.objects.filter(mode_snapshot='DEVSECOPS', security_notifications_checked_at__isnull=True,
+              status__in=['SUCCEEDED','FAILED','BLOCKED']).exclude(trigger_type='ROLLBACK')
+           .exclude(sast_report={}, sca_report={}).order_by('finished_at').values_list('pk', flat=True)[:1])
+    for pk in list(ids):
+        if DeploymentRun.objects.filter(pk=pk, security_notifications_checked_at__isnull=True).update(
+                security_notifications_checked_at=timezone.now()):
+            try:
+                notify_terminal(DeploymentRun.objects.get(pk=pk))
+            except Exception as exc:
+                logger.warning('Notification de sécurité non confirmée, run=%s (%s)', pk, type(exc).__name__)
+
+
 def run_tick():
-    from datetime import timedelta
     from apps.deployments.runs.push_reconcile import reconcile_received_pushes, reconcile_branch_heads
     from apps.deployments.runs.stack_worker import reconcile_stack_deployments, reconcile_stack_pushes, reconcile_stack_heads
     reconcile_stack_deployments(limit=4)
+    from apps.deployments.runs.restore import flag_abandoned_stack_restores, process_restore, process_stack_restore
+    flag_abandoned_stack_restores()
+    restored = process_stack_restore() or process_restore()
     global _NEXT_GITHUB_HEAD_CHECK, _GITHUB_HEAD_CHECK_OFFSET, _STACK_HEAD_CHECK_OFFSET
     # Retry HMAC-verified events on each tick (database only).
     reconcile_received_pushes(limit=12)
@@ -522,6 +542,7 @@ def run_tick():
     busy = DeploymentRun.objects.filter(status__in=['QUEUED', 'RUNNING']).exists()
     if not busy:
         reconcile_stack_pushes(limit=3)
+        reconcile_security_feedback()
     if not busy and time.monotonic() >= _NEXT_GITHUB_HEAD_CHECK:
         _NEXT_GITHUB_HEAD_CHECK = time.monotonic() + 90
         try:
@@ -534,19 +555,23 @@ def run_tick():
     # A network failure after POST may have left an unknown Jenkins queue ID.
     # Never retry blindly (could create a second production deployment).
     DeploymentRun.objects.filter(status='RUNNING', external_run_id='',
-        started_at__lt=timezone.now()-timedelta(minutes=4)).update(
+        started_at__lt=timezone.now()-timedelta(minutes=4)).exclude(trigger_type='ROLLBACK').update(
         status='BLOCKED', finished_at=timezone.now(),
         error_message='Dispatch incertain : rapprochement manuel requis dans Jenkins.')
+    # Never re-execute an ambiguous restoration after a worker crash.
+    DeploymentRun.objects.filter(status='RUNNING', trigger_type='ROLLBACK',
+        started_at__lt=timezone.now()-timedelta(minutes=70)).update(status='BLOCKED',
+        error_message='AUTOKOM_RESTORE_RECONCILE_REQUIRED', finished_at=timezone.now())
     # A health endpoint does not prove Jenkins/socket are available. Retry on
     # subsequent ticks instead of crashing the management command every 5s.
     if not DeploymentRun.objects.filter(status__in=['QUEUED', 'RUNNING']).exists():
-        return False
+        return restored
     try:
         client = JenkinsClient()
     except (JenkinsUnavailable, AutokomControlUnavailable) as exc:
         logger.warning('Broker/Jenkins indisponible (%s). Nouvelle tentative au prochain tick.',
                        type(exc).__name__)
-        return False
+        return restored
     # Dispatch up to two jobs per tick so both members of a stack can build
     # concurrently in Jenkins (subject to its available agent executors).
     dispatched = False
@@ -559,4 +584,4 @@ def run_tick():
     for run_id in DeploymentRun.objects.filter(status='RUNNING').exclude(external_run_id='').order_by('created_at').values_list('pk', flat=True)[:20]:
         polled = poll_one(client, run_id) or polled
     reconcile_stack_deployments(limit=4)
-    return bool(dispatched or polled)
+    return bool(restored or dispatched or polled)

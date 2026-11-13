@@ -236,7 +236,7 @@ def queue_verified_push(event):
             idem = f'push:{event.id}:{env.id}'
             if DeploymentRun.objects.filter(idempotency_key=idem).exists():
                 continue
-            latest = DeploymentRun.objects.filter(environment=env).order_by('-created_at').first()
+            latest = DeploymentRun.objects.filter(environment=env).exclude(trigger_type='ROLLBACK').order_by('-created_at').first()
             if latest and latest.commit_sha.lower() == event.commit_sha.lower():
                 # A manual/polled deployment may already have processed this
                 # exact revision; do not create a second publication.

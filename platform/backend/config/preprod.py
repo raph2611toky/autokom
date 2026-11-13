@@ -40,6 +40,7 @@ MEDIA_ROOT = Path('/var/lib/autokom-preprod/media')
 AUTOKOM_PREPROD_EMAIL_ENABLED = env_bool('AUTOKOM_PREPROD_EMAIL_ENABLED', False)
 if not AUTOKOM_PREPROD_EMAIL_ENABLED:
     EMAIL_BACKEND = 'django.core.mail.backends.dummy.EmailBackend'
+    AUTOKOM_SECURITY_AUTO_NOTIFY = False
     AUTOKOM_SECURITY_EMAIL_RECIPIENTS = frozenset()
 elif EMAIL_BACKEND != 'django.core.mail.backends.smtp.EmailBackend' or not EMAIL_HOST:
     raise ImproperlyConfigured('SMTP de préproduction non configuré.')
