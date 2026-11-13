@@ -1,3 +1,4 @@
+import ResourceEstimate from '../components/ResourceEstimate.jsx'
 import { PLATFORM_PREPROD } from '../config/runtime.js'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, GitBranch, FolderGit2, Globe, Info, LoaderCircle, FileUp, Plus, Trash2, Save, CloudUpload, CheckCircle2, AlertTriangle, Layers3, X } from 'lucide-react'
@@ -286,6 +287,8 @@ export default function StackDeploy({navigate,projectId}) {
       <p className="ak-stack-subtle"><Info size={15}/> Le navigateur peut accéder à l'API par /__autokom_backend/ sur le domaine frontend. Les appels serveur utilisent BACKEND_INTERNAL_URL sur le réseau Docker privé. Les secrets backend ne sont jamais incorporés au build frontend.</p>
       <p className="ak-stack-subtle"><Layers3 size={15}/> Offre d’hébergement commune : ressources du projet existant, réparties entre frontend et backend.</p>
       <p className="ak-stack-subtle"><AlertTriangle size={15}/> Les deux services partagent les ressources du plan actif. Le runtime refusera de réserver plus que les quotas autorisés.</p>
+      <ResourceEstimate components={[{label:'Frontend', profile:frontend.profile, analysis:probe.frontend.analysis},
+        {label:'Backend', profile:backend.profile, analysis:probe.backend.analysis}]} highAvailability={highAvailability}/>
       <div className="ak-stack-footer"><button type="button" className="button-outline" disabled={busy} onClick={()=>setStep(0)}><ArrowLeft size={15}/> Modifier</button>
         <button type="button" className="button-primary" disabled={busy||!ready} onClick={publish}>{busy?<LoaderCircle size={16} className="ak-spin"/>:<CloudUpload size={16}/>} Enregistrer et déployer</button></div>
     </section>}

@@ -168,6 +168,28 @@ def init():
     })
 
 
+def probe_https():
+    from autokom_nginx_bind_policy import ingress_probe_address
+    import json
+    import time
+    address = ingress_probe_address()
+    for attempt in range(6):
+        result = subprocess.run(['curl','-fsS','--noproxy','*','--max-time','5','--resolve',
+            f'{HOST}:443:{address}', f'https://{HOST}/api/health/'], capture_output=True, text=True)
+        if result.returncode == 0:
+            try:
+                body = json.loads(result.stdout)
+                if body.get('data', {}).get('status') == 'ok':
+                    print('Préproduction · SNI, certificat et API HTTPS vérifiés.')
+                    return
+            except (ValueError, AttributeError):
+                pass
+        if attempt < 5:
+            time.sleep(1)
+    raise RuntimeError('Préproduction : échec du test HTTPS sur l’adresse d’ingress (' + address +
+                       '). Vérifier Nginx et le journal autokom-pre app logs.')
+
+
 def publish_dns_and_tls():
     from autokom_dns_cloudflare import Cloudflare
     from autokom_nginx_bind_policy import https_listens
@@ -415,6 +437,8 @@ if __name__ == '__main__':
             init()
         elif action == 'busy':
             run_manage(['shell', '-c', 'from apps.deployments.runs.models import DeploymentRun, StackDeployment; import sys; sys.exit(5 if DeploymentRun.objects.filter(status__in=["QUEUED","RUNNING","PREPARED"]).exists() or StackDeployment.objects.filter(status__in=["QUEUED","PREPARING","ACTIVATING"]).exists() else 0)'])
+        elif action == 'probe-https':
+            probe_https()
         elif action == 'publish':
             publish_dns_and_tls()
         elif action == 'assets':

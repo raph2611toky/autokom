@@ -63,8 +63,8 @@ def _apply():
             raise RuntimeError('Mise à jour de master incomplète.')
     if not (ROOT/'scripts/lib/autokom_preprod_admin.py').is_file():
         raise RuntimeError('master ne contient pas encore ce correctif. Publier master avant update preprod.')
-    manage('deploy')
     install_wrapper()
+    manage('deploy')
     from autokom_deepsast_admin import install
     install()
     result = subprocess.run(['/usr/bin/python3',str(ROOT/'scripts/preprod/configure.py'),'worker-configured'],timeout=20)

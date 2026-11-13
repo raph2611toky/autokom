@@ -17,12 +17,13 @@ export const phaseTitles = Object.freeze({
   dast: 'Contrôle dynamique HTTP',
   source: 'Récupération du projet',
   sast: 'Analyse du code',
+  deepsast: 'Analyse IA · DeepSAST',
   sca: 'Contrôles de sécurité',
   build: 'Préparation de l’application',
   release: 'Publication',
   health: 'Vérification du site',
 })
-export const phaseOrder = ['source','sast','sca','build','release','dast','health']
+export const phaseOrder = ['source','sast','deepsast','sca','build','release','dast','health']
 export function publicationLabel(status) {
   return publicationStatus[String(status || '').toUpperCase()] || ['À vérifier', 'muted']
 }

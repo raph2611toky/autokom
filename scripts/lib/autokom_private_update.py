@@ -9,6 +9,7 @@ Never store a token in this repository, the remote URL, or Git CLI arguments.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -274,7 +275,8 @@ def _authorize(client_id):
         raise UpdateError(f"Échec d'autorisation GitHub ({error})")
 
 
-def _fetch_with_memory_token(root, branch, token):
+@contextmanager
+def _git_auth_environment(token):
     with tempfile.TemporaryDirectory(prefix="autokom-git-") as folder:
         os.chmod(folder, 0o700)
         helper = Path(folder) / "askpass.sh"
@@ -295,12 +297,19 @@ def _fetch_with_memory_token(root, branch, token):
         env["GIT_ASKPASS"] = str(helper)
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["AUTOKOM_GIT_TOKEN"] = token
+        try:
+            yield env
+        finally:
+            env.pop("AUTOKOM_GIT_TOKEN", None)
+
+
+def _fetch_with_memory_token(root, branch, token):
+    with _git_auth_environment(token) as env:
         _run(
             ("git", "-c", "credential.helper=", "-c", "credential.useHttpPath=true",
              "fetch", "--no-tags", "origin", f"refs/heads/{branch}"),
             root, env=env, timeout=180,
         )
-        env.pop("AUTOKOM_GIT_TOKEN", None)
 
 
 def _print_git_changes(root, old, new):

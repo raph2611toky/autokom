@@ -3,7 +3,7 @@ import { deploymentsApi } from '../services/deploymentsApi.js'
 import { errorText } from '../services/projectWorkflow.js'
 
 const labels = {
-  COMPLETE: 'Analyse locale terminée',
+  COMPLETE: 'Inférence locale terminée',
   UNAVAILABLE: 'Modèle local indisponible',
   DISABLED: 'Analyse IA non configurée',
   NO_CANDIDATE: 'Aucun extrait compatible à analyser',
@@ -30,7 +30,8 @@ export default function SecurityRunReport({ run, projectId, environmentId }) {
   return <section className="ak-workspace-sheet ak-run-detail-sheet" aria-labelledby="run-sast-title">
     <div className="ak-workspace-sheet-heading"><div><h2 id="run-sast-title">Rapport SAST</h2>
       <p>{report.count} résultat(s) Semgrep · DeepSAST : {labels[report.ai?.status] || 'État inconnu'}</p>
-      <p>{report.ai?.analyzed || 0} emplacement(s) analysé(s) par le modèle. Le résultat IA est consultatif.</p>
+      {report.ai?.status === 'COMPLETE' && <p><strong>{report.ai.analyzed}</strong> extrait(s) analysé(s) par le modèle local · {report.ai.scope === 'SOURCE' ? 'Échantillon de la source' : 'Emplacements signalés par Semgrep'}</p>}
+      <p>Résultat consultatif. Semgrep conserve la décision sur le code.</p>
     </div></div>
     {Object.entries(report.rules || {}).length > 0 && <details><summary>Règles Semgrep signalées</summary>
       <ul>{Object.entries(report.rules).map(([rule, count]) => <li key={rule}>{rule} · {count}</li>)}</ul></details>}

@@ -319,9 +319,20 @@ def scan(doc,kind):
                     enabled = (shared / 'ready').is_file()
                     report, exit_code = collect(path, rules, safe_env,
                         str(shared / 'venv/bin/python') if enabled else None,
-                        str(shared / 'model') if enabled else None)
+                        str(shared / 'model') if enabled else None,
+                        on_inference=lambda: stage('deepsast', 'RUNNING'))
                 except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
                     fail('Le contrôle Semgrep n’a pas produit de rapport valide.')
+                ai = report['ai']
+                if ai['status'] == 'COMPLETE':
+                    print('AUTOKOM_LOG: DeepSAST · inférence locale terminée · %d extrait(s).' % ai['analyzed'], flush=True)
+                    stage('deepsast', 'SUCCESS')
+                elif ai['status'] == 'UNAVAILABLE':
+                    print('AUTOKOM_LOG: DeepSAST · inférence indisponible. Vérifier autokom devsecops check.', flush=True)
+                    stage('deepsast', 'FAILED')
+                else:
+                    print('AUTOKOM_LOG: DeepSAST · aucun extrait compatible ou modèle non installé.', flush=True)
+                    stage('deepsast', 'SKIPPED')
                 try:
                     base = os.environ['AUTOKOM_API_BASE'].rstrip('/')
                     rid = doc['run_id']

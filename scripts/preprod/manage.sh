@@ -84,11 +84,10 @@ systemctl daemon-reload
 systemctl enable autokom-preprod-web.service autokom-preprod-broker.service
 systemctl restart autokom-preprod-web.service autokom-preprod-broker.service
 for i in {1..15}; do
-    if curl -fsS --max-time 3 -H 'Host: pre.auto.ikom.mg' -H 'X-Forwarded-Proto: https'         http://127.0.0.1:8272/api/health/ >/dev/null; then break; fi
+    if curl -fs --max-time 3 -H 'Host: pre.auto.ikom.mg' -H 'X-Forwarded-Proto: https'         http://127.0.0.1:8272/api/health/ >/dev/null; then break; fi
     [[ "$i" -lt 15 ]] || { echo 'Gunicorn ou la base de préproduction ne répond pas.' >&2; exit 2; }
     sleep 1
 done
 python3 "$repo/scripts/preprod/configure.py" publish
-curl -fsS --noproxy '*' --max-time 15 --resolve 'pre.auto.ikom.mg:443:127.0.0.1' https://pre.auto.ikom.mg/api/health/
-printf '\n'
+python3 "$repo/scripts/preprod/configure.py" probe-https
 echo 'Console préproduction publiée. Activer le worker seulement après préparation du job Jenkins dédié.'

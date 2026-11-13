@@ -12,7 +12,7 @@ _TIMESTAMP = r'(?:\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+|\[[0-9TZ: .+\-]{12,45}\]\s+)?'
 _MARKER = re.compile(
     r'^' + _TIMESTAMP +
     r'(AUTOKOM_LOG:[^\r\n]{1,700}|AUTOKOM_STAGE:'
-    r'(?:source|sast|sca|build|release|dast|health):'
+    r'(?:source|sast|deepsast|sca|build|release|dast|health):'
     r'(?:RUNNING|SUCCESS|FAILED|SKIPPED))$'
 )
 

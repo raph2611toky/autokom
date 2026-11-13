@@ -5,10 +5,12 @@ import { deploymentsApi } from '../services/deploymentsApi.js'
 import { errorText } from '../services/projectWorkflow.js'
 import { cleanCustomerLog, phaseOrder, phaseTitles, publicationLabel } from '../services/deploymentPresentation.js'
 import { technicalTimeline, formatTechnicalFileLine } from '../services/deploymentLogTimeline.js'
+import SecurityRunReport from './SecurityRunReport.jsx'
 import '../styles/stack-publication.css'
 
 const SIDES = ['backend', 'frontend']
 const ACTIVE = new Set(['QUEUED', 'PREPARING', 'ACTIVATING'])
+const SECURITY_PHASES = new Set(['sast', 'deepsast', 'sca', 'dast'])
 const emptyModes = () => ({ simple: [], technical: [] })
 const emptyLogs = () => ({ backend: emptyModes(), frontend: emptyModes() })
 const emptyCursors = () => ({ backend: {simple:0,technical:0}, frontend: {simple:0,technical:0} })
@@ -135,12 +137,13 @@ export default function StackPublicationProgress({ projectId, runId, navigate })
   const child = group?.[tab]
   const selectedLogs = logs[tab]?.[mode] || []
   const lines = technicalTimeline(selectedLogs).filter(item => filter==='all' || item.stage_key===filter)
-  // Keep the six approved pipeline phases visible even before a child run exists.
-  // Only stages returned by Django show an execution status; others are marked 'À venir'.
+  // Show security phases only for runs that request enhanced security.
+  // Only persisted stages show an execution status.
   const storedStages = [...(current?.stages || [])].sort((a,b) => (a.position || 0)-(b.position || 0))
   const stageMap = new Map(storedStages.map(stage=>[stage.stage_key,stage]))
+  const showPhase = key => !SECURITY_PHASES.has(key) || current?.mode_snapshot === 'DEVSECOPS' || stageMap.has(key)
   const stages = [
-    ...phaseOrder.map((key,index)=>stageMap.get(key) || {stage_key:key,position:index+1,status:'PENDING',notStarted:true}),
+    ...phaseOrder.map((key,index)=>stageMap.get(key) || {stage_key:key,position:index+1,status:'PENDING',notStarted:true}).filter(stage=>showPhase(stage.stage_key)),
     ...storedStages.filter(stage=>!phaseOrder.includes(stage.stage_key)),
   ]
   const changeMode = next => {if (next!==mode){following.current=true;setFilter('all');setMode(next)}}
@@ -185,6 +188,7 @@ export default function StackPublicationProgress({ projectId, runId, navigate })
           <p className="ak-deployment-hint">Compilation indépendante du backend. L’activation du conteneur frontend attend que le backend privé soit prêt.</p>}
         {current?.error_message && <p role="alert" className="ak-deployment-error">{cleanCustomerLog(current.error_message) || 'Cette exécution a échoué. Consultez le journal.'}</p>}
       </section>
+      {current && child?.environment_id && <SecurityRunReport key={current.id} run={current} projectId={projectId} environmentId={child.environment_id}/>}
       <section className="ak-workspace-sheet ak-run-detail-sheet">
         <div className="ak-workspace-sheet-heading ak-log-heading"><div><h2>Journal · {tab==='backend'?'Backend':'Frontend'}</h2><p className="ak-section-subtitle">Journal filtré par projet et sans secrets.</p></div>
           <div className="ak-log-mode-toggle" role="group" aria-label="Mode du journal">
@@ -193,7 +197,7 @@ export default function StackPublicationProgress({ projectId, runId, navigate })
           </div>
         </div>
         <div className="ak-log-filter"><label htmlFor="ak-stack-stage-filter">Filtrer par étape</label>
-          <select id="ak-stack-stage-filter" value={filter} onChange={event=>setFilter(event.target.value)}><option value="all">Toutes les étapes</option>{phaseOrder.map(key=><option key={key} value={key}>{phaseTitles[key]}</option>)}</select>
+          <select id="ak-stack-stage-filter" value={filter} onChange={event=>setFilter(event.target.value)}><option value="all">Toutes les étapes</option>{stages.map(({stage_key:key,name})=><option key={key} value={key}>{phaseTitles[key] || name}</option>)}</select>
           {downloadHref && <a href={downloadHref} download className="button-outline ak-log-download"><FileText size={15}/> Télécharger .log</a>}
         </div>
         <div ref={viewport} className={`ak-log-console ${mode==='technical'?'ak-log-console-detailed ak-log-file':''}`} role="log" aria-live="off" aria-label={`Journal ${tab}`} tabIndex={mode==='technical'?0:undefined}

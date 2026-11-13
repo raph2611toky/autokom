@@ -18,7 +18,7 @@ def summarize(rows):
     return dict(sorted(rules.items(), key=lambda kv: (-kv[1], kv[0]))[:20])
 
 
-def collect(path, rules, env, ai_python, ai_model, *, run=subprocess.run):
+def collect(path, rules, env, ai_python, ai_model, *, run=subprocess.run, on_inference=lambda: None):
     with tempfile.TemporaryDirectory(prefix='autokom-sast-') as folder:
         output = Path(folder) / 'semgrep.json'
         env = {**env, 'HOME': folder, 'XDG_CACHE_HOME': folder, 'XDG_CONFIG_HOME': folder}
@@ -34,6 +34,7 @@ def collect(path, rules, env, ai_python, ai_model, *, run=subprocess.run):
         raise ValueError('Résultat Semgrep incohérent.')
     ai = {'status': 'DISABLED', 'analyzed': 0}
     if ai_python and ai_model:
+        on_inference()
         # Only location coordinates pass to the local inference process.
         locations = [{'path': item.get('path'), 'start': {'line': (item.get('start') or {}).get('line')},
                       'end': {'line': (item.get('end') or {}).get('line')}} for item in rows[:24]]

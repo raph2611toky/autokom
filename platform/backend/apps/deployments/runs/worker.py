@@ -33,7 +33,7 @@ def add_customer_trace(run, stage, channel, message):
     repository stdout, subprocess command lines, variables or user-supplied
     exception strings here. The existing summary stream remains unchanged.
     """
-    if stage not in {'source', 'sast', 'sca', 'build', 'release', 'dast', 'health'}:
+    if stage not in {'source', 'sast', 'deepsast', 'sca', 'build', 'release', 'dast', 'health'}:
         raise ValueError('Stage de trace invalide.')
     if channel not in {'pipeline', 'broker', 'docker', 'application'}:
         raise ValueError('Origine de trace invalide.')
@@ -59,7 +59,7 @@ def add_log(run, line, level='INFO'):
         DeploymentLogEntry.objects.create(
             deployment=run, sequence=last + 1, level=level, message=line)
         stage = re.search(
-            r'^AUTOKOM_STAGE:(source|sast|sca|build|release|dast|health):'
+            r'^AUTOKOM_STAGE:(source|sast|deepsast|sca|build|release|dast|health):'
             r'(RUNNING|SUCCESS|FAILED|SKIPPED)$', line)
         if stage:
             key, status = stage.groups()

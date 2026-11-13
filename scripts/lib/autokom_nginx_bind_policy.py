@@ -43,6 +43,12 @@ def addresses(*, state_path=None):
         raise BindPolicyError('État HTTPS invalide : réparation manuelle requise') from exc
 
 
+def ingress_probe_address():
+    """GCP public HTTPS terminates on the ingress NIC, not the loopback vhost."""
+    configured = addresses()
+    return configured[0] if configured else '127.0.0.1'
+
+
 def https_listens(*, indent='    ', flags='ssl', state_path=None):
     ips = addresses(state_path=state_path)
     if not ips:

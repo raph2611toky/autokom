@@ -1,5 +1,6 @@
 """Install and verify DeepSAST on the primary host, outside both checkouts."""
 import argparse
+from contextlib import nullcontext
 import fcntl
 import hashlib
 import os
@@ -13,6 +14,7 @@ PROD = Path('/opt/autokom/source')
 STAGE = Path('/opt/autokom-preprod/source')
 REL = Path('models/deep_sast_model_3_Hbol')
 SHA = 'befaff21716f1d4a6f06298ef97c54116538a6c16483795b62544e3eaab82062'
+WEIGHTS = 'model.safetensors'
 NAMES = ('config.json', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json',
          'vocab.txt', 'model.safetensors')
 
@@ -21,12 +23,54 @@ def run(args, **kw):
     return subprocess.run(args, check=True, **kw)
 
 
+def ensure_git_lfs():
+    if shutil.which('git-lfs'):
+        return
+    if not shutil.which('apt-get'):
+        raise RuntimeError('Git LFS absent : installer git-lfs puis relancer.')
+    print('DeepSAST · installation de Git LFS depuis les dépôts système.', flush=True)
+    env = {**os.environ, 'DEBIAN_FRONTEND': 'noninteractive'}
+    try:
+        run(['apt-get','update'], timeout=240, env=env)
+        run(['apt-get','install','-y','--no-install-recommends','git-lfs'], timeout=360, env=env)
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError('Installation de git-lfs échouée. Vérifier les dépôts APT.') from None
+    if not shutil.which('git-lfs'):
+        raise RuntimeError('Git LFS installé mais absent du PATH de la CLI.')
+
+
 def check_model(source):
     for name in NAMES:
         if (source / name).is_symlink() or not (source / name).is_file():
             return False
     with (source / 'model.safetensors').open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest() == SHA
+
+
+def fetch_weights(repo, target, cache):
+    from autokom_private_update import _git_auth_environment, _gh_token_for_user, _gh_user
+    ensure_git_lfs()
+    name = str(REL / WEIGHTS)
+    rev = 'HEAD:' + name
+    git = ['git','-C',str(repo)]
+    print('DeepSAST · récupération des poids Git LFS (438 Mo).', flush=True)
+    try:
+        size = int(run(git + ['cat-file','-s',rev], capture_output=True, timeout=20).stdout)
+        if not 0 < size <= 1024:
+            raise RuntimeError('Le commit ne contient pas le pointeur LFS attendu.')
+        pointer = run(git + ['cat-file','blob',rev], capture_output=True, timeout=20).stdout
+        if f'oid sha256:{SHA}'.encode() not in pointer.splitlines():
+            raise RuntimeError('Le pointeur LFS ne correspond pas au modèle de référence.')
+        user = _gh_user()
+        auth = _git_auth_environment(_gh_token_for_user(user)) if user else nullcontext({**os.environ, 'GIT_TERMINAL_PROMPT':'0'})
+        with auth as env, target.open('xb') as stream:
+            opts = ['-c','credential.helper='] if user else []
+            env.pop('GIT_LFS_SKIP_SMUDGE', None)
+            run(git + opts + ['-c','lfs.activitytimeout=120','-c','lfs.storage='+str(cache),
+                              '-c','lfs.fetchinclude='+name,'-c','lfs.fetchexclude=',
+                              'lfs','smudge',name], input=pointer, stdout=stream, env=env, timeout=1800)
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError('Téléchargement LFS échoué. Vérifier le réseau et les droits sur origin.') from None
 
 
 def probe(base=BASE):
@@ -52,21 +96,21 @@ def install():
         if (BASE / 'ready').is_file():
             probe()
             return
-        repo = PROD if (PROD / REL / 'config.json').is_file() else STAGE
-        if not check_model(repo / REL):
-            run(['git','-C',str(repo),'lfs','install','--local'], timeout=45)
-            run(['git','-C',str(repo),'-c','lfs.activitytimeout=120','lfs','pull',
-                 '--include='+str(REL / 'model.safetensors'),'--exclude='], timeout=1800)
-        if not check_model(repo / REL):
-            raise RuntimeError('Poids LFS absents ou SHA‑256 différent.')
-        with tempfile.TemporaryDirectory(prefix='model-', dir=BASE) as work:
-            target = Path(work) / 'model'
-            target.mkdir(mode=0o755)
-            target.chmod(0o755)
-            for name in NAMES:
-                shutil.copyfile(repo / REL / name, target / name)
-                (target / name).chmod(0o644)
-            if not (BASE / 'model').exists():
+        if not (BASE / 'model').exists():
+            repo = PROD if (PROD / REL / 'config.json').is_file() else STAGE
+            local_model = check_model(repo / REL)
+            with tempfile.TemporaryDirectory(prefix='model-', dir=BASE) as work:
+                target = Path(work) / 'model'
+                target.mkdir(mode=0o755)
+                target.chmod(0o755)
+                for name in NAMES:
+                    if name == WEIGHTS and not local_model:
+                        fetch_weights(repo, target / name, Path(work) / 'lfs')
+                    else:
+                        shutil.copyfile(repo / REL / name, target / name)
+                    (target / name).chmod(0o644)
+                if not check_model(target):
+                    raise RuntimeError('Poids LFS absents ou SHA‑256 différent.')
                 target.rename(BASE / 'model')
         if not check_model(BASE / 'model'):
             raise RuntimeError('Modèle installé différent de la référence.')
@@ -78,7 +122,11 @@ def install():
             run([pip,'install','transformers==4.57.1','safetensors>=0.4.5,<1'], timeout=900)
         finally:
             os.umask(previous_umask)
-        probe()
+        print('DeepSAST · test d’inférence CPU sous autokom-builder.', flush=True)
+        try:
+            probe()
+        except (OSError, subprocess.SubprocessError):
+            raise RuntimeError('Le test d’inférence DeepSAST a échoué sous autokom-builder.') from None
         with (BASE / 'ready').open('x') as stream:
             stream.write(SHA+'\n')
         (BASE / 'ready').chmod(0o644)

@@ -65,6 +65,7 @@ export function detectSource(files, packageJson = null) {
   const warnings = confidence === 'low' ? ['Structure non reconnue : seuls les profils approuvés sont acceptés.'] : []
   return { framework, runtime, applicationType, hasNpmLockfile: has('package-lock.json'), hasDockerfile: has('dockerfile'),
     hasRequirements: has('requirements.txt'), hasComposerLock: has('composer.lock'), isVite, confidence, build, resources,
+    productionDependencyCount: Object.keys(packageJson?.dependencies || {}).length,
     available: confidence !== 'low', explanation: 'Détection indicative. Le runner vérifie les fichiers, dépendances et points d’entrée.', warnings, applications: [] }
 }
 

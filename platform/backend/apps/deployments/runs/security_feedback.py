@@ -20,9 +20,10 @@ def normalize_report(value):
     try:
         count, rules, ai = value['count'], value['rules'], value['ai']
         status, analyzed, classes = ai['status'], ai['analyzed'], ai.get('classes', {})
-        if (type(count) is not int or not 0 <= count <= 50000 or not isinstance(rules, dict)
+        scope = ai.get('scope', 'SEMGREP')
+        if (scope not in ('SEMGREP', 'SOURCE') or type(count) is not int or not 0 <= count <= 50000 or not isinstance(rules, dict)
                 or len(rules) > 20 or not isinstance(status, str) or status not in AI_STATES
-                or type(analyzed) is not int or not 0 <= analyzed <= min(24, count)
+                or type(analyzed) is not int or not 0 <= analyzed <= (24 if scope == 'SOURCE' else min(24, count))
                 or not isinstance(classes, dict) or len(classes) > 24):
             raise ValueError
         if any(not RULE.fullmatch(k) or type(n) is not int or not 1 <= n <= count for k, n in rules.items()):
@@ -36,7 +37,10 @@ def normalize_report(value):
             raise ValueError
     except (KeyError, AttributeError, TypeError, ValueError):
         raise ValidationError('Format du résumé SAST invalide.') from None
-    return {'count': count, 'rules': rules, 'ai': {'status': status, 'analyzed': analyzed, 'classes': classes}}
+    normalized = {'status': status, 'analyzed': analyzed, 'classes': classes}
+    if scope == 'SOURCE':
+        normalized['scope'] = scope
+    return {'count': count, 'rules': rules, 'ai': normalized}
 
 
 def message(run, report):

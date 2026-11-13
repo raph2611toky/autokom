@@ -27,6 +27,14 @@ class SecurityFeedbackTests(SimpleTestCase):
         self.assertNotIn('do not disclose', body)
         self.assertNotIn('approved.rule', body)
 
+    def test_clean_semgrep_run_can_store_independent_inference(self):
+        value = {'count': 0, 'rules': {}, 'ai': {
+            'status': 'COMPLETE', 'analyzed': 2, 'classes': {'1': 2}, 'scope': 'SOURCE'}}
+        self.assertEqual(normalize_report(value), value)
+        value['ai']['scope'] = 'SEMGREP'
+        with self.assertRaises(ValidationError):
+            normalize_report(value)
+
     def test_reject_bad_counts_and_bad_rule(self):
         for value in ({**REPORT, 'count': 0}, {**REPORT, 'rules': {'abc\nxyz': 1}},
                       {**REPORT, 'ai': {'status': 'COMPLETE', 'analyzed': 0}}):
