@@ -357,6 +357,18 @@ def main(argv=None):
     apps.add_argument('--diagnose', action='store_true',
                       help='Analyser les publications locales exclues du delivery GCP (sudo)')
     apps.add_argument('--worker', default=None, help='Limiter la vue à un worker du MIG')
+    app = commands.add_parser('app', help='Trafic et journaux HTTP d’un domaine sur ses réplicas GCP')
+    app.add_argument('hostname')
+    app_commands = app.add_subparsers(dest='app_action', required=True)
+    follow = app_commands.add_parser('follow', help='Répartition par worker en temps réel')
+    follow.add_argument('--seconds', type=int, default=300, help='Durée maximale, de 1 à 900 secondes')
+    follow.add_argument('--requests', action='store_true', help='Afficher aussi chaque requête HTTP')
+    follow.add_argument('--tag', help='Isoler un benchmark marqué akbench-…')
+    access = app_commands.add_parser('logs', help='Historique des requêtes HTTP enregistrées par les workers')
+    retained = access.add_mutually_exclusive_group()
+    retained.add_argument('--lines', type=int, default=200, help='Nombre de lignes par worker, de 1 à 5000')
+    retained.add_argument('--all', action='store_true', help='Journaux courants et rotations encore présentes')
+    access.add_argument('--tag', help='Filtrer les lignes retenues par marqueur de benchmark')
     args = p.parse_args(argv)
     if args.action == 'list':
         return cmd_list(args)
@@ -377,6 +389,9 @@ def main(argv=None):
         return upgrade_run(apply=args.apply)
     if args.action == 'apps':
         return cmd_apps(args)
+    if args.action == 'app':
+        from autokom_ha_traffic import run
+        return run(args)
     return 2
 
 if __name__ == '__main__':

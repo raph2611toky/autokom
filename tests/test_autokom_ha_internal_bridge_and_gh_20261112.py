@@ -92,7 +92,7 @@ class DockerBridgeTests(TestCase):
             config = worker.render_nginx([APP])
         self.assertIn('proxy_pass http://172.18.0.2:8080;', config)
         self.assertNotIn('35309', config)
-        self.assertIn('location ^~ /__autokom_health/ { proxy_pass http://127.0.0.1:18080; }', config)
+        self.assertIn('location ^~ /__autokom_health/ { access_log off; proxy_pass http://127.0.0.1:18080; }', config)
 
     def test_health_service_targets_container_ip(self):
         with TemporaryDirectory() as directory:

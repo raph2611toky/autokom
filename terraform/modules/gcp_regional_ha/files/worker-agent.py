@@ -8,6 +8,7 @@ loopback port (which Docker may silently omit for --internal bridges).
 """
 from __future__ import annotations
 
+from hashlib import sha256
 import ipaddress
 import json
 import os
@@ -24,6 +25,7 @@ CONFIG = Path('/etc/autokom-ha/worker.json')
 OBSERVED = Path('/var/lib/autokom-ha/observed.json')
 ROUTES = Path('/etc/autokom-ha/routed.json')
 NGINX = Path('/etc/nginx/conf.d/autokom-ha-apps.conf')
+HTTP_LOG_DIR = Path('/var/log/nginx')
 METADATA = 'http://169.254.169.254/computeMetadata/v1/'
 UUID = re.compile(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\Z')
 HOST = re.compile(r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\Z')
@@ -231,15 +233,22 @@ def _atomic_write(dest, content, mode=0o644):
 
 
 def render_nginx(apps):
-    lines = ['# AUTOKOM HA - generated only from validated private GCS desired state.']
+    lines = ['# AUTOKOM HA - generated only from validated private GCS desired state.',
+             'map $http_x_autokom_bench $autokom_ha_bench {',
+             '    default "";',
+             '    "~^akbench-[a-z0-9-]{1,40}$" $http_x_autokom_bench;',
+             '}',
+             """log_format autokom_ha_request escape=json '{"time":"$time_iso8601","method":"$request_method","status":"$status","seconds":"$request_time","bytes":"$body_bytes_sent","tag":"$autokom_ha_bench"}';"""]
     for app in apps:
         address = container_ipv4(app)
         for host in app['hosts']:
+            log_id = sha256(host.encode('ascii')).hexdigest()
             lines += ['server {', '    listen 8080;', '    server_name ' + host + ';',
+                      f'    access_log {HTTP_LOG_DIR}/autokom-ha-{log_id}.log autokom_ha_request;',
                       '    client_max_body_size 25m;',
                       # Keep the private health route authoritative even when
                       # the request Host selects this application's vhost.
-                      '    location ^~ /__autokom_health/ { proxy_pass http://127.0.0.1:18080; }',
+                      '    location ^~ /__autokom_health/ { access_log off; proxy_pass http://127.0.0.1:18080; }',
                       '    location / {',
                       f"        proxy_pass http://{address}:{app['internal_port']};",
                       '        proxy_http_version 1.1;', '        proxy_set_header Host $host;',

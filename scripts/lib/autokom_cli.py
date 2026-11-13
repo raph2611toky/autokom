@@ -716,7 +716,7 @@ Une phase Jenkins interrompue reste à terminer, même si le paquet est install�
             fp.add_argument('--lines',type=int,default=80,help='Nombre de lignes du journal (1 à 1000)')
             fp.add_argument('-f','--follow',action='store_true',help='Suivre le journal en temps réel')
             fp.add_argument('--since',default=None,help='Période journalctl / Docker, ex. « 1 hour ago »')
-    subcommand('iac', help='Infrastructure as Code : autokom iac ha [list|logs|monitor|doctor|delivery|rights]')
+    subcommand('iac', help='Infrastructure as Code : autokom iac ha [list|apps|app|logs|monitor|doctor|delivery|rights]')
     subcommand('dns', help='BIND9, Cloudflare et DNS')
     subcommand('runtime', help='Runtime Docker/Jenkins/socket et environnement')
     subcommand('app', help='Service Django AUTOKOM : setup, deploy, backend env, status, logs')
@@ -792,7 +792,7 @@ def main(argv=None):
             except SecurityError as exc:raise CLIError(str(exc)) from exc
     if arguments and arguments[0] == 'iac':
         if len(arguments) < 2 or arguments[1] != 'ha':
-            raise CLIError('Syntaxe : autokom iac ha [list|logs|monitor|doctor|delivery|rights]')
+            raise CLIError('Syntaxe : autokom iac ha [list|apps|app|logs|monitor|doctor|delivery|rights]')
         from autokom_ha_admin import main as ha_main, HaError
         try:
             return ha_main(arguments[2:])
