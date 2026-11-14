@@ -1,5 +1,6 @@
 """Account billing integration: run only through Django's dedicated test DB."""
 import uuid
+from unittest.mock import patch
 from django.test import TestCase, override_settings
 from rest_framework.test import APIRequestFactory, force_authenticate
 from django.utils import timezone
@@ -44,11 +45,13 @@ class AccountCheckoutTests(TestCase):
         current = ApplicationEntitlement.objects.get(environment=self.env)
         self.assertEqual(current.resource_plan.max_instances, 2)
         self.assertTrue(HighAvailabilityOption.objects.filter(environment=self.env, status='ACTIVE').exists())
+        self.env.refresh_from_db()
         cfg = DeploymentConfig(environment=self.env, mode='DEVOPS', build_method='STATIC',
                                high_availability_requested=True)
         self.assertEqual(check_entitlement(cfg).max_instances, 2)
         future = Environment.objects.create(project=self.project, name='Preproduction', slug='staging')
         free_entitlement(future)
+        future.refresh_from_db()
         self.assertEqual(future.entitlement.resource_plan.max_instances, 2)
         self.assertTrue(HighAvailabilityOption.objects.filter(environment=future, status='ACTIVE').exists())
 
@@ -67,6 +70,7 @@ class AccountCheckoutTests(TestCase):
 
     def test_production_mode_disables_demo_rights(self):
         checkout_account(self.user, 'pro', 'monthly', uuid.uuid4())
+        self.env.refresh_from_db()
         with override_settings(AUTOKOM_BILLING_SANDBOX_ENABLED=False):
             self.assertEqual(account_status(self.user)['plan'], 'free')
             with self.assertRaises(PermissionDenied):
@@ -96,3 +100,32 @@ class AccountCheckoutTests(TestCase):
         result = AccountSubscriptionAPIView.as_view()(request)
         self.assertEqual(result.status_code, 200, result.data)
         self.assertEqual(result.data['data']['subscription']['plan'], 'pro')
+
+    @patch.dict('os.environ', {'AUTOKOM_MVP_ENABLED': 'true', 'AUTOKOM_MVP_UNLIMITED_USER_IDS': ''})
+    def test_launch_offer_does_not_mask_checkout_for_verified_allowlisted_account(self):
+        from apps.plans.entitlements.views import AccountCheckoutAPIView, AccountSubscriptionAPIView
+        factory = APIRequestFactory()
+        def account(user):
+            request = factory.get('/api/billing/account/')
+            force_authenticate(request, user=user)
+            return AccountSubscriptionAPIView.as_view()(request).data['data']['subscription']
+        self.assertTrue(account(self.user)['can_subscribe'])
+        self.assertFalse(account(self.other)['can_subscribe'])
+        for user, expected in ((self.other, 400), (self.user, 201)):
+            request = factory.post('/api/billing/account/checkout/', {
+                'plan': 'pro', 'period': 'monthly', 'idempotency_key': str(uuid.uuid4()),
+            }, format='json')
+            force_authenticate(request, user=user)
+            result = AccountCheckoutAPIView.as_view()(request)
+            self.assertEqual(result.status_code, expected, result.data)
+        self.assertEqual(account(self.user)['plan'], 'pro')
+        self.assertNotIn('launch_offer', account(self.user))
+        self.assertIn('launch_offer', account(self.other))
+        self.env.refresh_from_db()
+        cfg = DeploymentConfig(environment=self.env, mode='DEVOPS', build_method='STATIC',
+                               high_availability_requested=True)
+        # Repository scope has separate integration tests. In this fixture,
+        # isolate the paid-plan branch without creating a GitHub installation.
+        with patch('apps.plans.entitlements.mvp.enforce_repository_lock') as lock:
+            self.assertEqual(check_entitlement(cfg).max_instances, 2)
+            lock.assert_called_once()

@@ -228,3 +228,23 @@ def transition(host, env, run_id=None, *, promote, workers=None):
     except (OSError, ValueError, RuntimeError, broker.BrokerError, broker.http.client.HTTPException):
         # No raw provider or TLS error (potentially credential-bearing) in reports.
         return 'HTTPS_PROBE_OR_DNS_UNAVAILABLE'
+
+
+def clear_retired_marker(host, env):
+    """Clear local coordination state only. Do not touch a DNS record that
+    might now belong to another application or the operator.
+    """
+    broker = _broker()
+    def clear(_):
+        saved = marker(host)
+        if not saved:
+            return True
+        if saved['environment'] != env or ownership(host) == env:
+            return False
+        directory = broker.STATE / broker.valid_id(env)
+        if directory.is_symlink() or any(
+                os.path.lexists(directory / name) for name in ('current.json', 'previous.json')):
+            return False
+        forget(host)
+        return True
+    return broker._runtime_lock_call(clear, {})

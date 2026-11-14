@@ -111,20 +111,26 @@ def create_config(user, env, attrs):
 
 def check_entitlement(cfg):
     """Authorize server side. MVP is a distinct FREE launch grant, never paid checkout."""
-    from apps.plans.entitlements.mvp import enabled as mvp_enabled, authorize as mvp_authorize
-    if mvp_enabled():
-        return mvp_authorize(cfg)
     from rest_framework.exceptions import PermissionDenied
+    from apps.plans.entitlements.mvp import enabled as mvp_enabled, authorize as mvp_authorize, enforce_repository_lock
+    from apps.plans.entitlements.account import active_subscription
+    owner = cfg.environment.project.organization.owner
+    if mvp_enabled() and not active_subscription(owner):
+        return mvp_authorize(cfg)
+    if mvp_enabled():
+        if cfg.environment.project.status != 'ACTIVE' or not cfg.environment.is_active:
+            raise PermissionDenied('Environnement désactivé.')
+        enforce_repository_lock(cfg.environment.project, actor=owner)
     from django.utils import timezone
     entitlement = getattr(cfg.environment, 'entitlement', None)
     if (entitlement is None or entitlement.status != 'ACTIVE' or
             (entitlement.expires_at and entitlement.expires_at <= timezone.now())):
         raise PermissionDenied('Aucun plan actif attribué à cet environnement.')
     if getattr(entitlement, 'grant_source', None) == 'TEST':
-        from django.conf import settings
+        from apps.plans.entitlements.sandbox import enabled_for
         from apps.plans.entitlements.models import SandboxCheckout, AccountSubscription
         receipt = entitlement.sandbox_checkout if entitlement.sandbox_checkout_id else None
-        if (not settings.AUTOKOM_BILLING_SANDBOX_ENABLED or receipt is None or
+        if (receipt is None or not enabled_for(receipt.created_by) or
                 receipt.status != SandboxCheckout.Status.ACCEPTED or
                 not (receipt.environment_id == cfg.environment_id or (
                     receipt.environment_id is None and

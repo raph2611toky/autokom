@@ -10,6 +10,8 @@ test('l’offre gratuite de lancement est sélectionnée dans Tarifs et conduit 
   assert.match(pricing, /Offre gratuite de lancement/)
   assert.match(pricing, /onClick=\{\(\) => navigate\('\/deploy'\)\}/)
   assert.match(pricing, /Gratuit/)
+  assert.ok(pricing.includes('disabled={!canSubscribe}'))
+  assert.ok(pricing.includes('/checkout/'))
   assert.doesNotMatch(pricing, /\/checkout\/\$\{id\}|billingApi\.(?:checkout|accountCheckout)|activateSandboxSubscription/)
 
   const deploy = read('../src/pages/Deploy.jsx')
@@ -18,14 +20,12 @@ test('l’offre gratuite de lancement est sélectionnée dans Tarifs et conduit 
   assert.match(deploy, /billingApi\.account\(\)/)
 })
 
-test('le checkout public annonce l’indisponibilité du paiement et ne simule aucune activation', () => {
+test('le checkout vérifie le droit du compte et le résultat du backend', () => {
   const source = read('../src/pages/Checkout.jsx')
-  assert.match(source, /Offre gratuite de lancement/)
-  assert.match(source, /Le paiement en ligne n'est pas encore disponible/)
-  assert.match(source, /sans renseigner de moyen de paiement/)
-  assert.match(source, /navigate\('\/deploy'\)/)
-  assert.doesNotMatch(source, /billingApi\.(?:accountCheckout|checkout)|activateSandboxSubscription/)
-  assert.doesNotMatch(source, /amount_charged_ariary|payment_real|localStorage\.setItem/)
+  assert.ok(source.includes('subscription?.can_subscribe === true'))
+  assert.ok(source.includes('billingApi.accountCheckout(plan.id, period, key)'))
+  assert.ok(source.includes("navigate('/account')"))
+  assert.doesNotMatch(source, /mode test|localStorage/i)
 })
 
 test('la HA reste une décision séparée du plan de compte', () => {

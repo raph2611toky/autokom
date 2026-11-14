@@ -301,14 +301,18 @@ def reconcile(cfg, apps):
             # Routes are removed before deleting the old workload. Only networks
             # belonging to environments absent from the new desired state are
             # garbage-collected; updated releases may reuse their bridge.
-            docker('rm', '-f', name, timeout=30, check=False)
+            result = docker('rm', '-f', name, timeout=30, check=False)
+            if result.returncode and 'no such container' not in result.stderr.lower():
+                raise WorkerError('Retired container removal failed; retry scheduled')
     old_routes = previous.get('routes', {}) if isinstance(previous, dict) else {}
     if isinstance(old_routes, dict):
         for env in old_routes:
             if (isinstance(env, str) and UUID.fullmatch(env) and
                     env not in new_routes):
                 network = 'aknet-' + env.replace('-', '')[:16]
-                docker('network', 'rm', network, timeout=20, check=False)
+                result = docker('network', 'rm', network, timeout=20, check=False)
+                if result.returncode and 'not found' not in result.stderr.lower():
+                    raise WorkerError('Retired network removal failed; retry scheduled')
     _atomic_write(OBSERVED, json.dumps({'containers': new_names, 'routes': new_routes}, sort_keys=True) + '\n', 0o600)
     return len(apps)
 

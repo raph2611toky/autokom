@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ArrowRight, Check, CheckCircle2, CircleHelp, GitBranch, ShieldCheck, Workflow } from 'lucide-react'
-import { formatAr, getBillingPeriod, PRICING_PLANS } from '../config/pricing.js'
+import { formatAr, getBillingPeriod, PRICING_PLANS, rememberPlan } from '../config/pricing.js'
 import { billingApi } from '../services/billingApi.js'
 import { API_AVAILABLE } from '../config/runtime.js'
 import { useAuth } from '../context/AuthContext.jsx'
@@ -32,6 +32,7 @@ export default function Pricing({ navigate }) {
     return () => { live = false }
   }, [status])
   const launch = subscription?.launch_offer
+  const canSubscribe = subscription?.can_subscribe === true
   const activePlan = activePricingPlan(subscription)
   return <div className="ak-pricing-page">
     <section className="ak-pricing-hero" aria-labelledby="ak-pricing-title">
@@ -58,10 +59,13 @@ export default function Pricing({ navigate }) {
           <div className="ak-pricing-amount"><strong>{plan.id === 'free' ? 'Gratuit' : formatAr(period === 'annual' ? plan.annual : plan.monthly)}</strong>
             {plan.id !== 'free' && <span>/ {period === 'annual' ? 'an' : 'mois'}</span>}
           </div>
-          <span className="ak-pricing-price-caption">{plan.id === 'free' ? 'Accès gratuit, sans paiement' : 'Tarif indicatif · souscription à venir'}</span>
+          <span className="ak-pricing-price-caption">{plan.id === 'free' ? 'Accès gratuit, sans paiement' : canSubscribe ? 'Souscription · aucun débit' : 'Tarif indicatif · souscription à venir'}</span>
           {plan.id === 'free' ? <button className="ak-pricing-select is-primary" type="button" onClick={() => navigate('/deploy')}>
             Choisir mon dépôt <ArrowRight size={18}/>
-          </button> : <button className="ak-pricing-select" type="button" disabled>Souscription bientôt disponible</button>}
+          </button> : <button className="ak-pricing-select" type="button" disabled={!canSubscribe} onClick={() => {
+            rememberPlan(plan.id, undefined, period)
+            navigate(`/checkout/${plan.id}`)
+          }}>{canSubscribe ? plan.cta : 'Souscription bientôt disponible'}{canSubscribe && <ArrowRight size={18}/>}</button>}
           <ul className="ak-pricing-benefits">
             {(plan.id === 'free' ? ['DevOps et DevSecOps', 'Un dépôt GitHub et des domaines AUTOKOM',
               'Journaux et suivi des publications', 'Frontend uniquement · 30 jours sans HA ou 15 jours avec HA',
@@ -77,7 +81,7 @@ export default function Pricing({ navigate }) {
       {launch.projects?.filter(project => project.expires_at).map(project =>
         <p key={project.project_id}><strong>{project.repository}</strong> : {project.state === 'active' ? 'active' : 'échéance atteinte'} · échéance {new Date(project.expires_at).toLocaleDateString('fr-FR')}</p>)}
     </section>}
-    <p className="ak-pricing-disclaimer">Offre gratuite à durée limitée. Le paiement en ligne n’est pas encore disponible. À l’expiration, l’accès public peut être suspendu ; la conservation et la suppression des ressources suivent les conditions publiées.</p>
+    <p className="ak-pricing-disclaimer">Offre gratuite à durée limitée. {!canSubscribe && 'Le paiement en ligne n’est pas encore disponible. '}À l’expiration, l’accès public peut être suspendu et les ressources restent soumises aux conditions publiées.</p>
     <section className="ak-pricing-assurances" aria-label="Principes AUTOKOM">
       <div><GitBranch size={22}/><strong>GitHub intégré</strong><p>Un seul dépôt publié par compte GitHub pendant l’offre.</p></div>
       <div><ShieldCheck size={22}/><strong>Pipeline sécurisé</strong><p>Utilisez les contrôles DevOps ou DevSecOps.</p></div>

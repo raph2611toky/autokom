@@ -36,6 +36,7 @@ export default function Account({ navigate }) {
       </> : <>
         <strong className="ak-subscription-current">{subscription.plan_name}</strong>
         <p>{subscription.max_instances} instance(s) autorisée(s) · HA {subscription.ha_available ? 'disponible' : 'indisponible'}</p>
+        {subscription.expires_at && <p>Échéance {new Date(subscription.expires_at).toLocaleDateString('fr-FR')}</p>}
       </>}
       <button type="button" className="button-outline" onClick={() => navigate('/pricing')}>
         Voir les offres <ArrowRight size={16}/>

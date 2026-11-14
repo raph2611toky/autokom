@@ -339,7 +339,7 @@ def apply_capacity_floor(capacity, current_min):
     return True
 
 
-def deleted_environments(previous, apps):
+def deleted_environments(previous, apps, *, recorded=()):
     """Only remove routes of a previously owned release after local teardown.
 
     Project deletion broker removes both current.json and owner markers. Do
@@ -350,6 +350,7 @@ def deleted_environments(previous, apps):
     # Retry URL-map removal if the previous cycle failed. Removing a deleted
     # release is idempotent, and no live environment is ever targeted.
     candidates = list(previous.get('applications', [])) if isinstance(previous, dict) else []
+    candidates += [{'environment': env} for env in recorded]
     if isinstance(previous, dict):
         candidates += [{'environment': env} for env in previous.get('pending_deletions', [])
                        if isinstance(env, str)]
@@ -359,12 +360,51 @@ def deleted_environments(previous, apps):
         env = item.get('environment')
         if not valid_uuid(env) or env in active:
             continue
-        directory = STATE / env
-        if ((directory / 'current.json').exists() or
-                (directory / 'previous.json').exists() or selected_hosts(env)):
+        if not locally_retired(env):
             continue
         orphaned.append(env)
     return sorted(set(orphaned))
+
+
+def locally_retired(env):
+    directory = STATE / env
+    return (not directory.is_symlink() and not os.path.lexists(directory / 'current.json')
+            and not os.path.lexists(directory / 'previous.json') and not selected_hosts(env))
+
+
+def previous_manifests(workers):
+    """Recover ownership when an older status report already lost an entry."""
+    manifests = {}
+    for worker in workers:
+        doc = gcs_get('desired/' + worker['name'] + '.json')
+        if doc is None:
+            continue
+        if (not isinstance(doc, dict) or doc.get('schema') != 1
+                or doc.get('instance') != worker['name'] or doc.get('zone') != worker['zone']
+                or not isinstance(doc.get('applications'), list)):
+            raise DeliveryError('Invalid previous worker manifest')
+        if any(not isinstance(item, dict) or not valid_uuid(item.get('environment_id'))
+               for item in doc['applications']):
+            raise DeliveryError('Invalid application in previous worker manifest')
+        manifests[worker['name']] = doc
+    return manifests
+
+
+def withdraw_deleted(orphaned, manifests, tracked):
+    # Remove the route first; then withdraw only the retired workloads in the
+    # *existing* manifests. An unrelated application's DNS delay must not stop
+    # the retirement or cause its current placement to be disturbed.
+    orphaned = set(orphaned)
+    if not all(locally_retired(env) for env in orphaned):
+        raise DeliveryError('Environment has local state; withdrawal refused')
+    unroute_deleted(orphaned)
+    for name, doc in manifests.items():
+        apps = [app for app in doc['applications'] if app['environment_id'] not in orphaned]
+        if len(apps) != len(doc['applications']):
+            gcs_put('desired/' + name + '.json', {**doc, 'applications': apps})
+    if not all(ha_dns.clear_retired_marker(saved['host'], saved['environment'])
+               for saved in tracked if saved['environment'] in orphaned):
+        raise DeliveryError('Retired domain changed during cleanup')
 
 
 def unroute_deleted(environments):
@@ -564,17 +604,37 @@ def reconcile(*, dry_run=False, public_dns=False):
                 decision['status'] = 'SCALING_UP'
         elif decision['status'] == 'INSUFFICIENT_CAPACITY' and capacity['required'] is None:
             decision['status'] = 'CAPACITY_LIMIT'
-    orphaned = deleted_environments(previous, apps)
+    tracked = ha_dns.tracked() if public_dns and not dry_run else []
+    manifests_before = previous_manifests(workers) if not dry_run else {}
+    recorded = {app['environment_id'] for doc in manifests_before.values() for app in doc['applications']}
+    if not dry_run:
+        recorded.update(item['environment'] for item in tracked)
+    orphaned = deleted_environments(previous, apps, recorded=recorded)
     report = {'schema': 1, 'updated': int(time.time()), 'workers': len(workers),
               'applications': decisions, 'cloud_https_ready': False,
               'capacity': capacity, 'deleted_environments': orphaned}
     if dry_run:
         return report
+    # Persist the retry list before altering GCS or the URL map. Old reports
+    # lost it whenever a DNS delay caused an early return.
+    if orphaned:
+        report['pending_deletions'] = orphaned
+        _atomic_report(report)
+        try:
+            withdraw_deleted(orphaned, manifests_before, tracked)
+        except (RuntimeError, OSError, ValueError):
+            report['cleanup_error'] = True
+        else:
+            report.pop('pending_deletions', None)
     # Do not replace or unroute a currently public worker release before DNS
     # returns to the healthy primary. Retain the old manifests during its TTL.
     by_environment = {decision['environment']: decision for decision in decisions}
     cutovers = {}
-    for saved in ha_dns.tracked() if public_dns else ():
+    for saved in tracked:
+        if saved['environment'] in orphaned:
+            # Deletion is not a failback: the primary container is already gone.
+            # No DNS probe or Cloudflare write should hold the other apps hostage.
+            continue
         decision = by_environment.get(saved['environment'], {})
         expected = sorted(w['name'] for w in decision.get('workers', ()))
         if (decision.get('ha') is True and decision.get('run_id') == saved['run_id']
@@ -604,19 +664,15 @@ def reconcile(*, dry_run=False, public_dns=False):
             # Never sacrifice healthy existing allocations on autoscaler errors.
             capacity['status'] = 'CAPACITY_SCALE_ERROR'
             report['capacity_error'] = True
+    if report.get('cleanup_error'):
+        _atomic_report(report)
+        _write_public_metrics(report)
+        return report
     # GCS desired-state must be committed before creating app-specific health checks.
     for worker in workers:
         desired = {'schema': 1, 'instance': worker['name'], 'zone': worker['zone'],
                    'applications': manifests[worker['name']]}
         gcs_put('desired/' + worker['name'] + '.json', desired)
-    # A project removed in AUTOKOM must stop being routed by the cloud LB.
-    # Workers remove its containers when the empty manifest is reconciled.
-    if orphaned:
-        try:
-            unroute_deleted(orphaned)
-        except (DeliveryError, OSError, ValueError):
-            report['cleanup_error'] = True
-            report['pending_deletions'] = orphaned
     for app in apps:
         decision = next((d for d in decisions if d['environment'] == app['environment_id']), None)
         if not decision or decision['status'] != 'ASSIGNED':

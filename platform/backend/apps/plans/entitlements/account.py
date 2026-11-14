@@ -143,6 +143,7 @@ def checkout_account(user, plan_code, period, idempotency_key):
         )
         AccountSubscription.objects.update_or_create(user=user, defaults={'receipt': receipt})
         from apps.projects.environments.models import Environment
-        for env in Environment.objects.filter(project__organization__owner=user).select_related('project__organization'):
+        for env in Environment.objects.filter(project__organization__owner=user, project__status='ACTIVE',
+                                              is_active=True).select_related('project__organization'):
             grant_owned_environment(env, receipt)
         return receipt

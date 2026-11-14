@@ -130,7 +130,7 @@ export default function App() {
   if (route === '/forgot-password') return <ForgotPassword {...commonProps} />
   if (route === '/reset-password') return <ResetPassword {...commonProps} />
   if (API_AVAILABLE && route === '/account') return <div className="app-shell"><Header route="/account" {...commonProps}/><main className="container workspace"><Account navigate={navigate}/></main></div>
-  if (API_AVAILABLE && route.startsWith('/checkout/')) return <div className="app-shell"><Header route="/pricing" {...commonProps}/><main className="container workspace"><Checkout navigate={navigate} planId={route.split('/')[2]}/></main></div>
+  if (API_AVAILABLE && route.startsWith('/checkout/')) return <div className="app-shell"><Header route="/pricing" {...commonProps}/><main className="container workspace"><Checkout key={route} navigate={navigate} planId={route.split('/')[2]}/></main></div>
 
   return (
     <div className="app-shell">
