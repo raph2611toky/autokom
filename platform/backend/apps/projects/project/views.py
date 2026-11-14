@@ -10,7 +10,7 @@ from apps.accounts.user.models import User
 from apps.organizations.models import OrganizationMembership
 from apps.projects.project.serializers import (ProjectSerializer, ProjectCreateSerializer,
     ProjectPatchSerializer, ProjectMemberSerializer, ProjectMemberCreateSerializer, ProjectMemberUpdateSerializer)
-from apps.projects.project.services import create_project
+from apps.projects.project.services import create_project, retire_project
 from helpers.responses import api_success
 from apps.projects.project.swagger.members_list import schema as members_list_schema
 from apps.projects.project.swagger.members_add import schema as members_add_schema
@@ -144,16 +144,13 @@ class ProjectRestoreAPIView(APIView):
 class ProjectDeleteAPIView(APIView):
     """Safely take a project offline and hide it; preserve immutable release and audit history.
 
-    We deliberately do not cascade-delete PROTECT-related releases, accounts or domain
-    ownership proofs. Deprovisioning is retriable if the broker becomes unavailable.
+    Releases and accounts are retained. Names are released after confirmed teardown.
     """
     parser_classes = [JSONParser]
     permission_classes = [IsClientUser]
 
     def post(self, request, project_id):
         try:
-            from apps.deployments.runs.autokom_socket import request_control
-            from apps.deployments.runs.models import DeploymentRun
             project=get_project(request.user,project_id,write=True)
             if not (project.organization.owner_id == request.user.id or
                     OrganizationMembership.objects.filter(organization=project.organization,user=request.user,
@@ -161,20 +158,9 @@ class ProjectDeleteAPIView(APIView):
                 raise PermissionDenied('Suppression réservée au propriétaire ou administrateur de l’organisation.')
             if request.data.get('confirm_name') != project.name:
                 raise ValidationError({'confirm_name':'Saisissez le nom exact du projet pour confirmer.'})
-            environments=list(project.environments.all())
-            from apps.deployments.runs.models import StackDeployment
-            if (DeploymentRun.objects.filter(environment__in=environments,status__in=['QUEUED','RUNNING','PREPARED']).exists() or
-                StackDeployment.objects.filter(stack__project=project, status__in=['QUEUED','PREPARING','ACTIVATING','BLOCKED']).exists()):
-                raise ValidationError({'project':'Publication en cours : attendre sa fin avant la suppression.'})
-            for env in environments:
-                request_control('runtime.deprovision', {
-                    'environment_id':str(env.id),
-                    'hostnames':list(env.domains.values_list('hostname',flat=True)),
-                },timeout=65)
-            project.status=Project.Status.DELETED
-            project.save(update_fields=['status','updated_at'])
-            return api_success({'deleted':True,'history_retained':True},
-                'Projet retiré, publications arrêtées et domaines désactivés. Historique conservé pour audit.')
+            released = retire_project(project.pk)
+            return api_success({'deleted':True,'history_retained':True,'domains_released':released},
+                'Projet retiré et noms de domaine libérés. Historique conservé pour audit.')
         except Exception as exc:
             return handle_error(exc,'project_delete')
 

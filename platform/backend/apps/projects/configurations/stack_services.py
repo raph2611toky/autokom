@@ -478,6 +478,10 @@ def launch_stack(user, stack, *, idempotency_key=None, trigger=DeploymentRun.Tri
         front_sha = _select_branch_commit(user, frontend_cfg)
         back_sha = _select_branch_commit(user, backend_cfg)
     with transaction.atomic():
+        from apps.projects.project.models import Project
+        project = Project.objects.select_for_update().get(pk=stack.project_id)
+        if project.status != Project.Status.ACTIVE:
+            raise DeploymentConflict('Le projet n’est plus actif.')
         ServiceStack.objects.select_for_update().get(pk=stack.pk)
         existing = StackDeployment.objects.filter(idempotency_key=idem).first()
         if existing:

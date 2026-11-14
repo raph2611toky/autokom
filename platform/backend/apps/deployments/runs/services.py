@@ -210,7 +210,9 @@ def queue_verified_push(event):
     )
     for project in projects:
         matched_projects += 1
-        for env in Environment.objects.filter(project=project, is_active=True):
+        for env in Environment.objects.select_for_update().filter(project=project, is_active=True).order_by('pk'):
+            if env.project.status != Project.Status.ACTIVE:
+                continue
             active_environments += 1
             cfg = DeploymentConfig.objects.filter(environment=env, is_draft=False).order_by('-version').first()
             if not cfg:

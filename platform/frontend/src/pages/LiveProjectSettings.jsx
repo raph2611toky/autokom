@@ -96,7 +96,7 @@ export default function LiveProjectSettings({ navigate, projectId }) {
     </section>
     <section className="ak-workspace-sheet ak-danger-zone" aria-labelledby="danger-zone-heading">
       <h2 id="danger-zone-heading">Zone de danger</h2>
-      <div className="ak-danger-zone-content"><div><strong>Supprimer ce projet</strong><p>Arrête les ressources AUTOKOM et désactive les domaines gérés. Cette action retire le projet de la liste. L’historique d’audit reste conservé.</p></div>
+      <div className="ak-danger-zone-content"><div><strong>Supprimer ce projet</strong><p>Arrête le projet et libère ses noms de domaine pour une autre publication. L’historique d’audit reste conservé.</p></div>
       <button type="button" className="ak-danger-button" disabled={busy} onClick={() => setRemoveOpen(true)}><Trash2 size={16}/> Supprimer ce projet</button></div>
     </section>
     <ActionDialog open={archiveOpen} title="Archiver ce projet ?" variant="warning"
@@ -104,7 +104,7 @@ export default function LiveProjectSettings({ navigate, projectId }) {
       confirmLabel="Archiver" busy={busy} onClose={() => setArchiveOpen(false)}
       onConfirm={() => { setArchiveOpen(false); void operation(() => projectsApi.archive(projectId), 'Projet archivé.') }}/>
     <ActionDialog open={removeOpen} title="Supprimer définitivement ce projet ?" variant="danger"
-      description="Le site sera arrêté et les domaines désactivés. L'historique d'audit reste conservé. Cette opération est irréversible."
+      description="Le site sera arrêté et ses noms de domaine seront libérés. Les DNS externes ne sont pas modifiés. L’historique d’audit reste conservé."
       requiredText={project.name} confirmLabel="Supprimer définitivement" busy={busy}
       onClose={() => setRemoveOpen(false)} onConfirm={() => { void removeProject() }}/>
   </>

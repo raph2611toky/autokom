@@ -35,7 +35,9 @@ def queue_restore(env, source, actor, key):
     if not isinstance(key, str) or len(key) > 48 or not IDEMPOTENCY_RE.fullmatch(key):
         raise ValidationError('Clé d’idempotence invalide.')
     project = env.project
-    type(project).objects.select_for_update().only('pk').get(pk=project.pk)
+    project = type(project).objects.select_for_update().only('status').get(pk=project.pk)
+    if project.status != type(project).Status.ACTIVE:
+        raise DeploymentConflict('Le projet n’est plus actif.')
     env = type(env).objects.select_for_update().get(pk=env.pk)
     idem = f'restore:{env.pk}:{source.pk}:{key}'
     existing = DeploymentRun.objects.filter(environment=env, idempotency_key=idem).first()
@@ -69,6 +71,10 @@ def _create_restore(env, source, actor, idem, active, resources):
 def queue_stack_restore(group, actor, key):
     if not isinstance(key, str) or len(key) > 48 or not IDEMPOTENCY_RE.fullmatch(key):
         raise ValidationError('Clé d’idempotence invalide.')
+    from apps.projects.project.models import Project
+    project = Project.objects.select_for_update().get(pk=group.stack.project_id)
+    if project.status != Project.Status.ACTIVE:
+        raise DeploymentConflict('Le projet n’est plus actif.')
     stack = ServiceStack.objects.select_for_update().get(pk=group.stack_id)
     idem = f'group-restore:{group.pk}:{key}'
     existing = StackDeployment.objects.filter(stack=stack, idempotency_key=idem).first()

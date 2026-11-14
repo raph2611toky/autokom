@@ -28,6 +28,7 @@ import stat
 import struct
 import subprocess
 import tempfile
+import sys
 import time
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, build_opener, HTTPRedirectHandler
@@ -1024,7 +1025,7 @@ def _cloudflare_record(host):
     cloudflare(req)
     return {'created':True}
 
-def _cloudflare_remove_owned_record(host, *, legacy_owned_vhost=False, dry_run=False):
+def _cloudflare_remove_owned_record(host, *, legacy_owned_vhost=False, ha_owner=None, dry_run=False):
     """Delete only an AUTOKOM-owned managed A record, never arbitrary DNS.
 
     Legacy records without the ownership comment are removable only if AUTOKOM
@@ -1056,12 +1057,17 @@ def _cloudflare_remove_owned_record(host, *, legacy_owned_vhost=False, dry_run=F
         raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Plusieurs enregistrements DNS pour ce nom.')
     record = records[0]
     identifier = record.get('id', '')
-    if (record.get('type') != 'A' or (record.get('content') != config['address'] and
+    current_side = record.get('content') == config['address']
+    recorded_ha = bool(ha_owner and ha_owner['origin'] == config['address']
+                       and ha_owner['id'] == identifier and ha_owner['ip'] == record.get('content'))
+    if (record.get('type') != 'A' or (not current_side and not recorded_ha and
             not (legacy_owned_vhost and _managed_a_target(host, record.get('content'), config['address'], record_id=identifier)))
             or record.get('proxied') is not False
             or not isinstance(identifier, str) or not re.fullmatch(r'[a-f0-9]{32}', identifier)):
         raise BrokerError('AUTOKOM_DOMAIN_DNS_CONFLICT: Enregistrement DNS non conforme.')
-    if record.get('comment') != DNS_COMMENT and not legacy_owned_vhost:
+    comment = record.get('comment')
+    if (comment in ('AUTOKOM managed A record', 'AUTOKOM preprod managed A record') and comment != DNS_COMMENT
+            or comment != DNS_COMMENT and not legacy_owned_vhost and not recorded_ha):
         raise BrokerError('AUTOKOM_DOMAIN_DNS_UNOWNED: Suppression DNS manuelle requise pour cet ancien enregistrement.')
     if dry_run:
         return {'deletable': True}
@@ -1585,7 +1591,7 @@ def _domain_inspect(params):
     return {'active':bool(active)}
 
 
-def _deactivate_owned_vhost(host, environment):
+def _deactivate_owned_vhost(host, environment, *, validate_only=False):
     """Remove only a host explicitly assigned to an environment by AUTOKOM.
 
     Never remove unrelated Nginx files; if Nginx validation/reload fails,
@@ -1595,6 +1601,8 @@ def _deactivate_owned_vhost(host, environment):
     conf=PROXY/('autokom-customer-'+host+'.conf')
     link=ENABLED/conf.name
     owner=STATE/('domain-owner-'+host+'.txt')
+    if owner.is_symlink():
+        raise BrokerError('AUTOKOM_DOMAIN_OWNERSHIP_MISMATCH: Marqueur symbolique.')
     if not owner.is_file():
         if conf.exists() or conf.is_symlink() or link.exists() or link.is_symlink():
             raise BrokerError('AUTOKOM_DOMAIN_OWNERSHIP_MISSING: Vhost présent sans propriété enregistrée.')
@@ -1607,6 +1615,8 @@ def _deactivate_owned_vhost(host, environment):
     original=conf.read_bytes()
     if ('server_name '+host+';').encode() not in original:
         raise BrokerError('AUTOKOM_DOMAIN_VHOST_TAMPERED: Configuration inattendue.')
+    if validate_only:
+        return True
     link.unlink()
     conf.unlink()
     try:
@@ -1630,12 +1640,73 @@ def _deactivate_owned_vhost(host, environment):
     return True
 
 
-def _deprovision_environment(params):
-    """Explicit, owner-checked and retryable runtime teardown, not filesystem deletion.
+def _prepare_project_domain_release(hosts, entries, env):
+    if (not isinstance(entries, list) or len(entries) != len(hosts)
+            or any(not isinstance(entry, dict) or entry.get('hostname') not in hosts
+                   or type(entry.get('managed')) is not bool for entry in entries)
+            or {entry['hostname'] for entry in entries} != set(hosts)):
+        raise BrokerError('AUTOKOM_DOMAIN_LIST_INVALID: Réservations incohérentes.')
+    runtime = _runtime_dns_env()
+    suffix = str(runtime.get('AUTOKOM_MANAGED_DOMAIN_SUFFIX', '')).strip('.').lower()
+    approved = {name.strip() for name in runtime.get('AUTOKOM_PREPROD_ALLOWED_HOSTS', '').split(',')}
+    prepared = []
+    for entry in entries:
+        host, managed = entry['hostname'], entry['managed']
+        under_suffix = bool(suffix and host.endswith('.' + suffix))
+        if (managed != under_suffix or host in {suffix, 'backend.' + suffix, 'pre.' + suffix, 'ikom.mg', 'www.ikom.mg'}
+                or managed and not _managed_client_host(host, suffix)
+                or PREPROD and (not managed or suffix != 'auto.ikom.mg' or host not in approved)):
+            raise BrokerError('AUTOKOM_DOMAIN_SUFFIX_MISMATCH: Domaine hors périmètre.')
+        owned = _deactivate_owned_vhost(host, env, validate_only=True)
+        saved = None
+        if managed and not PREPROD:
+            from autokom_ha_dns import marker
+            saved = marker(host)
+            if saved and saved['environment'] != env:
+                raise BrokerError('AUTOKOM_DOMAIN_OWNERSHIP_MISMATCH: Domaine HA attribué ailleurs.')
+        if managed:
+            _cloudflare_remove_owned_record(host, legacy_owned_vhost=owned, ha_owner=saved, dry_run=True)
+        prepared.append((host, managed, owned, saved))
+    return prepared
 
-    Domain DNS records and domain ownership proofs stay in the database; no
-    Cloudflare record or Let's Encrypt certificate is deleted blindly.
-    """
+
+DELIVERY_UNIT = Path('/etc/systemd/system/autokom-ha-delivery.service')
+DELIVERY_STATE = Path('/var/lib/autokom/ha')
+
+
+def _retire_runtime(params):
+    # The controller acquires the delivery lock before touching runtime state.
+    # Hold both, in that order, so an old reconciliation cannot restore a route.
+    if ('release_domains' not in params or PREPROD or
+            not (DELIVERY_UNIT.exists() or (DELIVERY_STATE / 'delivery-status.json').exists()
+                 or (DELIVERY_STATE / 'published').exists())):
+        return _runtime_lock_call(_deprovision_environment, params)
+    ha_dir = str(Path(__file__).resolve().parents[1] / 'ha')
+    if ha_dir not in sys.path:
+        sys.path.append(ha_dir)
+    import autokom_ha_delivery as delivery
+    fd = os.open(delivery.LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_uid != 0:
+            raise BrokerError('AUTOKOM_HA_LOCK_INVALID: Verrou de réconciliation non conforme.')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise BrokerError('AUTOKOM_HA_CONTROLLER_BUSY: Réconciliation en cours, réessayez.') from exc
+        def remove(payload):
+            result = _deprovision_environment(payload)
+            try:
+                delivery.unroute_deleted([payload['environment_id']])
+            except (delivery.DeliveryError, OSError, ValueError, TypeError) as exc:
+                raise BrokerError('AUTOKOM_HA_ROUTE_REMOVE_FAILED: Retrait GCP non confirmé.') from exc
+            return result
+        return _runtime_lock_call(remove, params)
+    finally:
+        os.close(fd)
+
+
+def _deprovision_environment(params):
+    """Owner-checked, retryable teardown. Certificates are kept for reuse."""
     env=valid_id(params.get('environment_id'))
     hosts=params.get('hostnames')
     if not isinstance(hosts,list) or len(hosts)>100 or any(not isinstance(h,str) for h in hosts):
@@ -1670,7 +1741,19 @@ def _deprovision_environment(params):
             if hostname not in hosts:
                 raise BrokerError('AUTOKOM_DOMAIN_LIST_INCOMPLETE: Domaines gérés manquants.')
             owned.append(hostname)
-    # Return a cloud-managed A record to the primary before removing its owner.
+    release = 'release_domains' in params
+    if release:
+        prepared = _prepare_project_domain_release(hosts, params['release_domains'], env)
+        for host, managed, has_vhost, ha_owner in prepared:
+            if managed:
+                _cloudflare_remove_owned_record(host, legacy_owned_vhost=has_vhost, ha_owner=ha_owner)
+            if has_vhost:
+                _deactivate_owned_vhost(host, env)
+            if ha_owner:
+                from autokom_ha_dns import forget
+                forget(host)
+        owned = []
+    # Legacy callers return a cloud-managed A record to the primary.
     # This path already holds the same runtime lock as the delivery timer.
     for host in owned:
         if not PREPROD:
@@ -1685,8 +1768,12 @@ def _deprovision_environment(params):
         present=subprocess.run(['docker','container','inspect',name],capture_output=True,timeout=12)
         if present.returncode==0:
             run(['docker','rm','-f',name],timeout=25)
+        elif release and not re.fullmatch(
+                rb'Error(?: response from daemon)?: No such (?:container|object): ' + name.encode('ascii'),
+                present.stderr.strip()):
+            raise BrokerError('AUTOKOM_RUNTIME_STOP_UNVERIFIED: État du conteneur non confirmé.')
         record.unlink(missing_ok=True)
-    return {'offline':True,'historical_state_retained':True}
+    return {'offline':True,'historical_state_retained':True,'domains_released':release}
 
 
 def _activate_owned_domain(params):
@@ -1744,7 +1831,7 @@ def handle(action,params):
     if action=='runtime.rollback':return _runtime_lock_call(_rollback,params)
     if action=='runtime.commit':return _runtime_lock_call(_commit,params)
     if action=='runtime.commit_pair':return _runtime_lock_call(_commit_pair,params)
-    if action=='runtime.deprovision':return _runtime_lock_call(_deprovision_environment,params)
+    if action=='runtime.deprovision':return _retire_runtime(params)
     if action=='ha.application.status':
         if PREPROD:
             return {'application': {'status':'UNAVAILABLE','healthy_replicas':0,

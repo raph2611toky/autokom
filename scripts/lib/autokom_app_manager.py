@@ -1261,6 +1261,17 @@ def main(argv=None):
         return github_main(args.github_args)
     if args.action in ('backend','frontend'):
         from autokom_env_manager import main as env_main, EnvError
+        if args.action == 'backend' and args.backend_args[:2] == ['domains', 'release-deleted']:
+            domain_parser = argparse.ArgumentParser(prog='autokom app backend domains release-deleted')
+            domain_parser.add_argument('--hostname', required=True)
+            domain_parser.add_argument('--apply', action='store_true')
+            options = domain_parser.parse_args(args.backend_args[2:])
+            command = [str(VENV / 'bin/python'), 'manage.py', 'autokom_release_deleted_domains',
+                       '--hostname=' + options.hostname]
+            if options.apply:
+                command.append('--apply')
+            run_as_service(command, timeout=300 if options.apply else 30)
+            return 0
         if args.action == 'backend' and args.backend_args[:2] == ['github', 'doctor']:
             from autokom_github_doctor import main as github_doctor
             return github_doctor()

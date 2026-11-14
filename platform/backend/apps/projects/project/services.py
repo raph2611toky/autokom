@@ -19,6 +19,52 @@ class MissingFreePlan(APIException):
     default_detail = 'Les offres gratuites ne sont pas encore configurées par AUTOKOM.'
 
 
+@transaction.atomic
+def retire_project(project_id, *, already_deleted=False):
+    """Release live names only after the privileged broker confirms cleanup."""
+    from apps.deployments.runs.autokom_socket import AutokomControlUnavailable, request_control
+    from apps.deployments.runs.models import DeploymentRun, StackDeployment
+
+    project = Project.objects.select_for_update().get(pk=project_id)
+    if (project.status == Project.Status.DELETED) != already_deleted:
+        raise ValidationError({'project': 'Le statut du projet a changé. Actualisez avant de réessayer.'})
+    retired_slug = 'supprime--' + project.pk.hex
+    if Project.objects.filter(organization_id=project.organization_id, slug=retired_slug).exclude(pk=project.pk).exists():
+        raise ValidationError({'project': 'Collision de nom d’archive. Contactez un administrateur.'})
+    environments = list(project.environments.select_for_update().order_by('pk'))
+    if (DeploymentRun.objects.filter(environment__in=environments, status__in=['QUEUED', 'RUNNING', 'PREPARED']).exists()
+            or StackDeployment.objects.filter(stack__project=project,
+                status__in=['QUEUED', 'PREPARING', 'ACTIVATING', 'BLOCKED']).exists()):
+        raise ValidationError({'project': 'Publication en cours : attendre sa fin avant la suppression.'})
+    reservations = list(Domain.objects.select_for_update().filter(environment__in=environments).order_by('pk'))
+    for env in environments:
+        domains = [domain for domain in reservations if domain.environment_id == env.pk]
+        # The broker retains ownership evidence until managed DNS is removed.
+        try:
+            result = request_control('runtime.deprovision', {
+                'environment_id': str(env.pk),
+                'hostnames': [domain.hostname for domain in domains],
+                'release_domains': [{'hostname': domain.hostname, 'managed': domain.domain_type == Domain.Type.SUBDOMAIN}
+                                    for domain in domains],
+            }, timeout=45)
+        except AutokomControlUnavailable as exc:
+            messages = {
+                'AUTOKOM_DOMAIN_DNS_UNOWNED': 'Un ancien enregistrement DNS doit être vérifié par un administrateur.',
+                'AUTOKOM_HA_CONTROLLER_BUSY': 'La réconciliation GCP est en cours. Réessayez dans quelques instants.',
+            }
+            extra = messages.get(getattr(exc, 'safe_code', None), '')
+            raise ValidationError({'project': f'Le domaine reste réservé. {extra or str(exc.detail)}'}) from exc
+        if not isinstance(result, dict) or result.get('offline') is not True or result.get('domains_released') is not True:
+            raise ValidationError({'project': 'Retrait des domaines non confirmé. Le nom reste réservé. Réessayez.'})
+    Domain.objects.filter(pk__in=[domain.pk for domain in reservations]).delete()
+    # Keep immutable IDs, display name, release history and GitHub repository
+    # lock. Release the unique (organization, slug) pair independently.
+    project.status = Project.Status.DELETED
+    project.slug = retired_slug
+    project.save(update_fields=['status', 'slug', 'updated_at'])
+    return len(reservations)
+
+
 def free_entitlement(environment):
     mode = DeploymentModeOffer.objects.filter(code='DEVOPS', is_active=True, is_premium=False).first()
     plan = ResourcePlan.objects.filter(is_default=True, is_active=True, is_premium=False).order_by('display_order').first()

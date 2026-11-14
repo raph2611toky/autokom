@@ -46,7 +46,7 @@ def request_control(action, params=None, *, timeout=30):
             logger.warning('Broker refuse %s code=%s', action, safe_code or 'AUTOKOM_BROKER_REFUSED')
             error=AutokomControlUnavailable(
                 'Service de contrôle AUTOKOM indisponible. Diagnostic : '+safe_code
-                if safe_code and action.startswith('domain.') else
+                if safe_code and (action.startswith('domain.') or action == 'runtime.deprovision') else
                 'Service de contrôle AUTOKOM indisponible.')
             error.safe_code=safe_code
             raise error

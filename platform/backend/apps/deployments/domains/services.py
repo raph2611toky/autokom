@@ -44,8 +44,10 @@ def claim_domain(user,project_id,environment_id,hostname,domain_type):
         # environments. The user must rename the existing host, not reserve
         # another AUTOKOM hostname for the same project.
         from apps.projects.project.models import Project
+        project = Project.objects.select_for_update().get(pk=project.pk)
+        if project.status == Project.Status.DELETED:
+            raise ValidationError({'hostname': 'Ce projet a été supprimé.'})
         if domain_type == Domain.Type.SUBDOMAIN:
-            Project.objects.select_for_update().get(pk=project.pk)
             if Domain.objects.filter(environment=env, domain_type=Domain.Type.SUBDOMAIN).exists():
                 raise ValidationError({'hostname':
                     'Ce service possède déjà un sous-domaine AUTOKOM. Utilisez Modifier sur ce domaine.'})
@@ -86,8 +88,13 @@ def domain_summary(domain,*,include_challenge=False):
     return payload
 
 
+@transaction.atomic
 def verify_and_activate(user,project_id,environment_id,domain_id):
-    _,env=get_environment(user,project_id,environment_id,write=True)
+    project,env=get_environment(user,project_id,environment_id,write=True)
+    from apps.projects.project.models import Project
+    project = Project.objects.select_for_update().get(pk=project.pk)
+    if project.status == Project.Status.DELETED:
+        raise ValidationError({'hostname': 'Ce projet a été supprimé.'})
     domain=Domain.objects.filter(environment=env,id=domain_id).first()
     if not domain:raise ValidationError({'domain':'Domaine absent ou accès refusé.'})
     token=_challenge(domain)

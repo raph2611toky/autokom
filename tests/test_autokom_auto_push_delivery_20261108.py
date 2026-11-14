@@ -48,8 +48,8 @@ class Database:
             processed_at=None, error_message='',
         )
         self.event.save = lambda update_fields: None
-        self.project = SimpleNamespace(id='project', git_connection=self.event.connection)
-        self.env = SimpleNamespace(id='env', pk='env')
+        self.project = SimpleNamespace(id='project', git_connection=self.event.connection, status='ACTIVE')
+        self.env = SimpleNamespace(id='env', pk='env', project=self.project)
         self.cfg = SimpleNamespace(auto_deploy=True, auto_deploy_branch='main', branch='main')
         self.created = []
         self.busy = False
@@ -65,7 +65,9 @@ class Database:
         return SimpleNamespace(filter=lambda **kwargs: QS([self.project] if self.project_matches else []))
 
     def environment_objects(self):
-        return SimpleNamespace(filter=lambda **kwargs: QS([self.env]))
+        manager = SimpleNamespace(filter=lambda **kwargs: QS([self.env]))
+        manager.select_for_update = lambda: manager
+        return manager
 
     def config_objects(self):
         return SimpleNamespace(filter=lambda **kwargs: QS([self.cfg]))
@@ -102,6 +104,12 @@ class AutoPushReliabilityTests(unittest.TestCase):
         }
         exec(standalone_function(SERVICES, 'queue_verified_push'), env)
         return env['queue_verified_push'](db.event)
+
+    def test_project_deleted_between_lookup_and_lock_cannot_queue(self):
+        db = Database()
+        db.project.status = 'DELETED'
+        self.assertEqual(self.run_queue(db), 0)
+        self.assertEqual(db.created, [])
 
     def test_active_deployment_defers_event_then_retries(self):
         db = Database()
