@@ -1,5 +1,5 @@
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 from rest_framework.exceptions import ValidationError, APIException
@@ -85,7 +85,7 @@ def free_entitlement(environment):
     return entitlement
 
 
-def reserve_domain(project, environment, selected=''):
+def reserve_domain(project, environment, selected='', *, managed_hostname=None):
     is_staging = getattr(environment, 'kind', None) == Environment.Kind.STAGING
     if is_staging and not selected:
         base = Domain.objects.filter(environment__project=project, environment__slug='production',
@@ -93,6 +93,11 @@ def reserve_domain(project, environment, selected=''):
         if base is None:
             raise ValidationError({'domain': 'Réservez d’abord le domaine géré de production.'})
         hostname = validate_hostname('pre.' + base.hostname)
+    elif managed_hostname is not None:
+        # Only the server-side allocator passes this, never the client.
+        if selected:
+            raise ValueError('Conflicting domain reservations')
+        hostname = managed_hostname
     else:
         hostname = validate_hostname(selected) if selected else validate_hostname(default_hostname(project.slug))
     if hostname in {'pre.' + settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX,
@@ -103,7 +108,7 @@ def reserve_domain(project, environment, selected=''):
     reserved_suffixes = (settings.AUTOKOM_BASE_DOMAIN, settings.AUTOKOM_MANAGED_DOMAIN_SUFFIX)
     if selected and any(hostname == suffix or hostname.endswith('.' + suffix) for suffix in reserved_suffixes):
         raise ValidationError({'domain': 'Choisir le sous-domaine automatique, pas un domaine AUTOKOM personnalisé.'})
-    if Domain.objects.filter(hostname=hostname).exists():
+    if managed_hostname is None and Domain.objects.filter(hostname=hostname).exists():
         if selected or is_staging:
             raise ValidationError({'domain': 'Ce nom de domaine est déjà réservé.'})
         # Two organizations may legitimately use the same project name.
@@ -126,16 +131,36 @@ def reserve_domain(project, environment, selected=''):
     return domain
 
 
-@transaction.atomic
 def create_project(user, data):
     organization = get_organization(user, data['organization_id'], write=True)
     installation, repo = get_repository(user, data['installation_id'], data['repository_id'])
     name = data['name'].strip()
-    slug = slugify(name)[:160]
-    if not slug:
-        raise ValidationError({'name': 'Nom du projet invalide.'})
-    if Project.objects.filter(organization=organization, slug=slug).exists():
-        raise ValidationError({'name': 'Nom de projet déjà utilisé dans cette organisation.'})
+    if getattr(settings, 'AUTOKOM_PLATFORM_PREPROD', False):
+        # This separate console only publishes explicitly allowlisted hosts.
+        return _store_project(user, data, organization, installation, repo, name)
+
+    from apps.projects.project.naming import choose_project_address
+    for _ in range(3):
+        address = choose_project_address(organization, name)
+        try:
+            return _store_project(user, data, organization, installation, repo, name, address=address)
+        except IntegrityError:
+            if not (Project.objects.filter(organization=organization, slug=address.slug).exists()
+                    or Domain.objects.filter(hostname=address.hostname).exists()):
+                raise
+    raise ValidationError({'name': 'Le sous-domaine vient d’être réservé. Réessayez.'})
+
+
+@transaction.atomic
+def _store_project(user, data, organization, installation, repo, name, *, address=None):
+    if address is None:
+        slug = slugify(name)[:160]
+        if not slug:
+            raise ValidationError({'name': 'Nom du projet invalide.'})
+        if Project.objects.filter(organization=organization, slug=slug).exists():
+            raise ValidationError({'name': 'Nom de projet déjà utilisé dans cette organisation.'})
+    else:
+        slug = address.slug
     account = installation.get('account') or {}
     connection, _ = GitConnection.objects.update_or_create(
         organization=organization, provider=GitConnection.Provider.GITHUB,
@@ -157,8 +182,9 @@ def create_project(user, data):
         environment=environment, created_by=user, version=1, is_draft=True,
         branch=project.default_branch,
     )
-    # Always reserve a managed public address, even when a custom domain was supplied.
-    reserve_domain(project, environment)
+    # Reserve the exact server-verified address. A concurrent insert raises
+    # IntegrityError and creation replans, rather than using an unchecked host.
+    reserve_domain(project, environment, managed_hostname=address.hostname if address else None)
     if data.get('domain', '').strip():
         reserve_domain(project, environment, data['domain'])
     return project

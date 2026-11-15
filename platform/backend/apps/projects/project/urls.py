@@ -1,12 +1,13 @@
 from django.urls import path
 from apps.projects.project.views import (ProjectOrganizationsAPIView, ProjectListAPIView,
-    ProjectCreateAPIView, ProjectDetailAPIView, ProjectUpdateAPIView, ProjectArchiveAPIView, ProjectDeleteAPIView, ProjectRestoreAPIView, ProjectMembersListAPIView, ProjectMemberAddAPIView,
+    ProjectNamePreviewAPIView, ProjectCreateAPIView, ProjectDetailAPIView, ProjectUpdateAPIView, ProjectArchiveAPIView, ProjectDeleteAPIView, ProjectRestoreAPIView, ProjectMembersListAPIView, ProjectMemberAddAPIView,
     ProjectMemberUpdateAPIView, ProjectMemberRemoveAPIView)
 
 app_name = 'projects'
 urlpatterns = [
     path('organizations/', ProjectOrganizationsAPIView.as_view(), name='organizations'),
     path('', ProjectListAPIView.as_view(), name='list'),
+    path('name-preview/', ProjectNamePreviewAPIView.as_view(), name='name-preview'),
     path('create/', ProjectCreateAPIView.as_view(), name='create'),
     path('<uuid:project_id>/', ProjectDetailAPIView.as_view(), name='detail'),
     path('<uuid:project_id>/update/', ProjectUpdateAPIView.as_view(), name='update'),

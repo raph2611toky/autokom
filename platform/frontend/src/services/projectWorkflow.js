@@ -177,7 +177,7 @@ export async function saveRemoteProject(form, { onCreated = () => {} } = {}) {
     projectId = created?.project?.id
     envId = created?.environment_id
     if (!projectId || !envId) throw new Error('Réponse de création de projet incomplète.')
-    onCreated({ backendProjectId: projectId, backendEnvironmentId: envId })
+    onCreated({ backendProjectId: projectId, backendEnvironmentId: envId, ...(created.domain ? { managedDomain: created.domain } : {}) })
   }
   if (!['PRODUCTION', 'STAGING', 'DEVELOPMENT'].includes(requestedKind)) throw new Error('Environnement invalide.')
   const environments = (await projectsApi.environments(projectId))?.environments || []

@@ -1,4 +1,7 @@
+from django.conf import settings
 from django.db import transaction
+from rest_framework import serializers
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.views import APIView
 from rest_framework.parsers import JSONParser
 from rest_framework.exceptions import ValidationError, PermissionDenied, NotFound
@@ -61,6 +64,35 @@ class ProjectListAPIView(APIView):
             return handle_error(exc, 'project_list')
 
 
+class ProjectNamePreviewThrottle(UserRateThrottle):
+    scope = 'project_name_preview'
+    rate = '30/min'
+
+
+class ProjectNamePreviewSerializer(serializers.Serializer):
+    organization_id = serializers.UUIDField()
+    name = serializers.CharField(max_length=160, trim_whitespace=True)
+
+
+class ProjectNamePreviewAPIView(APIView):
+    parser_classes = [JSONParser]
+    permission_classes = [IsClientUser]
+    throttle_classes = [ProjectNamePreviewThrottle]
+
+    def post(self, request):
+        try:
+            if getattr(settings, 'AUTOKOM_PLATFORM_PREPROD', False):
+                return api_success({'enabled': False}, 'La préproduction utilise des domaines préattribués.')
+            data = ProjectNamePreviewSerializer(data=request.data)
+            data.is_valid(raise_exception=True)
+            from apps.projects.project.naming import preview_project_address
+            address = preview_project_address(request.user, **data.validated_data)
+            return api_success({'enabled': True, 'hostname': address.hostname, 'suffixed': address.suffixed},
+                               'Sous-domaine vérifié. Réservation lors de la création du projet.')
+        except Exception as exc:
+            return handle_error(exc, 'project_name_preview')
+
+
 class ProjectCreateAPIView(APIView):
     parser_classes = [JSONParser]
     permission_classes = [IsClientUser]
@@ -71,7 +103,7 @@ class ProjectCreateAPIView(APIView):
             serializer.is_valid(raise_exception=True)
             project = create_project(request.user, serializer.validated_data)
             environment = project.environments.get(slug='production')
-            domain = environment.domains.first()
+            domain = environment.domains.filter(domain_type="SUBDOMAIN").first()
             return api_success({'project': ProjectSerializer(project).data,
                                 'environment_id': str(environment.id),
                                 'domain': domain.hostname if domain else None}, 'Projet créé et configuration initiale préparée.', 201)

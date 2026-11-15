@@ -25,8 +25,9 @@ class ProjectAccessTests(TestCase):
             memory_mb=512, storage_mb=1024, is_default=True, is_premium=False)
         self.factory = APIRequestFactory()
 
+    @patch('apps.projects.project.naming.request_control', return_value={'available': True})
     @patch('apps.projects.project.services.get_repository')
-    def test_create_project_and_default_environment(self, mocked_repo):
+    def test_create_project_and_default_environment(self, mocked_repo, control):
         mocked_repo.return_value = (
             {'id': 11, 'account': {'id': 33, 'login': 'exampleteam'}},
             {'id': 123, 'full_name': 'exampleteam/myapp', 'html_url': 'https://github.com/exampleteam/myapp',

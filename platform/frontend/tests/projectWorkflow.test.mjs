@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { api } from '../src/services/api.js'
+import { projectsApi } from '../src/services/projectsApi.js'
 import { toBackendConfiguration, errorText, saveRemoteProject, prepareRemoteDeployment,
   listRemoteProjectRecords, getRemoteProjectDetail, syncFrontendVariables } from '../src/services/projectWorkflow.js'
 
@@ -52,6 +53,23 @@ test('format Django : Dockerfile, pas de données UI fictives ni de serveur lanc
   assert.match(errorText({ errors: { branch: ['Branche Git invalide.'] } }), /branch : Branche Git invalide/)
 })
 
+test('nom du projet : propose le domaine sans créer de projet ni appeler Jenkins', async () => {
+  const controller = new AbortController()
+  const calls = mocked({
+    'POST /api/projects/name-preview/': options => {
+      assert.deepEqual(JSON.parse(options.body), { organization_id: UUIDS.org, name: 'Portfolio' })
+      assert.equal(options.signal, controller.signal)
+      return { enabled: true, hostname: 'portfolio-a1b2c3d4.auto.ikom.mg', suffixed: true }
+    },
+  })
+  try {
+    const preview = await projectsApi.previewProjectName(UUIDS.org, 'Portfolio', controller.signal)
+    assert.equal(preview.hostname, 'portfolio-a1b2c3d4.auto.ikom.mg')
+    assert.equal(preview.suffixed, true)
+    assert.equal(calls.length, 1)
+  } finally { restore() }
+})
+
 test('enregistrer : création projet + configuration du brouillon, aucun lancement Jenkins', async () => {
   const created = []
   const pathBase = `/api/projects/${UUIDS.project}/environments/${UUIDS.env}`
@@ -60,7 +78,8 @@ test('enregistrer : création projet + configuration du brouillon, aucun lanceme
       const body = JSON.parse(options.body)
       assert.equal(body.organization_id, UUIDS.org)
       assert.equal(body.repository_id, 456)
-      return { project: { id: UUIDS.project }, environment_id: UUIDS.env }
+      assert.equal(Object.hasOwn(body, 'managedDomain'), false)
+      return { project: { id: UUIDS.project }, environment_id: UUIDS.env, domain: 'application-test-a1b2c3d4.auto.ikom.mg' }
     },
     [`GET /api/projects/${UUIDS.project}/environments/`]: { environments: [{ id: UUIDS.env, kind: 'PRODUCTION', slug: 'production' }] },
     [`GET ${pathBase}/configurations/offers/`]: { entitlement: { mode: 'DEVOPS', resource_plan: UUIDS.org } },
@@ -77,6 +96,7 @@ test('enregistrer : création projet + configuration du brouillon, aucun lanceme
     assert.equal(saved.projectId, UUIDS.project)
     assert.equal(saved.configurationId, UUIDS.cfg)
     assert.ok(created.some(ids => ids.backendProjectId === UUIDS.project))
+    assert.equal(created[0].managedDomain, 'application-test-a1b2c3d4.auto.ikom.mg')
     assert.ok(calls.every(c => !c.path.includes('/deployments/launch/')))
     assert.ok(calls.every(c => c.options.credentials === 'same-origin'))
     assert.ok(calls.every(c => !c.options.headers.Authorization))

@@ -19,6 +19,8 @@ const uuid = value => {
 export const projectsApi = Object.freeze({
   list: (pageNumber = 1) => api.get(`/projects/?page=${page(pageNumber)}&page_size=50`),
   organizations: () => api.get('/projects/organizations/'),
+  previewProjectName: (organizationId, name, signal) => api.post('/projects/name-preview/',
+    { organization_id: uuid(organizationId), name }, { signal }),
   create: values => api.post('/projects/create/', values),
   detail: projectId => api.get(`/projects/${uuid(projectId)}/`),
   update: (projectId, values) => api.patch(`/projects/${uuid(projectId)}/update/`, values),
