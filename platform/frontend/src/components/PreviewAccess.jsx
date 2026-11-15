@@ -9,6 +9,7 @@ export default function PreviewAccess({ projectId, environment }) {
   const [info, setInfo] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [progress, setProgress] = useState('')
   const [dialog, setDialog] = useState(null)
   const isPrivate = info?.private ?? (environment.wireguard_only === true)
 
@@ -43,17 +44,18 @@ export default function PreviewAccess({ projectId, environment }) {
         await projectsApi.revokePreviewAccess(projectId, envId)
         setInfo(previous => ({ ...previous, issued: false }))
       } else {
-        await projectsApi.setPreviewAccess(projectId, envId, action === 'private')
+        await projectsApi.setPreviewAccess(projectId, envId, action === 'private', {onProgress: setProgress})
         setInfo(await projectsApi.previewAccess(projectId, envId))
       }
     } catch (err) { setError(errorText(err)) }
-    finally { setBusy(false) }
+    finally { setBusy(false); setProgress('') }
   }
 
   return <section className="ak-workspace-sheet" aria-label="Visibilité de la préproduction">
     <h2><LockKeyhole size={19}/> Accès à la préproduction</h2>
     <p>{environment.name} · <strong>{isPrivate ? 'WireGuard uniquement' : 'Public'}</strong></p>
     <p>Ce réglage ne modifie ni votre dépôt GitHub ni les autres environnements.</p>
+    {progress && <p role="status">{progress}</p>}
     {error && <p className="feedback error" role="alert">{error}</p>}
     <div className="ak-project-detail-actions">
       <button type="button" className="button-outline" disabled={busy} onClick={() => isPrivate ? setDialog('public') : apply('private')}>

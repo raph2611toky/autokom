@@ -1043,6 +1043,49 @@ def _compose_env(state):
     return env
 
 
+def deploy_full():
+    """One production release entry point, including the broker and frontend."""
+    from types import SimpleNamespace
+    from autokom_frontend_manager import FrontendError, main as deploy_frontend
+
+    root_only()
+    if load_state().get('runtime') != 'systemd':
+        raise AppError('Le déploiement intégral nécessite le runtime systemd.')
+    deploy(SimpleNamespace(check=True))
+    deploy(SimpleNamespace(check=False))
+    queue_probe = (
+        'from apps.deployments.runs.models import DeploymentRun, StackDeployment; import sys; '
+        'sys.exit(5 if DeploymentRun.objects.filter(status__in=["RUNNING","PREPARED"]).exists() '
+        'or StackDeployment.objects.filter(status__in=["PREPARING","ACTIVATING"]).exists() else 0)'
+    )
+    # Do not terminate a publication mid-flight. Queued jobs remain in MySQL.
+    deadline = time.monotonic() + 150
+    while True:
+        try:
+            result = subprocess.run(['runuser', '-u', USER, '--', str(VENV/'bin/python'),
+                                     'manage.py', 'shell', '-c', queue_probe], cwd=BACKEND,
+                                    env=django_env(), capture_output=True, timeout=25)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AppError('File de publication non vérifiable. Broker et worker conservés.') from exc
+        if result.returncode == 0:
+            break
+        if result.returncode != 5 or time.monotonic() >= deadline:
+            raise AppError('File de publication active ou non vérifiable. Broker et worker conservés.')
+        print('  › Publication active, AUTOKOM attend sa fin avant la mise à jour.')
+        time.sleep(5)
+    call(['systemctl', 'restart', 'autokom-platform-broker.service',
+          'autokom-deployment-worker.service'], timeout=45)
+    from autokom_control_recovery import ControlRecoveryError, reconcile
+    try:
+        reconcile(apply=True)
+        result = deploy_frontend(['deploy', '--apply'])
+    except (ControlRecoveryError, FrontendError) as exc:
+        raise AppError(str(exc)) from exc
+    if result:
+        raise AppError('Publication du frontend non confirmée.')
+    return 0
+
+
 def deploy(args):
     root_only()
     state = load_state()
@@ -1064,6 +1107,16 @@ def deploy(args):
         if args.check:
             print('  ✓ Contrôles DevSecOps terminés · aucun changement déployé.')
             return 0
+        # Install only the systemd entry point. No VPN/firewall changes until
+        # a user actually requests private preview access.
+        if ROOT == Path('/opt/autokom/source'):
+            with phase('Préproduction · préparation du provisionnement autonome'):
+                from autokom_preview_provision_admin import ProvisionInstallError, install
+                try:
+                    install(ROOT)
+                except (ProvisionInstallError, OSError, subprocess.SubprocessError):
+                    # A VPN setup conflict must not block public upgrades.
+                    print('  ! AUTOKOM_PREVIEW_PROVISION_UNIT · provisionneur WireGuard non installé.')
         if state['runtime'] == 'systemd':
             with phase('MySQL · migrations Django versionnées'):
                 run_as_service([str(VENV/'bin/python'), 'manage.py', 'migrate', '--noinput'], timeout=300)
@@ -1229,7 +1282,9 @@ def main(argv=None):
     setup_p.add_argument('--yes', action='store_true', help='Confirmer en mode non interactif (Ansible)')
     setup_p.add_argument('--wizard', action='store_true', help='Forcer l’assistant interactif')
     deploy_p = sub.add_parser('deploy', help='Contrôles DevSecOps et déploiement Django')
-    deploy_p.add_argument('--check', action='store_true', help='Scanner et vérifier sans déployer')
+    deploy_opts = deploy_p.add_mutually_exclusive_group()
+    deploy_opts.add_argument('--check', action='store_true', help='Scanner et vérifier sans déployer')
+    deploy_opts.add_argument('--full', action='store_true', help='Mettre à jour Django, le broker, le worker et React')
     doctor_p = sub.add_parser('doctor', help='Diagnostiquer MySQL, proposer la réparation sur confirmation')
     doctor_p.add_argument('--no-repair', action='store_true', help='Diagnostic strictement en lecture seule')
     sub.add_parser('status', help='État du service et health check')
@@ -1328,7 +1383,7 @@ def main(argv=None):
         if not args.domain and not args.yes and _is_interactive():
             args.wizard = True
         return setup(args)
-    if args.action == 'deploy': return deploy(args)
+    if args.action == 'deploy': return deploy_full() if args.full else deploy(args)
     if args.action == 'doctor': return doctor(args)
     if args.action == 'status': return status(args)
     if args.action == 'admin':

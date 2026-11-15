@@ -33,3 +33,30 @@ test('une adresse WireGuard ne devient pas un lien public', () => {
   assert.equal(publicSiteUrl(site), null)
   assert.equal(siteStateLabel(site), 'WireGuard uniquement')
 })
+
+test('visibilite : attend le provisionnement et la reconciliation sans nouveau clic', async () => {
+  const { retryPreviewVisibility } = await import('../src/services/projectsApi.js')
+  let n = 0
+  const progress = [], waits = []
+  const result = await retryPreviewVisibility(async () => {
+    if (n++ < 2) throw Object.assign(new Error('Préparation'), {
+      status:503, errors:{code:'AUTOKOM_PREVIEW_HA_BUSY', retry_after:4},
+    })
+    return {private:true}
+  }, {onProgress: v => progress.push(v), delay: ms => waits.push(ms)})
+  assert.deepEqual(result, {private:true})
+  assert.deepEqual(waits, [4000,4000])
+  assert.equal(progress.length, 2)
+})
+
+test('visibilite : ne relance pas une autorisation IAM manquante', async () => {
+  const { retryPreviewVisibility } = await import('../src/services/projectsApi.js')
+  let n = 0
+  await assert.rejects(retryPreviewVisibility(async () => {
+    n++
+    throw Object.assign(new Error('IAM insuffisant'), {
+      status:503, errors:{code:'AUTOKOM_PREVIEW_CLOUD_IAM', retry_after:4},
+    })
+  }, {delay: async () => {throw new Error('Retry incorrect')}}), /IAM insuffisant/)
+  assert.equal(n,1)
+})

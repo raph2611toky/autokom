@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Explicit host provisioning. Never alter wg0, nginx, UFW or cloud firewall.
+# Idempotent local tunnel provisioning, invoked by the AUTOKOM provisioner.
 set -euo pipefail
 umask 077
 [[ "$EUID" == 0 ]] || { echo "Exécuter avec sudo." >&2; exit 2; }
@@ -57,6 +57,8 @@ local-ttl=5
 DNS
 install -m 0600 "$source_dir/firewall.nft" "$state/firewall.nft"
 nft -c -f "$state/firewall.nft"
+# Restore our table after a third-party firewall reload, without restarting peers.
+nft -f "$state/firewall.nft"
 for unit in vpn dns peers; do
     install -m 0644 "$source_dir/autokom-preview-$unit.service" /etc/systemd/system/
 done

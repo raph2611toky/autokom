@@ -30,6 +30,9 @@ class PreviewTests(unittest.TestCase):
         self.addCleanup(self.setup.close)
         root = Path(self.setup.enter_context(tempfile.TemporaryDirectory()))
         self.execution = self.setup.enter_context(patch.object(broker, 'run', return_value=''))
+        self.setup.enter_context(patch.object(wg, 'provision'))
+        self.public_record = self.setup.enter_context(patch.object(broker, '_cloudflare_record'))
+        self.public_dns = self.setup.enter_context(patch.object(broker, '_check_dns'))
         self.verify_public = self.setup.enter_context(patch.object(broker, '_verify_customer_https'))
         self.verify_private = self.setup.enter_context(patch.object(access, 'verify_private_https'))
         for module, fields in [
@@ -156,6 +159,42 @@ class PreviewTests(unittest.TestCase):
         self.assertTrue(self.config.read_text().startswith(access.MARKER))
         self.assertEqual(self.verify_private.call_count, 2)
 
+    def test_private_activation_uses_dns01_and_not_public_a(self):
+        self.live()
+        self.private()
+        with patch.object(broker, '_usable_customer_certificate', return_value=False), \
+             patch.object(broker, '_issue_customer_certificate') as cert:
+            self.assertTrue(broker.handle('domain.activate', {**self.params, 'hostname': HOST,
+                        'managed': True, 'wireguard_only': True})['active'])
+        cert.assert_called_once_with(HOST, managed=True)
+        self.public_record.assert_not_called()
+        self.public_dns.assert_not_called()
+        self.assertTrue(self.config.read_text().startswith(access.MARKER))
+
+    def test_private_intent_with_missing_policy_cannot_publish_public(self):
+        self.live()
+        with self.assertRaisesRegex(broker.BrokerError, 'AUTOKOM_PREVIEW_STATE_INVALID'):
+            broker.handle('domain.activate', {**self.params, 'hostname': HOST,
+                          'managed': True, 'wireguard_only': True})
+        self.public_dns.assert_not_called()
+        self.assertEqual(self.config.read_text(), self.public)
+
+    def test_public_reactivation_waits_for_dns_without_unmasking(self):
+        self.live()
+        self.private()
+        before = self.config.read_text()
+        self.public_dns.side_effect = broker.BrokerError('AUTOKOM_DNS_A_MISMATCH: not ready')
+        with self.assertRaisesRegex(broker.BrokerError, 'AUTOKOM_PREVIEW_PUBLIC_DNS_PENDING'):
+            self.private(False)
+        self.assertEqual(self.config.read_text(), before)
+        self.assertTrue(self.path.is_file())
+
+    def test_new_preview_does_not_need_the_cloud_delivery_lock(self):
+        with patch.object(broker, 'delivery_configured', return_value=True), \
+             patch.object(broker, 'delivery_module') as controller:
+            self.assertEqual(self.private(), {'private': True})
+        controller.assert_not_called()
+
     def test_rollback_does_not_restore_a_public_proxy(self):
         self.live()
         self.private()
@@ -169,7 +208,8 @@ class PreviewTests(unittest.TestCase):
 
     def test_public_https_not_confirmed_if_wan_still_serves_app(self):
         self.setup.close()
-        with patch.object(broker, '_verify_customer_https'), \
+        with patch.object(access, 'verify_split_dns'), \
+             patch.object(broker, '_verify_customer_https'), \
              patch.object(broker, '_customer_https_probe_once', return_value=200), \
              patch.object(access.time, 'sleep'):
             with self.assertRaisesRegex(broker.BrokerError, 'PUBLIC_ROUTE'):

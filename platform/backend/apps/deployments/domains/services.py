@@ -109,11 +109,15 @@ def verify_and_activate(user,project_id,environment_id,domain_id):
     if not hmac.compare_digest(expected_hash,domain.verification_token_hash):
         raise PermissionDenied('Preuve DNS invalide ou clé serveur modifiée.')
     managed=domain.domain_type==Domain.Type.SUBDOMAIN
-    if managed:
+    private = getattr(env, 'wireguard_only', False)
+    if private and not managed:
+        raise ValidationError({'domain': 'Un domaine WireGuard doit être géré par AUTOKOM.'})
+    if managed and not private:
         # Refuse to overwrite another Cloudflare A record or activate before delegation.
         request_control('domain.dns.create',{'hostname':domain.hostname},timeout=22)
-    request_control('domain.verify',{'hostname':domain.hostname,
-                   'managed':managed,'token':token},timeout=20)
+    if not private:
+        request_control('domain.verify',{'hostname':domain.hostname,
+                       'managed':managed,'token':token},timeout=20)
     domain.verified_at=timezone.now()
     domain.status=Domain.Status.VERIFYING
     domain.save(update_fields=['verified_at','status'])
@@ -123,7 +127,8 @@ def verify_and_activate(user,project_id,environment_id,domain_id):
     runtime=request_control('runtime.status',{'environment_id':str(env.id)},timeout=12).get('runtime')
     if runtime:
         request_control('domain.activate',{'hostname':domain.hostname,
-                        'environment_id':str(env.id),'managed':managed,'token':token},timeout=720)
+                        'environment_id':str(env.id),'managed':managed,'token':token,
+                        **({'wireguard_only': True} if private else {})},timeout=720)
         domain.status=Domain.Status.ACTIVE
         domain.tls_status='ACTIVE'
         if not Domain.objects.filter(environment=env, is_primary=True).exclude(pk=domain.pk).exists():
@@ -150,22 +155,16 @@ def activate_managed_domains_for_release(environment):
             domain.save(update_fields=['verification_token_hash'])
         if not hmac.compare_digest(domain.verification_token_hash or '', hashlib.sha256(token.encode()).hexdigest()):
             raise ValidationError({'domain':'Empreinte de propriété AUTOKOM non conforme.'})
-        request_control('domain.dns.create', {'hostname':domain.hostname}, timeout=22)
-        # DNS propagation is eventually consistent: retry verification, never bypass it.
-        import time
-        from apps.deployments.runs.autokom_socket import AutokomControlUnavailable
-        for attempt in range(4):
-            try:
-                request_control('domain.verify', {'hostname':domain.hostname, 'managed':True, 'token':token}, timeout=20)
-                break
-            except AutokomControlUnavailable:
-                if attempt == 3:
-                    raise
-                time.sleep(5 * (attempt + 1))
-        request_control('domain.activate', {
-            'hostname':domain.hostname, 'environment_id':str(environment.id),
-            'managed':True, 'token':token,
-        }, timeout=720)
+        private = getattr(environment, 'wireguard_only', False)
+        if private:
+            # The privileged broker still verifies the installed policy,
+            # public ingress denial, split DNS and the DNS-01 certificate.
+            request_control('domain.activate', {
+                'hostname': domain.hostname, 'environment_id': str(environment.id),
+                'managed': True, 'wireguard_only': True, 'wait_preview_provision': True, 'token': token,
+            }, timeout=1200)
+        else:
+            _activate_public_managed_domain(environment, domain, token)
         domain.verified_at=timezone.now()
         domain.status=Domain.Status.ACTIVE
         domain.tls_status='ACTIVE'
@@ -173,6 +172,25 @@ def activate_managed_domains_for_release(environment):
             domain.is_primary=True
         domain.activation_error_code=''
         domain.save(update_fields=['verified_at','status','tls_status','is_primary','activation_error_code'])
+
+
+def _activate_public_managed_domain(environment, domain, token):
+    request_control('domain.dns.create', {'hostname':domain.hostname}, timeout=22)
+    # DNS propagation is eventually consistent: retry verification, never bypass it.
+    import time
+    from apps.deployments.runs.autokom_socket import AutokomControlUnavailable
+    for attempt in range(4):
+        try:
+            request_control('domain.verify', {'hostname':domain.hostname, 'managed':True, 'token':token}, timeout=20)
+            break
+        except AutokomControlUnavailable:
+            if attempt == 3:
+                raise
+            time.sleep(5 * (attempt + 1))
+    request_control('domain.activate', {
+        'hostname':domain.hostname, 'environment_id':str(environment.id),
+        'managed':True, 'token':token,
+    }, timeout=720)
 
 
 def choose_primary_domain(user, project_id, environment_id, domain_id):

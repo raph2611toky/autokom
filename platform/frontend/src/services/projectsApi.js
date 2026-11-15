@@ -17,6 +17,27 @@ const uuid = value => {
   return value
 }
 const previewPath = (projectId, envId) => `/projects/${uuid(projectId)}/environments/${uuid(envId)}/preview-access/`
+const previewRetryCodes = new Set([
+  'AUTOKOM_PREVIEW_PROVISION_PENDING', 'AUTOKOM_PREVIEW_HA_BUSY', 'AUTOKOM_PREVIEW_PEER_BUSY',
+  'AUTOKOM_PREVIEW_PUBLIC_DNS_PENDING', 'AUTOKOM_PREVIEW_CLOUD_RETRY',
+])
+
+export async function retryPreviewVisibility(task, { onProgress = () => {},
+    delay = ms => new Promise(resolve => setTimeout(resolve, ms)), maxAttempts = 100 } = {}) {
+  const deadline = Date.now() + 9 * 60 * 1000
+  for (let attempt = 1; ; attempt++) {
+    try { return await task() }
+    catch (err) {
+      const seconds = Number(err?.errors?.retry_after)
+      if (err?.status !== 503 || !previewRetryCodes.has(err?.errors?.code) ||
+          !Number.isInteger(seconds) || seconds < 1 || seconds > 15 ||
+          attempt >= maxAttempts || Date.now() + seconds * 1000 > deadline) throw err
+      onProgress(err.message)
+      await delay(seconds * 1000)
+    }
+  }
+}
+
 export const projectsApi = Object.freeze({
   list: (pageNumber = 1) => api.get(`/projects/?page=${page(pageNumber)}&page_size=50`),
   organizations: () => api.get('/projects/organizations/'),
@@ -31,7 +52,8 @@ export const projectsApi = Object.freeze({
   environments: projectId => api.get(`/projects/${uuid(projectId)}/environments/`),
   createEnvironment: (projectId, values) => api.post(`/projects/${uuid(projectId)}/environments/create/`, values),
   previewAccess: (projectId, envId) => api.get(previewPath(projectId, envId)),
-  setPreviewAccess: (projectId, envId, privateAccess) => api.patch(previewPath(projectId, envId), {private: privateAccess}),
+  setPreviewAccess: (projectId, envId, privateAccess, options) => retryPreviewVisibility(
+    () => api.patch(previewPath(projectId, envId), {private: privateAccess}), options),
   issuePreviewAccess: (projectId, envId) => api.post(previewPath(projectId, envId) + 'credentials/', {}, {download: true}),
   revokePreviewAccess: (projectId, envId) => api.delete(previewPath(projectId, envId) + 'credentials/'),
   variables: (projectId, envId) => api.get(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/variables/`),

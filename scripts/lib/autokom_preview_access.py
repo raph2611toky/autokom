@@ -51,7 +51,7 @@ def policy(root, env):
 
 
 @contextmanager
-def lock(path, busy):
+def lock(path, busy, *, code='PEER_BUSY'):
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         st = os.fstat(fd)
@@ -60,7 +60,7 @@ def lock(path, busy):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise error('BUSY', busy) from exc
+            raise error(code, busy) from exc
         yield
     finally:
         os.close(fd)
@@ -109,7 +109,24 @@ def remove_dns(host):
     dns_path(host).unlink(missing_ok=True)
 
 
+def verify_split_dns(b, host):
+    for attempt in range(5):
+        # Inotify publication in dnsmasq is asynchronous; check the actual
+        # private resolver, never Cloudflare/Google for a VPN-only hostname.
+        try:
+            reply = b.run(['dig', '@' + wg.SERVER, '+short', '+time=1', '+tries=1', 'A', host],
+                          timeout=3, max_output=2048)
+        except b.BrokerError:
+            reply = ''
+        if set(reply.split()) == {wg.SERVER}:
+            return
+        if attempt < 4:
+            time.sleep(0.5)
+    raise error('PRIVATE_DNS', 'Le résolveur WireGuard n’a pas confirmé le domaine.')
+
+
 def verify_private_https(b, host, healthcheck):
+    verify_split_dns(b, host)
     # Successful private HTTPS is not sufficient: prove WAN serves a 404.
     b._verify_customer_https(host, healthcheck, address='127.0.0.1', port=wg.HTTPS_PORT)
     address = b._customer_https_probe_address()
@@ -131,7 +148,7 @@ def requested(b, params):
     return b, env
 
 
-def _domain_names(b, env, names):
+def _domain_names(b, env, names, *, require_all=True):
     if not isinstance(names, list) or not 1 <= len(names) <= 20:
         raise error('DOMAIN', 'Sous-domaine de préproduction requis.')
     runtime = b._runtime_dns_env()
@@ -147,6 +164,8 @@ def _domain_names(b, env, names):
                 or (not b.PREPROD and not preprod_slug)
                 or (b.PREPROD and name not in {h.strip() for h in approved})):
             raise error('DOMAIN', 'Sous-domaine hors du périmètre de préproduction.')
+    if not require_all:
+        return names
     for row in b.STATE.glob('domain-owner-*.txt'):
         if not row.is_symlink() and row.is_file() and row.read_text().strip() == env:
             name = row.name[len('domain-owner-'):-len('.txt')]
@@ -175,16 +194,22 @@ def visibility(b, params):
     private = params.get('private')
     if type(private) is not bool:
         raise error('INVALID', 'Visibilité non reconnue.')
+    _domain_names(b, env, params.get('hostnames'))
+    if private:
+        if (b.STATE / env / 'previous.json').exists():
+            raise error('RELEASE_PENDING', 'Une publication est en cours de finalisation.')
+        wg.provision(b.run)
     # Same lock ordering as runtime.deprovision. In particular an already
     # running HA reconciliation must not republish a preview during cutover.
-    if not b.PREPROD and b.delivery_configured():
+    if (not b.PREPROD and b.delivery_configured() and
+            os.path.lexists(b.STATE / env / 'current.json')):
         d = b.delivery_module()
-        with lock(d.LOCK, 'Réconciliation GCP en cours. Réessayez.'):
-            return b._runtime_lock_call(lambda p: _visibility(b, p), params)
+        with lock(d.LOCK, 'Réconciliation GCP en cours.', code='HA_BUSY'):
+            return b._runtime_lock_call(lambda p: _visibility(b, p, cloud_locked=True), params)
     return b._runtime_lock_call(lambda p: _visibility(b, p), params)
 
 
-def _visibility(b, params):
+def _visibility(b, params, *, cloud_locked=False):
     _, env = requested(b, params)
     private = params['private']
     names = _domain_names(b, env, params.get('hostnames'))
@@ -194,7 +219,7 @@ def _visibility(b, params):
         return {'private': False}
 
     if (path.parent / 'previous.json').exists():
-        raise error('BUSY', 'Une publication est en cours de finalisation.')
+        raise error('RELEASE_PENDING', 'Une publication est en cours de finalisation.')
     active = active_domains(b, env, names)
     current = b._load_state(env)
     if current and current.get('stack_project_id'):
@@ -218,6 +243,10 @@ def _visibility(b, params):
             # A prior public worker may still be reachable even without its
             # DNS record. Block that route before reporting a private site.
             if not b.PREPROD and b.delivery_configured() and (current or active):
+                if not cloud_locked:
+                    # Runtime became active between read and lock. Retry in
+                    # the established cloud -> runtime lock order.
+                    raise error('HA_BUSY', 'Publication apparue pendant la préparation.')
                 delivery = b.delivery_module()
                 from autokom_ha_dns import marker, _change
                 try:
@@ -229,6 +258,19 @@ def _visibility(b, params):
                     raise error('CLOUD_ROUTE', 'Le retrait de la publication GCP n’a pas été confirmé.') from exc
             if identity not in peers:
                 wg.persist(peers, {**peers, identity: {'address': address}}, b.run)
+        if not private:
+            # A never-public preview has no A record. Prepare it before
+            # switching the vhost and leave the VPN policy in place on delay.
+            for host in active:
+                if not (b.STATE / env / 'current.json').is_file():
+                    raise error('RELEASE_PENDING', 'Publication locale non confirmée.')
+                b._cloudflare_record(host)
+                try:
+                    b._check_dns(host, None, True)
+                except b.BrokerError as exc:
+                    if str(exc).startswith(('AUTOKOM_DNS_A_MISMATCH:', 'AUTOKOM_DIG_COMMAND_FAILED:')):
+                        raise error('PUBLIC_DNS_PENDING', 'Propagation du DNS public en cours.') from exc
+                    raise
         old_policy = wg.read(path, 512) if old_ip else None
         old_dns = {host: dns_path(host).exists() for host in active}
         try:

@@ -10,13 +10,33 @@ from rest_framework.views import APIView
 from apps.accounts.user.permissions import IsClientUser
 from apps.deployments.domains.models import Domain
 from apps.deployments.domains.services import _reject_domain_mutation_during_deployment
-from apps.deployments.runs.autokom_socket import request_control
+from apps.deployments.runs.autokom_socket import AutokomControlUnavailable, request_control
 from apps.projects.common import get_environment
 from apps.projects.configurations.models import ServiceStack
 from apps.projects.environments.models import Environment
 from apps.projects.project.models import Project
 from helpers.errors import handle_error
-from helpers.responses import api_success
+from helpers.responses import api_error, api_success
+
+
+RETRYABLE = {
+    'AUTOKOM_PREVIEW_PROVISION_PENDING': ('Installation automatique du VPN en cours.', 4),
+    'AUTOKOM_PREVIEW_HA_BUSY': ('Synchronisation Cloud en cours. Reprise automatique.', 4),
+    'AUTOKOM_PREVIEW_PEER_BUSY': ('Synchronisation WireGuard en cours. Reprise automatique.', 3),
+    'AUTOKOM_PREVIEW_PUBLIC_DNS_PENDING': ('Le DNS public est en cours de propagation. Le site reste privé.', 8),
+    'AUTOKOM_PREVIEW_CLOUD_RETRY': ('La configuration réseau Cloud converge. Reprise automatique.', 8),
+}
+OPERATOR = {
+    'AUTOKOM_PREVIEW_CLOUD_IAM': 'L’identité GCP de la VM n’a pas les droits nécessaires sur le pare-feu.',
+    'AUTOKOM_PREVIEW_CLOUD_POLICY': 'Une politique GCP existante interdit l’accès UDP au tunnel.',
+    'AUTOKOM_PREVIEW_RELEASE_PENDING': 'Une publication de cette préproduction est en cours de finalisation.',
+    'AUTOKOM_PREVIEW_PACKAGES': 'Le serveur n’a pas pu installer les dépendances WireGuard.',
+    'AUTOKOM_PREVIEW_ACME_PLUGIN': 'Le serveur n’a pas pu préparer la validation TLS par DNS.',
+    'AUTOKOM_PREVIEW_ACME_RENEWAL': 'Le renouvellement automatique du certificat n’est pas opérationnel.',
+    'AUTOKOM_PREVIEW_CLOUD_ENDPOINT': 'L’IPv4 de la VM GCP ne correspond pas à l’adresse d’entrée configurée.',
+    'AUTOKOM_PREVIEW_HOST_SETUP': 'Le serveur n’a pas pu préparer automatiquement le tunnel. Consultez le journal du provisionneur.',
+    'AUTOKOM_PREVIEW_CLOUD_SHARED_VPC': 'Le réseau GCP appartient à un autre projet.',
+}
 
 
 class PreviewVisibilitySerializer(serializers.Serializer):
@@ -89,6 +109,17 @@ class PreviewAccessAPIView(APIView):
                 env.wireguard_only = private
                 env.save(update_fields=['wireguard_only', 'updated_at'])
             return api_success(presentation(env, domains), 'Visibilité enregistrée.')
+        except AutokomControlUnavailable as exc:
+            code = getattr(exc, 'safe_code', None)
+            if code in RETRYABLE:
+                message, seconds = RETRYABLE[code]
+                response = api_error(message, errors={'code': code, 'retry_after': seconds}, status_code=503)
+                response['Retry-After'] = str(seconds)
+                response['Cache-Control'] = 'no-store'
+                return response
+            if code in OPERATOR:
+                return api_error(OPERATOR[code], errors={'code': code}, status_code=503)
+            return handle_error(exc, 'preview_visibility')
         except Exception as exc:
             return handle_error(exc, 'preview_visibility')
 

@@ -80,6 +80,9 @@ for name in web broker worker; do
     unit="autokom-preprod-$name.service"
     install -o root -g root -m 0644 "$repo/scripts/preprod/$unit" "/etc/systemd/system/$unit"
 done
+if ! python3 "$repo/scripts/lib/autokom_preview_provision_admin.py" "$repo"; then
+    echo 'AUTOKOM_PREVIEW_PROVISION_UNIT · provisionneur WireGuard non installé.' >&2
+fi
 systemctl daemon-reload
 systemctl enable autokom-preprod-web.service autokom-preprod-broker.service
 systemctl restart autokom-preprod-web.service autokom-preprod-broker.service

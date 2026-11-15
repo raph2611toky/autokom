@@ -418,10 +418,13 @@ def _release_docker_and_proxy(run, *, stack=None, stack_role=None, restore=None)
             from apps.projects.configurations.stack_services import stack_domain_hostname
             stack_options['stack_backend_hostname'] = stack_domain_hostname(
                 stack.stack.backend_environment, backend_cfg)
+    private_preview = getattr(run.environment, 'wireguard_only', False)
+    if private_preview:
+        add_customer_trace(run, 'release', 'broker', 'Préparation et vérification automatiques du réseau WireGuard.')
     result=request_control('runtime.restore' if restore else 'runtime.deploy',{
         **({'restore': restore} if restore else {}),
         **stack_options,
-        **({'wireguard_only': True} if getattr(run.environment, 'wireguard_only', False) else {}),
+        **({'wireguard_only': True} if private_preview else {}),
         'run_id':str(run.pk),'environment_id':str(run.environment_id),
         'cpu_millicores':int(resource['cpu_millicores']),
         'memory_mb':int(resource['memory_mb']),'storage_mb':int(resource['storage_mb']),
@@ -432,7 +435,7 @@ def _release_docker_and_proxy(run, *, stack=None, stack_role=None, restore=None)
         # Neither choice changes the validated local release transaction.
         'cloud_delivery_requested':not getattr(settings, 'AUTOKOM_PLATFORM_PREPROD', False),
         'ha_requested':bool(run.configuration.high_availability_requested),
-    },timeout=280)
+    },timeout=(880 if private_preview else 280))
     add_log(run, 'AUTOKOM_TECH:release:Docker · conteneur et contrôle HTTP interne validés.', level='TECH')
     add_customer_trace(run, 'release', 'docker', 'Réponse HTTP interne conforme : la nouvelle version est candidate à l’activation HTTPS.')
     if run.mode_snapshot == 'DEVSECOPS' and PipelineStageRun.objects.filter(deployment=run, stage_key='dast').exists():
@@ -467,7 +470,6 @@ def _release_docker_and_proxy(run, *, stack=None, stack_role=None, restore=None)
     if not Domain.objects.filter(environment=run.environment, domain_type=Domain.Type.SUBDOMAIN).exists():
         from apps.projects.project.services import reserve_domain
         reserve_domain(run.environment.project, run.environment)
-    private_preview = getattr(run.environment, 'wireguard_only', False)
     add_log(run, ('AUTOKOM_TECH:health:Domaine WireGuard · vérification DNS, configuration Nginx et certificat HTTPS.'
                   if private_preview else
                   'AUTOKOM_TECH:health:Domaine public · vérification DNS, configuration Nginx et certificat HTTPS.'), level='TECH')

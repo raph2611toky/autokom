@@ -1,0 +1,13 @@
+[Unit]
+Description=AUTOKOM automatic private preview provisioning
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @AUTOKOM_SOURCE@/scripts/wireguard/provision.py
+RuntimeDirectory=autokom-preview-provision
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+TimeoutStartSec=540

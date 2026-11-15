@@ -72,3 +72,19 @@ class PreviewApiTests(SimpleTestCase):
             resp = PreviewAccessAPIView.as_view()(self.request('get'), project_id=EID, environment_id=EID)
         self.assertEqual(resp.status_code, 404)
         request.assert_not_called()
+
+    def test_provision_pending_is_retriable_and_does_not_change_visibility(self):
+        from apps.deployments.runs.autokom_socket import AutokomControlUnavailable
+        self.env.wireguard_only = False
+        problem = AutokomControlUnavailable()
+        problem.safe_code = 'AUTOKOM_PREVIEW_PROVISION_PENDING'
+        with patch(self.scope + '.authorized', return_value=self.env), \
+             patch(self.scope + '.transaction.atomic'), \
+             patch(self.scope + '._reject_domain_mutation_during_deployment'), \
+             patch(self.scope + '.request_control', side_effect=problem):
+            resp = PreviewAccessAPIView.as_view()(self.request('patch', {'private': True}), project_id=EID, environment_id=EID)
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(resp['Retry-After'], '4')
+        self.assertEqual(resp.data['errors']['code'], problem.safe_code)
+        self.assertFalse(self.env.wireguard_only)
+        self.env.save.assert_not_called()

@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+import time
 
 ROOT = Path('/etc/autokom-preview')
 REGISTRY = ROOT / 'peers.json'
@@ -19,6 +20,8 @@ POOL = ipaddress.IPv4Network('10.203.0.0/16')
 PORT = 51896
 HTTPS_PORT = 18443
 DEVICE = 'akpreview'
+PROVISION_SERVICE = 'autokom-preview-provision.service'
+PROVISION_STATUS = Path('/run/autokom-preview-provision/status.json')
 
 
 class WireGuardError(RuntimeError):
@@ -131,6 +134,50 @@ def persist(old, new, execute):
         atomic(SYNC, sync_config(old))
         execute(['systemctl', 'start', 'autokom-preview-peers.service'], timeout=10)
         raise
+
+
+def provision(execute, *, wait=False):
+    # Apt and firewall writes run in a separate system service, never in a
+    # Gunicorn request or under the Nginx/GCP locks. Concurrent starts coalesce.
+    def read_status():
+        try:
+            return json.loads(read(PROVISION_STATUS, 1024))
+        except FileNotFoundError:
+            return {}
+
+    status = read_status()
+    if status.get('state') == 'ready' and (wait or time.time() - status.get('updated', 0) < 900):
+        try:
+            for unit in ('autokom-preview-vpn.service', 'autokom-preview-dns.service'):
+                execute(['systemctl', 'is-active', '--quiet', unit], timeout=3)
+            return
+        except RuntimeError:
+            pass
+    state = execute(['systemctl', 'show', '--property=ActiveState', '--value', PROVISION_SERVICE],
+                    timeout=5).strip()
+    transient = {'AUTOKOM_PREVIEW_CLOUD_RETRY', 'AUTOKOM_PREVIEW_CLOUD_API', 'AUTOKOM_PREVIEW_PACKAGES'}
+    if state != 'activating' and status.get('state') == 'failed':
+        code = status.get('code') or 'AUTOKOM_PREVIEW_HOST_SETUP'
+        age = time.time() - status.get('updated', 0)
+        if age < 45:
+            if code not in transient or wait:
+                raise WireGuardError(code)
+            raise WireGuardError('AUTOKOM_PREVIEW_PROVISION_PENDING')
+    if wait:
+        try:
+            execute(['systemctl', 'start', PROVISION_SERVICE], timeout=550)
+        except RuntimeError as exc:
+            raise WireGuardError(read_status().get('code') or 'AUTOKOM_PREVIEW_HOST_SETUP') from exc
+        status = read_status()
+        if status.get('state') != 'ready':
+            raise WireGuardError(status.get('code') or 'AUTOKOM_PREVIEW_HOST_SETUP')
+        return
+    if state != 'activating':
+        try:
+            execute(['systemctl', 'start', '--no-block', PROVISION_SERVICE], timeout=5)
+        except RuntimeError as exc:
+            raise WireGuardError('AUTOKOM_PREVIEW_HOST_SETUP') from exc
+    raise WireGuardError('AUTOKOM_PREVIEW_PROVISION_PENDING')
 
 
 def ready(execute, public_ip):

@@ -365,6 +365,14 @@ def _dynamic_preview(params):
 
 def _docker_deploy(params):
     """Serialize all Docker reservations to prevent local TCP port collisions."""
+    if params.get('wireguard_only') is True:
+        environment_id = valid_id(params.get('environment_id'))
+        if not preview.policy(STATE, environment_id):
+            raise preview.error('STATE_INVALID', 'La politique WireGuard n’est pas installée.')
+        try:
+            wireguard.provision(run, wait=True)
+        except wireguard.WireGuardError as exc:
+            raise _preview_provision_exception(exc) from exc
     STATE.mkdir(parents=True,exist_ok=True,mode=0o700)
     fd=os.open(NGINX_LOCK if PREPROD else STATE/'.deploy.lock',
                os.O_WRONLY|os.O_CREAT|getattr(os,'O_NOFOLLOW',0),0o600)
@@ -1605,6 +1613,14 @@ def _domain_inspect(params):
             tls_detected(contents) and expected_upstream in contents and
             '/etc/letsencrypt/live/'+host+'/fullchain.pem' in contents and
             (Path('/etc/letsencrypt/live')/host/'fullchain.pem').is_file())
+    if active and preview.policy(STATE, env):
+        if not contents.startswith(preview.MARKER):
+            return {'active': False}
+        try:
+            preview.verify_split_dns(sys.modules[__name__], host)
+        except BrokerError:
+            return {'active': False}
+        return {'active': True}
     if active:
         # A valid local vhost is NOT proof of publicly reachable DNS.
         expected_ip=_runtime_dns_env().get('AUTOKOM_INGRESS_IPV4','')
@@ -1817,8 +1833,25 @@ def _deprovision_environment(params):
 def _activate_owned_domain(params):
     host=valid_hostname(params.get('hostname'))
     env=valid_id(params.get('environment_id'))
-    _check_dns(host,params.get('token'),params.get('managed') is True)
-    return _proxy_apply(host, env, managed=params.get('managed') is True)
+    managed = params.get('managed') is True
+    private = preview.policy(STATE, env)
+    if params.get('wireguard_only') is True and not private:
+        raise preview.error('STATE_INVALID', 'La politique WireGuard n’est pas installée.')
+    if private:
+        if not managed:
+            raise preview.error('DOMAIN', 'Domaine non géré incompatible avec WireGuard.')
+        preview._domain_names(sys.modules[__name__], env, [host], require_all=False)
+        # DNS-01 proves the managed hostname without a public A record.
+    else:
+        _check_dns(host,params.get('token'),params.get('managed') is True)
+    return _proxy_apply(host, env, managed=managed)
+
+
+def _preview_provision_exception(exc):
+    code = str(exc)
+    if not re.fullmatch(r'AUTOKOM_PREVIEW_[A-Z0-9_]{3,60}', code):
+        code = 'AUTOKOM_PREVIEW_VPN_UNAVAILABLE'
+    return BrokerError(code + ': Préparation du réseau WireGuard non confirmée.')
 
 
 def handle(action,params):
@@ -1879,7 +1912,9 @@ def handle(action,params):
             if action == 'preview.visibility':
                 return preview.visibility(sys.modules[__name__], params)
             return _runtime_lock_call(lambda p: preview.credentials(sys.modules[__name__], p), params)
-        except (wireguard.WireGuardError, OSError, ValueError) as exc:
+        except wireguard.WireGuardError as exc:
+            raise _preview_provision_exception(exc) from exc
+        except (OSError, ValueError) as exc:
             raise BrokerError('AUTOKOM_PREVIEW_VPN_UNAVAILABLE: Tunnel WireGuard non disponible.') from exc
     if action=='runtime.rollback':return _runtime_lock_call(_rollback,params)
     if action=='runtime.commit':return _runtime_lock_call(_commit,params)
@@ -1970,6 +2005,11 @@ def handle(action,params):
     if action=='domain.dns.create':
         return _cloudflare_record(valid_hostname(params.get('hostname')))
     if action=='domain.activate':
+        if params.get('environment_id') and preview.policy(STATE, valid_id(params.get('environment_id'))):
+            try:
+                wireguard.provision(run, wait=params.get('wait_preview_provision') is True)
+            except wireguard.WireGuardError as exc:
+                raise _preview_provision_exception(exc) from exc
         # Serialise Nginx / Certbot with runtime deploy, rollback and removal.
         # A domain retry cannot rewrite a vhost while another release changes state.
         return _runtime_lock_call(_activate_owned_domain,params)

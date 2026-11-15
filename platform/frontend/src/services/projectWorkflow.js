@@ -15,6 +15,9 @@ export function errorText(error) {
 
   const errors = error?.errors
   if (errors && typeof errors === 'object') {
+    if (/^AUTOKOM_PREVIEW_[A-Z0-9_]+$/.test(errors.code || '')) {
+      return error.message + ' (' + errors.code + ')'
+    }
     const details = Object.entries(errors).flatMap(([field, value]) =>
       (Array.isArray(value) ? value : [value]).filter(Boolean).map(v => `${field} : ${String(v)}`))
     if (details.length) return details.slice(0, 4).join(' · ')
@@ -156,7 +159,7 @@ export async function getRemoteProjectDetail(id, { environmentId, runId } = {}) 
  * `onCreated` est appelé immédiatement après le POST : un échec ultérieur peut être repris
  * sans créer un second projet GitHub avec le même nom.
  */
-export async function saveRemoteProject(form, { onCreated = () => {} } = {}) {
+export async function saveRemoteProject(form, { onCreated = () => {}, onPreviewProgress } = {}) {
   const configurationValues = toBackendConfiguration(form)
   const requestedKind = String(form.environment || 'production').toUpperCase()
   let projectId = form.backendProjectId || ''
@@ -193,7 +196,7 @@ export async function saveRemoteProject(form, { onCreated = () => {} } = {}) {
   // An untouched setting must never make an existing preview public.
   if (form.wireguardOnly === true && (requestedKind === 'STAGING' || form.previewConsole === true) &&
       selected.wireguard_only !== true) {
-    await projectsApi.setPreviewAccess(projectId, envId, true)
+    await projectsApi.setPreviewAccess(projectId, envId, true, { onProgress: onPreviewProgress })
   }
   onCreated({ backendProjectId: projectId, backendEnvironmentId: envId })
   // L’interface ne doit jamais présenter une offre non accordée comme activée.
