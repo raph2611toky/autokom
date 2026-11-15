@@ -1,0 +1,17 @@
+[Unit]
+Description=AUTOKOM dedicated WireGuard preview network
+After=network-online.target ufw.service nftables.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+UMask=0077
+ExecStartPre=/usr/sbin/nft -f /etc/autokom-preview/firewall.nft
+ExecStart=/usr/bin/wg-quick up /etc/autokom-preview/akpreview.conf
+ExecStartPost=/usr/bin/wg syncconf akpreview /etc/autokom-preview/peers.conf
+ExecStop=/usr/bin/wg-quick down /etc/autokom-preview/akpreview.conf
+TimeoutStartSec=20
+
+[Install]
+WantedBy=multi-user.target

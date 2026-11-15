@@ -149,7 +149,7 @@ export async function getRemoteProjectDetail(id, { environmentId, runId } = {}) 
     projectsApi.domains(project.id, env.id),
     projectsApi.variables(project.id, env.id),
   ])
-  return { project, environment: env, configurations: configsResponse?.configurations || [], runs: runsResponse?.runs || [], domains: domainsResponse?.domains || [], variables: variablesResponse?.variables || [], dnsSetup: domainsResponse?.dns_setup || null, runCount: runsResponse?.count ?? (runsResponse?.runs || []).length }
+  return { project, environment: env, environments, configurations: configsResponse?.configurations || [], runs: runsResponse?.runs || [], domains: domainsResponse?.domains || [], variables: variablesResponse?.variables || [], dnsSetup: domainsResponse?.dns_setup || null, runCount: runsResponse?.count ?? (runsResponse?.runs || []).length }
 }
 
 /** Création d'un projet puis mise à jour de son unique configuration initiale.
@@ -190,6 +190,11 @@ export async function saveRemoteProject(form, { onCreated = () => {} } = {}) {
   }
   if (!selected?.id) throw new Error('Environnement demandé introuvable.')
   envId = selected.id
+  // An untouched setting must never make an existing preview public.
+  if (form.wireguardOnly === true && (requestedKind === 'STAGING' || form.previewConsole === true) &&
+      selected.wireguard_only !== true) {
+    await projectsApi.setPreviewAccess(projectId, envId, true)
+  }
   onCreated({ backendProjectId: projectId, backendEnvironmentId: envId })
   // L’interface ne doit jamais présenter une offre non accordée comme activée.
   const offers = await projectsApi.offers(projectId, envId)
@@ -239,6 +244,7 @@ export function remoteProjectToForm(detail) {
     branch: cfg.branch || project.default_branch || 'main', workdir: cfg.root_directory || './',
     pipelineMode: (cfg.mode || 'DEVOPS').toLowerCase(),
     environment: (env.kind || env.slug).toLowerCase(),
+    wireguardOnly: env.wireguard_only === true,
     autoDeploy: Boolean(cfg.auto_deploy),
     frontendEnv: (detail.variables || []).filter(item => /^(?:VITE_|REACT_APP_|VUE_APP_|NEXT_PUBLIC_)/.test(item.key) && !item.secret_id).map(item => ({key:item.key, value:item.value})),
     frontendEnvTouched: false,

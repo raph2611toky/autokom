@@ -79,6 +79,8 @@ def domain_summary(domain,*,include_challenge=False):
              'is_primary':domain.is_primary, 'is_disabled':domain.is_disabled,
              'activation_error_code': domain.activation_error_code,
              'url':('https://' + domain.hostname if domain.status==Domain.Status.ACTIVE and domain.tls_status=='ACTIVE' else None)}
+    if domain.environment.wireguard_only:
+        payload.update({'wireguard_only': True, 'vpn_url': payload['url'], 'url': None})
     if include_challenge and domain.domain_type==Domain.Type.CUSTOM:
         payload['verification']={'type':'TXT','hostname':'_autokom-challenge.'+domain.hostname,
                                  'value':'autokom-verification='+_challenge(domain),
@@ -357,6 +359,8 @@ def rename_pending_managed_domain(user, project_id, environment_id, domain_id, h
     with transaction.atomic():
         from apps.projects.project.models import Project
         Project.objects.select_for_update().get(pk=project.pk)
+        if getattr(env, 'wireguard_only', False):
+            raise ValidationError({'domain': 'Désactivez le mode WireGuard avant de renommer le domaine.'})
         _reject_domain_mutation_during_deployment(env)
         domain = Domain.objects.select_for_update().filter(environment=env, pk=domain_id).first()
         if domain is None or domain.domain_type != Domain.Type.SUBDOMAIN:

@@ -58,7 +58,7 @@ export async function ensureCsrf() {
 const SAFE = new Set(['GET', 'HEAD', 'OPTIONS'])
 const NO_RETRY = /^\/auth\/(?:browser\/(?:csrf|login|logout|refresh|github\/(?:exchange|complete))|login|token\/refresh|logout|register)\//
 
-async function execute(path, { method = 'GET', body, signal, headers = {} } = {}) {
+async function execute(path, { method = 'GET', body, signal, headers = {}, download = false } = {}) {
   validatePath(path)
   method = method.toUpperCase()
   if (!/^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/.test(method)) throw new TypeError('Méthode invalide.')
@@ -75,6 +75,7 @@ async function execute(path, { method = 'GET', body, signal, headers = {} } = {}
     body: body === undefined ? undefined : body instanceof FormData ? body : JSON.stringify(body),
     credentials: 'same-origin', redirect: 'error', cache: 'no-store', signal,
   })
+  if (download && response.ok && response.headers.get('content-type')?.startsWith('application/octet-stream')) return response.blob()
   let payload = null
   try { payload = await response.json() } catch { /* erreurs sans corps JSON */ }
   if (!response.ok || payload?.success === false) {
@@ -84,6 +85,7 @@ async function execute(path, { method = 'GET', body, signal, headers = {} } = {}
       response.status, payload?.errors,
     )
   }
+  if (download) throw new ApiError('Fichier de configuration indisponible.', response.status)
   return payload?.data ?? payload
 }
 

@@ -1,0 +1,16 @@
+[Unit]
+Description=AUTOKOM split DNS for preview clients
+Requires=autokom-preview-vpn.service
+After=autokom-preview-vpn.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/autokom-preview/dnsmasq.conf
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

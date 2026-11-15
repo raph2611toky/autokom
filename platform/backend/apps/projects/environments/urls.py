@@ -1,4 +1,5 @@
 from django.urls import path
+from apps.projects.environments.preview_access import PreviewAccessAPIView, PreviewCredentialsAPIView
 from apps.projects.environments.views import (EnvironmentListAPIView, EnvironmentCreateAPIView,
     EnvironmentDetailAPIView, EnvironmentUpdateAPIView, EnvironmentVariablesListAPIView,
     EnvironmentVariableCreateAPIView, EnvironmentVariableUpdateAPIView, EnvironmentVariableDeleteAPIView,
@@ -6,6 +7,8 @@ from apps.projects.environments.views import (EnvironmentListAPIView, Environmen
 
 app_name = 'project_environments'
 urlpatterns = [
+    path('<uuid:project_id>/environments/<uuid:environment_id>/preview-access/', PreviewAccessAPIView.as_view(), name='preview-access'),
+    path('<uuid:project_id>/environments/<uuid:environment_id>/preview-access/credentials/', PreviewCredentialsAPIView.as_view(), name='preview-credentials'),
     path('<uuid:project_id>/environments/', EnvironmentListAPIView.as_view(), name='list'),
     path('<uuid:project_id>/environments/create/', EnvironmentCreateAPIView.as_view(), name='create'),
     path('<uuid:project_id>/environments/<uuid:environment_id>/', EnvironmentDetailAPIView.as_view(), name='detail'),

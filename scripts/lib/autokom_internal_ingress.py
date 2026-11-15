@@ -165,7 +165,7 @@ def pick_loopback_port():
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
-        if 10000 <= port <= 65535:
+        if 10000 <= port <= 65535 and port != 18443:
             return port
     raise IngressError('AUTOKOM_INGRESS_PORT_INVALID',
                        'Aucun port local à cinq chiffres disponible dans la plage système.')

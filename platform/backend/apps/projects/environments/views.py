@@ -197,6 +197,8 @@ class DomainReassignAPIView(APIView):
             project, env = get_environment(request.user, project_id, environment_id, write=True)
             serializer = DomainReassignSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
+            project = type(project).objects.select_for_update().get(pk=project.pk)
+            env = Environment.objects.select_for_update().get(pk=env.pk, project=project)
             domain = Domain.objects.filter(pk=domain_id, organization=project.organization, environment=env).first()
             if domain is None:
                 raise NotFound('Domaine introuvable.')
@@ -204,6 +206,8 @@ class DomainReassignAPIView(APIView):
                                                   project=project).first()
             if new_env is None:
                 raise ValidationError({'new_environment_id': 'Environnement cible invalide.'})
+            if env.wireguard_only or new_env.wireguard_only:
+                raise ValidationError({'domain': 'La réaffectation est indisponible en mode WireGuard.'})
             domain.environment = new_env
             domain.status = Domain.Status.PENDING
             domain.tls_status = ''

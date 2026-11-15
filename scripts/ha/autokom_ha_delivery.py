@@ -75,21 +75,22 @@ def api(method, url, data=None, *, missing_ok=False, timeout=35):
     return json.loads(raw) if raw else {}
 
 
-def compute(method, route, payload=None, missing_ok=False):
+def compute(method, route, payload=None, missing_ok=False, timeout=None):
     if not route.startswith('/') or '..' in route or '?' in route:
         raise DeliveryError('Invalid Compute API route')
-    return api(method, BASE + route, payload, missing_ok=missing_ok)
+    options = {'timeout': timeout} if timeout is not None else {}
+    return api(method, BASE + route, payload, missing_ok=missing_ok, **options)
 
 
-def operation(doc, scope):
+def operation(doc, scope, *, attempts=65, timeout=None):
     name = doc.get('name') if isinstance(doc, dict) else None
     if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9-]{1,100}', name):
         raise DeliveryError('Compute operation ID missing')
     if scope not in ('global', 'regions/us-central1', 'zones/us-central1-a', 'zones/us-central1-f'):
         raise DeliveryError('Unapproved Compute operation scope')
     route = f'/global/operations/{name}' if scope == 'global' else f'/{scope}/operations/{name}'
-    for _ in range(65):
-        current = compute('GET', route)
+    for _ in range(attempts):
+        current = compute('GET', route, timeout=timeout) if timeout is not None else compute('GET', route)
         if current.get('status') == 'DONE':
             if current.get('error'):
                 raise DeliveryError('Compute operation finished with error')
@@ -161,6 +162,8 @@ def committed_apps():
         return candidates
     for folder in sorted(STATE.iterdir()):
         if not folder.is_dir() or folder.is_symlink() or not valid_uuid(folder.name):
+            continue
+        if os.path.lexists(folder / 'preview-access.json'):
             continue
         current = _private_json(folder / 'current.json')
         if not current or not current.get('cloud_delivery_requested') or current.get('environment_id') != folder.name:
@@ -429,6 +432,46 @@ def unroute_deleted(environments):
     return True
 
 
+def isolate_preview(environment, hosts):
+    """Fence an existing worker vhost at the shared LB, even with stale DNS."""
+    path_name = 'akp-' + environment.replace('-', '')[:20]
+    doc = compute('GET', '/global/urlMaps/' + LB_MAP, missing_ok=True, timeout=5)
+    if doc is None:
+        return False
+    rules = list(doc.get('hostRules') or [])
+    matchers = list(doc.get('pathMatchers') or [])
+    existing = next((row for row in rules if row.get('pathMatcher') == path_name), None)
+    if existing is None:
+        # No route was ever installed for this app, but check that an
+        # inconsistent route under another matcher cannot go unnoticed.
+        if any(set(hosts).intersection(row.get('hosts') or []) for row in rules):
+            raise DeliveryError('Unexpected preview hostname route')
+        return False
+    if not set(existing.get('hosts') or []).issubset(hosts):
+        raise DeliveryError('Preview route includes an unrelated hostname')
+    rules = [row for row in rules if row.get('pathMatcher') != path_name]
+    matchers = [row for row in matchers if row.get('name') != path_name]
+    rules.append({'hosts': hosts, 'pathMatcher': path_name})
+    matchers.append({'name': path_name, 'defaultUrlRedirect': {
+        'hostRedirect': 'preview-unavailable.invalid', 'pathRedirect': '/',
+        'redirectResponseCode': 'FOUND', 'stripQuery': True}})
+    operation(compute('PATCH', '/global/urlMaps/' + LB_MAP, {
+        'hostRules': rules, 'pathMatchers': matchers, 'fingerprint': doc.get('fingerprint')}, timeout=5),
+        'global', attempts=8, timeout=4)
+    # Confirm that the active map now points to the blocking matcher.
+    confirmed = compute('GET', '/global/urlMaps/' + LB_MAP, timeout=5)
+    rule = next((row for row in (confirmed.get('hostRules') or [])
+                 if row.get('pathMatcher') == path_name), {})
+    matcher = next((row for row in (confirmed.get('pathMatchers') or [])
+                    if row.get('name') == path_name), {})
+    redirect = matcher.get('defaultUrlRedirect') or {}
+    if (set(rule.get('hosts') or []) != set(hosts)
+            or matcher.get('defaultService') or matcher.get('pathRules') or matcher.get('routeRules')
+            or any(redirect.get(k) != v for k, v in matchers[-1]['defaultUrlRedirect'].items())):
+        raise DeliveryError('Private preview route not confirmed')
+    return True
+
+
 def get_or_create(route, body, collection, scope='global'):
     existing = compute('GET', route, missing_ok=True)
     if existing:
@@ -640,6 +683,8 @@ def reconcile(*, dry_run=False, public_dns=False):
         if (decision.get('ha') is True and decision.get('run_id') == saved['run_id']
                 and saved['host'] in decision.get('hosts', ()) and expected == saved['workers']
                 and not saved.get('restored_at')):
+            continue
+        if os.path.lexists(STATE / saved['environment'] / 'preview-access.json'):
             continue
         result = ha_dns.transition(saved['host'], saved['environment'], promote=False)
         if result != 'PRIMARY':

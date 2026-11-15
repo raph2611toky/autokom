@@ -13,6 +13,7 @@ class Environment(models.Model):
     project = models.ForeignKey('projects.Project', on_delete=models.PROTECT, related_name='environments')
     name = models.CharField(max_length=100)
     slug = models.SlugField(max_length=100)
+    wireguard_only = models.BooleanField(default=False)
     kind = models.CharField(max_length=16, choices=Kind.choices, default=Kind.PRODUCTION)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)

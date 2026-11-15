@@ -12,6 +12,7 @@ export function publicSiteUrl(site) {
   } catch { return null }
 }
 export function siteStateLabel(site) {
+  if (site?.wireguard_only) return 'WireGuard uniquement'
   if (publicSiteUrl(site)) return 'HTTPS actif'
   if (site?.activation_error_code && /^AUTOKOM_[A-Z0-9_]{3,80}$/.test(site.activation_error_code))
     return `Activation HTTPS en attente · ${site.activation_error_code}`

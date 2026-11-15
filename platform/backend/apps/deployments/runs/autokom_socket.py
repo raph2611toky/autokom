@@ -21,6 +21,7 @@ def request_control(action, params=None, *, timeout=30):
     if action not in {
         'ping', 'jenkins.dispatch','jenkins.state','jenkins.console','jenkins.cancel',
         'ha.application.status','runtime.deploy','runtime.restore','runtime.dynamic.check','runtime.dynamic.preview','runtime.status','runtime.logs','runtime.diagnostics','runtime.rollback','runtime.commit','runtime.commit_pair','runtime.deprovision',
+        'preview.status','preview.visibility','preview.credentials',
         'domain.config.check','domain.available','domain.verify','domain.dns.create','domain.activate','domain.deactivate','domain.remove','domain.inspect',
     }:
         raise AutokomControlUnavailable('Opération non autorisée.')
@@ -46,7 +47,7 @@ def request_control(action, params=None, *, timeout=30):
             logger.warning('Broker refuse %s code=%s', action, safe_code or 'AUTOKOM_BROKER_REFUSED')
             error=AutokomControlUnavailable(
                 'Service de contrôle AUTOKOM indisponible. Diagnostic : '+safe_code
-                if safe_code and (action.startswith('domain.') or action == 'runtime.deprovision') else
+                if safe_code and (action.startswith(('domain.', 'preview.')) or action == 'runtime.deprovision') else
                 'Service de contrôle AUTOKOM indisponible.')
             error.safe_code=safe_code
             raise error

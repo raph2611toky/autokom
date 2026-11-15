@@ -37,6 +37,8 @@ import base64
 import urllib.request
 import threading
 import autokom_internal_ingress as ingress
+import autokom_preview_access as preview
+import autokom_wireguard as wireguard
 from autokom_customer_diagnostics import capture as capture_customer_diagnostics, read as read_customer_diagnostics
 
 logger = logging.getLogger('autokom.runtime.broker')
@@ -389,6 +391,8 @@ def _docker_deploy_inner(params):
         raise BrokerError('Healthcheck invalide.')
     ingress.preflight(run, PROXY, ENABLED)
     current=_load_state(environment)
+    if not preview.policy(STATE, environment) and params.get('wireguard_only') is True:
+        raise BrokerError('AUTOKOM_PREVIEW_STATE_INVALID: La publication privée n’est pas configurée.')
     if current and current.get('run_id')==rid:
         if current.get('ingress_mode') == ingress.MODE and not ingress.probe_relay(current['name'],current['port']):
             raise BrokerError('AUTOKOM_INGRESS_NOT_READY: Relais local interrompu.')
@@ -595,7 +599,7 @@ def _rollback(params):
                 raise BrokerError('AUTOKOM_ROLLBACK_VHOST_INVALID: Vhost modifié hors AUTOKOM.')
             with tempfile.NamedTemporaryFile('w', dir=PROXY, delete=False,
                                              prefix='.autokom-rollback-', encoding='utf-8') as fd:
-                fd.write(_nginx_config(host, previous['port'], tls=True, gateway_port=previous.get('gateway_port'),gateway_hostname=previous.get('gateway_hostname')))
+                fd.write(_customer_nginx_config(host, previous, preview.policy(STATE, env)))
                 tmp = Path(fd.name)
             try:
                 os.chmod(tmp, 0o644)
@@ -631,6 +635,8 @@ def _rollback(params):
         if previous is None and HOSTNAME.fullmatch(host):
             (PROXY / ('autokom-customer-' + host + '.conf')).unlink(missing_ok=True)
             owner.unlink(missing_ok=True)
+            if preview.policy(STATE, env):
+                preview.remove_dns(host)
     old_path.unlink(missing_ok=True)
     return {'rolled_back': True, 'previous_available': previous is not None}
 
@@ -651,7 +657,7 @@ def _commit(params):
             if previous.get('ingress_mode') == ingress.MODE:
                 ingress.remove(old_name, execute=run, available=PROXY, enabled=ENABLED)
         previous_path.unlink(missing_ok=True)
-    if PREPROD:
+    if PREPROD or preview.policy(STATE, env):
         return {'committed': True, 'image_digest': state.get('image_digest', '')}
     # Publish the already-committed image asynchronously. This is a private
     # artifact mirroring queue, never an HA activation or a client DNS cutover.
@@ -1115,7 +1121,7 @@ def _remove_owned_domain(params):
             'dns_record_deleted': dns_cleanup.get('deleted') is True}
 
 
-def _nginx_config(host,port,tls=False,*,gateway_port=None,gateway_hostname=None):
+def _nginx_config(host,port,tls=False,*,gateway_port=None,gateway_hostname=None,vpn_address=None):
     if type(port)!=int or not 1024<=port<=65535:raise BrokerError('Port upstream invalide.')
     safe_host=valid_hostname(host)
     extra = ''
@@ -1137,7 +1143,7 @@ def _nginx_config(host,port,tls=False,*,gateway_port=None,gateway_hostname=None)
         )
     if tls:
         cert='/etc/letsencrypt/live/'+safe_host
-        return (f'server {{\n    listen 80;\n    server_name {safe_host};\n'
+        rendered = (f'server {{\n    listen 80;\n    server_name {safe_host};\n'
             f'    location ^~ /.well-known/acme-challenge/ {{ root {WEBROOT}; default_type text/plain; try_files $uri =404; }}\n'
             '    location / { return 308 https://$host$request_uri; }\n}\n'
             f'server {{\n' + https_listens() + f'    server_name {safe_host};\n'
@@ -1149,9 +1155,17 @@ def _nginx_config(host,port,tls=False,*,gateway_port=None,gateway_hostname=None)
             '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n'
             '        proxy_set_header X-Forwarded-Proto https;\n'
             '        proxy_connect_timeout 5s;\n        proxy_read_timeout 60s;\n    }\n}\n')
+        return preview.private_render(rendered, vpn_address) if vpn_address else rendered
     return (f'server {{\n    listen 80;\n    server_name {safe_host};\n'
             f'    location ^~ /.well-known/acme-challenge/ {{ root {WEBROOT}; default_type text/plain; try_files $uri =404; }}\n'
             '    location / { return 503; }\n}\n')
+
+def _customer_nginx_config(host, state, vpn_address=None):
+    options = {'gateway_port': state.get('gateway_port'), 'gateway_hostname': state.get('gateway_hostname')}
+    if vpn_address:
+        options['vpn_address'] = vpn_address
+    return _nginx_config(host, state['port'], tls=True, **options)
+
 
 def _prepare_public_acme_webroot():
     """Use the existing public AUTOKOM ACME root, outside private Django state.
@@ -1339,12 +1353,12 @@ def _customer_https_probe_address():
     return addresses[0] if addresses else '127.0.0.1'
 
 
-def _customer_https_probe_once(host, healthcheck, address):
+def _customer_https_probe_once(host, healthcheck, address, *, port=443):
     """Return a real HTTPS response with CA and hostname verification enabled."""
     context = ssl.create_default_context()
-    with socket.create_connection((address, 443), timeout=6) as raw:
+    with socket.create_connection((address, port), timeout=(3 if port != 443 else 6)) as raw:
         with context.wrap_socket(raw, server_hostname=host) as connection:
-            connection.settimeout(6)
+            connection.settimeout(3 if port != 443 else 6)
             connection.sendall(('GET ' + healthcheck + ' HTTP/1.1\r\nHost: ' + host +
                                 '\r\nConnection: close\r\n\r\n').encode('ascii'))
             response = http.client.HTTPResponse(connection)
@@ -1376,7 +1390,7 @@ def _customer_https_failure_category(exc):
     return 'connect-failed'
 
 
-def _verify_customer_https(host, healthcheck):
+def _verify_customer_https(host, healthcheck, *, address=None, port=443):
     """Prove the customer HTTPS vhost works on the REAL ingress listener.
 
     HTTPS must be validated with the requested hostname in SNI and certificate
@@ -1389,12 +1403,14 @@ def _verify_customer_https(host, healthcheck):
             or any(ch in healthcheck for ch in ('\r', '\n', '#', '%', '\\'))
             or len(healthcheck) > 128):
         raise BrokerError('AUTOKOM_HTTPS_HEALTHCHECK_INVALID: Chemin de validation refusé.')
-    address = _customer_https_probe_address()
+    address = address or _customer_https_probe_address()
     last_status = 0
     last_problem = None
-    for attempt in range(5):
+    attempts = 3 if port != 443 else 5
+    for attempt in range(attempts):
         try:
-            last_status = _customer_https_probe_once(host, healthcheck, address)
+            last_status = (_customer_https_probe_once(host, healthcheck, address) if port == 443
+                           else _customer_https_probe_once(host, healthcheck, address, port=port))
             last_problem = None
         except (ssl.SSLError, OSError, http.client.HTTPException, UnicodeEncodeError) as exc:
             last_problem = _customer_https_failure_category(exc)
@@ -1404,7 +1420,7 @@ def _verify_customer_https(host, healthcheck):
             # A permanently invalid certificate must not be ignored or retried.
             if last_problem == 'certificate-invalid':
                 break
-            if attempt < 4:
+            if attempt < attempts - 1:
                 time.sleep(1)
             continue
         if 200 <= last_status < 400:
@@ -1416,7 +1432,7 @@ def _verify_customer_https(host, healthcheck):
                        last_status, attempt + 1)
         if last_status not in (502, 503, 504):
             break
-        if attempt < 4:
+        if attempt < attempts - 1:
             time.sleep(1)
     if last_problem is not None:
         # An optional loopback comparison is diagnostic only, NEVER a pass.
@@ -1464,6 +1480,9 @@ def _log_customer_upstream_state(state, host):
 def _proxy_apply(host, environment, *, managed=False):
     valid_hostname(host); valid_id(environment)
     state = _load_state(environment)
+    vpn_address = preview.policy(STATE, environment)
+    if vpn_address:
+        wireguard.ready(run, _runtime_dns_env().get('AUTOKOM_INGRESS_IPV4', ''))
     if not state: raise BrokerError('Aucune version saine en service pour cet environnement.')
     # Never steal a vhost owned by a different application.
     for directory in (PROXY, ENABLED):
@@ -1486,6 +1505,7 @@ def _proxy_apply(host, environment, *, managed=False):
         raise BrokerError('AUTOKOM_DOMAIN_VHOST_DANGLING: Lien Nginx absent ou modifié.')
     old = path.read_text(encoding='utf-8') if path.exists() else None
     had_link = symlink.is_symlink()
+    old_private_dns = bool(vpn_address and preview.dns_path(host).exists())
 
     def publish(content):
         with tempfile.NamedTemporaryFile('w', dir=PROXY, delete=False,
@@ -1518,10 +1538,14 @@ def _proxy_apply(host, environment, *, managed=False):
             _issue_customer_certificate(host, managed=managed)
         phase = 'nginx_https'
         logger.info('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=started host=%s', phase, host)
-        publish(_nginx_config(host, state['port'], tls=True, gateway_port=state.get('gateway_port'),gateway_hostname=state.get('gateway_hostname')))
+        publish(_customer_nginx_config(host, state, vpn_address))
         phase = 'https_verify'
         try:
-            _verify_customer_https(host, state.get('healthcheck', '/'))
+            if vpn_address:
+                preview.publish_dns(host)
+                preview.verify_private_https(sys.modules[__name__], host, state.get('healthcheck', '/'))
+            else:
+                _verify_customer_https(host, state.get('healthcheck', '/'))
         except BrokerError:
             _log_customer_upstream_state(state, host)
             raise
@@ -1532,6 +1556,8 @@ def _proxy_apply(host, environment, *, managed=False):
     except Exception as exc:
         # Retain the exact prior healthy vhost; don't expose a half-built
         # HTTPS configuration referencing a missing certificate.
+        if vpn_address and not old_private_dns:
+            preview.remove_dns(host)
         logger.warning('AUTOKOM_DOMAIN_ACTIVATION phase=%s status=failed category=%s host=%s',
                        phase, type(exc).__name__, host)
         if old is not None:
@@ -1637,6 +1663,8 @@ def _deactivate_owned_vhost(host, environment, *, validate_only=False):
             logger.error('AUTOKOM_DOMAIN_RESTORE_INCOMPLETE')
         raise BrokerError('AUTOKOM_DOMAIN_DEACTIVATION_FAILED: Nginx refusé, configuration restaurée.')
     owner.unlink()
+    if original.startswith(preview.MARKER.encode()):
+        preview.remove_dns(host)
     return True
 
 
@@ -1674,17 +1702,25 @@ DELIVERY_UNIT = Path('/etc/systemd/system/autokom-ha-delivery.service')
 DELIVERY_STATE = Path('/var/lib/autokom/ha')
 
 
-def _retire_runtime(params):
-    # The controller acquires the delivery lock before touching runtime state.
-    # Hold both, in that order, so an old reconciliation cannot restore a route.
-    if ('release_domains' not in params or PREPROD or
-            not (DELIVERY_UNIT.exists() or (DELIVERY_STATE / 'delivery-status.json').exists()
-                 or (DELIVERY_STATE / 'published').exists())):
-        return _runtime_lock_call(_deprovision_environment, params)
+def delivery_configured():
+    return (DELIVERY_UNIT.exists() or (DELIVERY_STATE / 'delivery-status.json').exists()
+            or (DELIVERY_STATE / 'published').exists())
+
+
+def delivery_module():
     ha_dir = str(Path(__file__).resolve().parents[1] / 'ha')
     if ha_dir not in sys.path:
         sys.path.append(ha_dir)
-    import autokom_ha_delivery as delivery
+    import autokom_ha_delivery
+    return autokom_ha_delivery
+
+
+def _retire_runtime(params):
+    # The controller acquires the delivery lock before touching runtime state.
+    # Hold both, in that order, so an old reconciliation cannot restore a route.
+    if ('release_domains' not in params or PREPROD or not delivery_configured()):
+        return _runtime_lock_call(_deprovision_environment, params)
+    delivery = delivery_module()
     fd = os.open(delivery.LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_uid != 0:
@@ -1773,6 +1809,8 @@ def _deprovision_environment(params):
                 present.stderr.strip()):
             raise BrokerError('AUTOKOM_RUNTIME_STOP_UNVERIFIED: État du conteneur non confirmé.')
         record.unlink(missing_ok=True)
+    if release and preview.policy(STATE, env):
+        preview.retire(sys.modules[__name__], env)
     return {'offline':True,'historical_state_retained':True,'domains_released':release}
 
 
@@ -1828,6 +1866,21 @@ def handle(action,params):
         if not isinstance(params.get('restore'), dict):
             raise BrokerError('AUTOKOM_RESTORE_SCOPE_INVALID')
         return _docker_deploy(params)
+    if action in ('preview.status', 'preview.visibility', 'preview.credentials'):
+        try:
+            if action == 'preview.status':
+                _, environment = preview.requested(sys.modules[__name__], params)
+                def read_preview_status(p):
+                    if not preview.policy(STATE, environment):
+                        return {'private': False, 'issued': False}
+                    return {'private': True, **preview.credentials(sys.modules[__name__],
+                            {**p, 'operation': 'status'})}
+                return _runtime_lock_call(read_preview_status, params)
+            if action == 'preview.visibility':
+                return preview.visibility(sys.modules[__name__], params)
+            return _runtime_lock_call(lambda p: preview.credentials(sys.modules[__name__], p), params)
+        except (wireguard.WireGuardError, OSError, ValueError) as exc:
+            raise BrokerError('AUTOKOM_PREVIEW_VPN_UNAVAILABLE: Tunnel WireGuard non disponible.') from exc
     if action=='runtime.rollback':return _runtime_lock_call(_rollback,params)
     if action=='runtime.commit':return _runtime_lock_call(_commit,params)
     if action=='runtime.commit_pair':return _runtime_lock_call(_commit_pair,params)
@@ -1837,6 +1890,9 @@ def handle(action,params):
             return {'application': {'status':'UNAVAILABLE','healthy_replicas':0,
                      'http_lb_ready':False,'public_https_ready':False,'requested_replicas':1}}
         env=valid_id(params.get('environment_id'))
+        if preview.policy(STATE, env):
+            return {'application': {'status':'UNAVAILABLE','healthy_replicas':0,
+                     'http_lb_ready':False,'public_https_ready':False,'requested_replicas':1}}
         path=Path('/var/lib/autokom/ha/delivery-status.json')
         default={'status':'NOT_DEPLOYED','healthy_replicas':0,'http_lb_ready':False,
                  'public_https_ready':False,'requested_replicas':1}

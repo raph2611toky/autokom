@@ -168,6 +168,8 @@ def _change(host, env, run_id, promote, workers, retiring=False):
             or record.get('comment') == 'AUTOKOM preprod managed A record'):
         return 'DNS_RECORD_CONFLICT'
     state = broker._load_state(env)
+    if not retiring and (broker.STATE / env / 'preview-access.json').exists():
+        return 'PRIVATE_PREVIEW'
     if not retiring and (not state or (broker.STATE / env / 'previous.json').exists()):
         return 'RELEASE_IN_PROGRESS'
     health = (state or {}).get('healthcheck', '/')

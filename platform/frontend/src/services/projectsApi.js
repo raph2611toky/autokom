@@ -16,6 +16,7 @@ const uuid = value => {
   if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) throw new TypeError('UUID invalide.')
   return value
 }
+const previewPath = (projectId, envId) => `/projects/${uuid(projectId)}/environments/${uuid(envId)}/preview-access/`
 export const projectsApi = Object.freeze({
   list: (pageNumber = 1) => api.get(`/projects/?page=${page(pageNumber)}&page_size=50`),
   organizations: () => api.get('/projects/organizations/'),
@@ -29,6 +30,10 @@ export const projectsApi = Object.freeze({
   deleteProject: (projectId, confirmName) => api.post(`/projects/${uuid(projectId)}/delete/`, {confirm_name:confirmName}),
   environments: projectId => api.get(`/projects/${uuid(projectId)}/environments/`),
   createEnvironment: (projectId, values) => api.post(`/projects/${uuid(projectId)}/environments/create/`, values),
+  previewAccess: (projectId, envId) => api.get(previewPath(projectId, envId)),
+  setPreviewAccess: (projectId, envId, privateAccess) => api.patch(previewPath(projectId, envId), {private: privateAccess}),
+  issuePreviewAccess: (projectId, envId) => api.post(previewPath(projectId, envId) + 'credentials/', {}, {download: true}),
+  revokePreviewAccess: (projectId, envId) => api.delete(previewPath(projectId, envId) + 'credentials/'),
   variables: (projectId, envId) => api.get(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/variables/`),
   createVariable: (projectId, envId, values) => api.post(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/variables/create/`, values),
   updateVariable: (projectId, envId, id, values) => api.patch(`/projects/${uuid(projectId)}/environments/${uuid(envId)}/variables/${uuid(id)}/update/`, values),

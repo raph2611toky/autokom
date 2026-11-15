@@ -118,7 +118,8 @@ class ProjectDetailAPIView(APIView):
     def get(self, request, project_id):
         try:
             project = get_project(request.user, project_id)
-            environments = [{'id': str(e.id), 'name': e.name, 'slug': e.slug, 'kind': e.kind}
+            environments = [{'id': str(e.id), 'name': e.name, 'slug': e.slug, 'kind': e.kind,
+                             'wireguard_only': e.wireguard_only, 'is_active': e.is_active}
                             for e in project.environments.all().order_by('created_at')]
             return api_success({'project': ProjectSerializer(project).data, 'environments': environments}, 'Projet consulté.')
         except Exception as exc:

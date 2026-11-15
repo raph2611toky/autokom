@@ -1,0 +1,22 @@
+# Replace only the dedicated table, in one nft transaction.
+table inet autokom_preview
+delete table inet autokom_preview
+table inet autokom_preview {
+    chain https_redirect {
+        type nat hook prerouting priority -105; policy accept;
+        iifname "akpreview" ip daddr 10.203.53.1 tcp dport 443 redirect to :18443
+    }
+    chain input_guard {
+        type filter hook input priority -105; policy accept;
+        iifname "lo" tcp dport 18443 accept
+        iifname "akpreview" ip daddr 10.203.53.1 udp dport 53 accept
+        iifname "akpreview" ip daddr 10.203.53.1 tcp dport { 53, 18443 } accept
+        iifname "akpreview" drop
+        tcp dport 18443 drop
+    }
+    chain no_forwarding {
+        type filter hook forward priority -105; policy accept;
+        iifname "akpreview" drop
+        oifname "akpreview" drop
+    }
+}

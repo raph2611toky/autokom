@@ -8,6 +8,7 @@ import { technicalTimeline, formatTechnicalFileLine } from '../services/deployme
 import RestorePublication from '../components/RestorePublication.jsx'
 import { githubRepositoryUrl, securityWarning } from '../services/securityPresentation.js'
 import SecurityRunReport from '../components/SecurityRunReport.jsx'
+import PreviewAccess from '../components/PreviewAccess.jsx'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
 import { stackApi } from '../services/stackApi.js'
 import { publicationPath, publicationKind, publicationServices } from '../services/stackHistory.js'
@@ -126,6 +127,8 @@ function RunDetails({ navigate, projectId, runId }) {
     <section className="page-hero ak-workspace-hero"><div><p className="ak-page-kicker">Détails de publication</p><h1>Publication {String(run.id).slice(0,8)}</h1><p>{dateTime(run.created_at)} · {displayTrigger(run.trigger_type, run.trigger_origin)}</p></div><div className="ak-project-hero-actions">{statusPill(run.status)}<button className="button-outline" type="button" onClick={refresh}><RefreshCw size={16}/> Actualiser</button></div></section>
     {error && <p className="feedback error" role="alert">{error}</p>}
     <ProjectPublicSite site={projectInfo.project.public_site} onManage={() => navigate(`/sites/${projectId}`)}/>
+    {projectInfo.environment.wireguard_only === true && projectInfo.project.status === 'ACTIVE' &&
+      <PreviewAccess key={projectInfo.environment.id} projectId={projectId} environment={{...projectInfo.environment, publicationStatus:run.status}}/>}
     <div className="ak-project-detail-actions">
       {repositoryUrl && <a className="button-outline" href={repositoryUrl} target="_blank" rel="noopener noreferrer"><GitBranch size={16}/> Voir le dépôt GitHub</a>}
       {run.release_status === 'ACTIVE' && <span className="ak-publication-pill state-success">Version actuellement en ligne</span>}

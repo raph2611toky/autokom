@@ -6,7 +6,7 @@ from apps.projects.environments.models import Environment, EnvironmentVariable
 class EnvironmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Environment
-        fields = ('id', 'project', 'name', 'slug', 'kind', 'is_active', 'created_at', 'updated_at')
+        fields = ('id', 'project', 'name', 'slug', 'kind', 'is_active', 'wireguard_only', 'created_at', 'updated_at')
         read_only_fields = fields
 
 

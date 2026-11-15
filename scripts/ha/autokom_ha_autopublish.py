@@ -86,7 +86,7 @@ def _atomic_result(directory: Path, run_id: str, digest_ref: str) -> None:
 
 
 def process_one(path: Path, *, token: str, queue: Path = QUEUE,
-                results: Path = RESULTS, root: Path = ROOT) -> str:
+                results: Path = RESULTS, root: Path = ROOT) -> str | None:
     data = _safe_file(path)
     rid, env = data['run_id'], data['environment_id']
     if not _active_run(env, rid, root):
@@ -95,6 +95,9 @@ def process_one(path: Path, *, token: str, queue: Path = QUEUE,
     state = json.loads((root / env / 'current.json').read_text(encoding='utf-8'))
     if state.get('run_id') != rid or state.get('environment_id') != env:
         raise QueueError('Active release changed during promotion')
+    if os.path.lexists(root / env / 'preview-access.json'):
+        path.unlink()
+        return None
     restored = state.get('restored_image') is True
     if restored:
         from autokom_ha_registry import run_docker
@@ -132,7 +135,7 @@ def discover_local_releases(root: Path = ROOT, queue: Path = QUEUE,
         if folder.is_symlink() or not folder.is_dir() or not UUID.fullmatch(folder.name):
             continue
         # Previous pending means local release/rollback transaction unfinished.
-        if (folder / 'previous.json').exists():
+        if (folder / 'previous.json').exists() or os.path.lexists(folder / 'preview-access.json'):
             continue
         file = folder / 'current.json'
         if file.is_symlink() or not file.is_file():
@@ -191,6 +194,8 @@ def scan(queue: Path = QUEUE, results: Path = RESULTS, root: Path = ROOT,
     for path in candidates:
         try:
             digest_ref = process_one(path, token=token, queue=queue, results=results, root=root)
+            if digest_ref is None:
+                continue
             print('AUTOKOM_HA_IMAGE_PUBLISHED ' + path.stem + ' digest=' + digest_ref.rsplit('@', 1)[-1][:19], flush=True)
             successes += 1
         except (QueueError, PromotionError, OSError, ValueError, RuntimeError) as exc:

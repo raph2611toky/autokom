@@ -1,0 +1,9 @@
+[Unit]
+Description=Reload only AUTOKOM WireGuard preview peers
+Requisite=autokom-preview-vpn.service
+After=autokom-preview-vpn.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/wg syncconf akpreview /etc/autokom-preview/peers.conf
+TimeoutStartSec=8

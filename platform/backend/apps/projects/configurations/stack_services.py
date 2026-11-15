@@ -342,6 +342,8 @@ def configure_stack(user, project_id, attrs):
             raise ValidationError({kind: 'Branche introuvable ou non autorisée.'})
     with transaction.atomic():
         project = type(project).objects.select_for_update().get(pk=project.pk)
+        if project.environments.filter(wireguard_only=True).exists():
+            raise ValidationError({'preview': 'Désactivez le mode WireGuard avant de configurer deux services.'})
         existing = ServiceStack.objects.select_for_update().filter(project=project).first()
         if existing:
             if existing.deployments.filter(status__in=['QUEUED', 'PREPARING', 'ACTIVATING', 'BLOCKED']).exists():

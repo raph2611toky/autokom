@@ -6,6 +6,8 @@ import { getRemoteProjectDetail, errorText } from '../services/projectWorkflow.j
 import { publicSiteUrl } from '../services/sitePresentation.js'
 import { cloudAvailability } from '../services/cloudAvailability.js'
 import ProjectPublicSite from '../components/ProjectPublicSite.jsx'
+import PreviewAccess from '../components/PreviewAccess.jsx'
+import { PLATFORM_PREPROD } from '../config/runtime.js'
 import ActionDialog from '../components/ActionDialog.jsx'
 
 /** User-facing settings. Destruction is confined to the bottom Danger Zone. */
@@ -71,6 +73,9 @@ export default function LiveProjectSettings({ navigate, projectId }) {
     {error && <p className="feedback error" role="alert">{error}</p>}
     {notice && <p className="feedback success" role="status">{notice}</p>}
     <ProjectPublicSite site={project.public_site} onManage={() => navigate(`/sites/${projectId}`)}/>
+    {project.status === 'ACTIVE' && !project.has_service_stack && (record.environments || [])
+      .filter(env => env.is_active !== false && (env.kind === 'STAGING' || (PLATFORM_PREPROD && env.slug === 'production')))
+      .map(env => <PreviewAccess key={env.id} projectId={projectId} environment={env}/>)}
     <section className="ak-workspace-sheet" aria-label="Disponibilité des applications GCP">
       <h2>Disponibilité et réplicas GCP</h2>
       <p>Option haute disponibilité · <strong>{availability.option}</strong></p>

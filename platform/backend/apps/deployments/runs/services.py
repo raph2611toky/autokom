@@ -31,7 +31,7 @@ def get_final_config(env):
 
 
 def effective_replicas(env, plan, cfg=None):
-    if cfg is None or not getattr(cfg, 'high_availability_requested', False):
+    if getattr(env, 'wireguard_only', False) or cfg is None or not getattr(cfg, 'high_availability_requested', False):
         return 1
     if getattr(settings, 'AUTOKOM_PLATFORM_PREPROD', False):
         raise DeploymentConflict('Le MIG de production ne peut pas être utilisé par cette instance de préproduction.')

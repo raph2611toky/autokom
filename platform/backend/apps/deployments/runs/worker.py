@@ -421,6 +421,7 @@ def _release_docker_and_proxy(run, *, stack=None, stack_role=None, restore=None)
     result=request_control('runtime.restore' if restore else 'runtime.deploy',{
         **({'restore': restore} if restore else {}),
         **stack_options,
+        **({'wireguard_only': True} if getattr(run.environment, 'wireguard_only', False) else {}),
         'run_id':str(run.pk),'environment_id':str(run.environment_id),
         'cpu_millicores':int(resource['cpu_millicores']),
         'memory_mb':int(resource['memory_mb']),'storage_mb':int(resource['storage_mb']),
@@ -466,10 +467,14 @@ def _release_docker_and_proxy(run, *, stack=None, stack_role=None, restore=None)
     if not Domain.objects.filter(environment=run.environment, domain_type=Domain.Type.SUBDOMAIN).exists():
         from apps.projects.project.services import reserve_domain
         reserve_domain(run.environment.project, run.environment)
-    add_log(run, 'AUTOKOM_TECH:health:Domaine public · vérification DNS, configuration Nginx et certificat HTTPS.', level='TECH')
+    private_preview = getattr(run.environment, 'wireguard_only', False)
+    add_log(run, ('AUTOKOM_TECH:health:Domaine WireGuard · vérification DNS, configuration Nginx et certificat HTTPS.'
+                  if private_preview else
+                  'AUTOKOM_TECH:health:Domaine public · vérification DNS, configuration Nginx et certificat HTTPS.'), level='TECH')
     add_customer_trace(run, 'health', 'broker', 'Vérification HTTPS et du reverse proxy en cours ; pas de basculement anticipé.')
     activate_managed_domains_for_release(run.environment)
-    add_log(run, 'AUTOKOM_TECH:health:Domaine public · DNS et HTTPS activés.', level='TECH')
+    add_log(run, ('AUTOKOM_TECH:health:Domaine WireGuard · HTTPS privé vérifié.' if private_preview else
+                  'AUTOKOM_TECH:health:Domaine public · DNS et HTTPS activés.'), level='TECH')
     add_customer_trace(run, 'health', 'broker', 'Réconciliation du domaine géré terminée : terminaison TLS et réponse HTTPS contrôlées.')
     domains=Domain.objects.filter(environment=run.environment,domain_type=Domain.Type.CUSTOM,verified_at__isnull=False,status__in=[Domain.Status.VERIFYING,Domain.Status.ACTIVE])
     for domain in domains:
